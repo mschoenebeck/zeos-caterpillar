@@ -144,9 +144,15 @@ impl JSWallet
         Ok(serde_json::to_string(&tx.unwrap()).unwrap())
     }
 
-    pub fn peers(&self) -> String
+    pub fn settings(&self, pretty: bool) -> String
     {
-        serde_json::to_string(&self.wallet.settings().peers).unwrap()
+        if pretty { serde_json::to_string_pretty(&self.wallet.settings()).unwrap() }
+        else { serde_json::to_string(&self.wallet.settings()).unwrap() }
+    }
+
+    pub fn update_settings(&mut self, settings_json: String)
+    {
+        self.wallet.update_settings(serde_json::from_str(&settings_json).unwrap());
     }
 
     pub fn balances(&self, pretty: bool) -> String
@@ -315,8 +321,9 @@ pub extern fn wallet_json(
 
 #[cfg(target_os = "linux")]
 #[no_mangle]
-pub extern fn wallet_peers_json(
-    p_wallet: *mut Wallet
+pub extern fn wallet_settings_json(
+    p_wallet: *mut Wallet,
+    pretty: bool
 ) -> *const libc::c_char
 {
     let wallet = unsafe {
@@ -324,9 +331,34 @@ pub extern fn wallet_peers_json(
         &mut *p_wallet
     };
 
-    let peers = serde_json::to_string(&wallet.settings().peers).unwrap();
-    let c_string = CString::new(peers).expect("CString::new failed");
+    let c_string = CString::new(
+        if pretty { serde_json::to_string_pretty(&wallet.settings()).unwrap() }
+        else { serde_json::to_string(&wallet.settings()).unwrap() }
+    ).expect("CString::new failed");
     c_string.into_raw() // Move ownership to C
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern fn wallet_update_settings(
+    p_wallet: *mut Wallet,
+    settings_json: *const libc::c_char
+)
+{
+    let wallet = unsafe {
+        assert!(!p_wallet.is_null());
+        &mut *p_wallet
+    };
+
+    let settings_json_str: &str = match std::ffi::CStr::from_ptr(settings_json).to_str() {
+        Ok(s) => s,
+        Err(_e) => {
+            println!("FFI seed string conversion failed");
+            "FFI seed string conversion failed"
+        }
+    };
+
+    wallet.update_settings(serde_json::from_str(settings_json_str).unwrap());
 }
 
 #[cfg(target_os = "linux")]

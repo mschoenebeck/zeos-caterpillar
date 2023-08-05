@@ -124,7 +124,8 @@ pub struct Settings
 
     pub protocol_contract: Name,
     pub alias_authority: Authorization,
-    pub fee_token_symbol: Symbol
+    pub fee_token_symbol: Symbol,
+    pub fee_table: HashMap<Name, i64>,
 }
 
 impl Settings
@@ -151,6 +152,13 @@ impl Settings
         writer.write_u64::<LittleEndian>(self.alias_authority.actor.raw())?;
         writer.write_u64::<LittleEndian>(self.alias_authority.permission.raw())?;
         writer.write_u64::<LittleEndian>(self.fee_token_symbol.raw())?;
+
+        writer.write_u8(self.fee_table.len() as u8)?;
+        for (fee, amount) in self.fee_table.iter()
+        {
+            writer.write_u64::<LittleEndian>(fee.raw())?;
+            writer.write_i64::<LittleEndian>(*amount)?;
+        }
 
         Ok(())
     }
@@ -184,13 +192,23 @@ impl Settings
         let alias_authority = Authorization{ actor: alias_actor, permission: alias_permission };
         let fee_token_symbol = Symbol::new(reader.read_u64::<LittleEndian>()?);
 
+        let fee_table_len = reader.read_u8()?;
+        let mut fee_table = HashMap::new();
+        for _ in 0..fee_table_len
+        {
+            let fee = Name::new(reader.read_u64::<LittleEndian>()?);
+            let amount = reader.read_i64::<LittleEndian>()?;
+            fee_table.insert(fee, amount);
+        }
+
         Ok(Settings {
             peers,
             ft_symbols,
             nft_contract,
             protocol_contract,
             alias_authority,
-            fee_token_symbol
+            fee_token_symbol,
+            fee_table
         })
     }
 
@@ -209,7 +227,9 @@ impl Settings
         8 +
         8 +
         16 +
-        8
+        8 +
+        1 +
+        self.fee_table.len() * (8 + 8)
     }
 }
 
@@ -229,7 +249,12 @@ impl Default for Settings
             nft_contract: Name::from_string(&"atomicassets".to_string()).unwrap(),
             protocol_contract: Name::from_string(&"zeos4privacy".to_string()).unwrap(),
             alias_authority: Authorization { actor: Name::from_string(&"thezeosalias".to_string()).unwrap(), permission: Name::from_string(&"public".to_string()).unwrap() },
-            fee_token_symbol: Symbol::from_string(&"4,ZEOS".to_string()).unwrap()
+            fee_token_symbol: Symbol::from_string(&"4,ZEOS".to_string()).unwrap(),
+            fee_table: HashMap::from([
+                (Name::from_string(&"begin".to_string()).unwrap(), 50000),
+                (Name::from_string(&"mint".to_string()).unwrap(), 10000),
+                (Name::from_string(&"spend".to_string()).unwrap(), 10000)
+            ])
         }
     }
 }
@@ -478,6 +503,11 @@ impl Wallet
     pub fn settings(&self) -> &Settings
     {
         &self.settings
+    }
+
+    pub fn update_settings(&mut self, settings: Settings)
+    {
+        self.settings = settings;
     }
 
     // desc format: <(+/- | i/o | in/out)> <asset> [<memo>]
@@ -760,7 +790,7 @@ impl Wallet
         }
 
         // calculate fee for this sequence of spend actions (excluding the notes of fee symbol to be spend)
-        let fee_amount = initial_fee_amount + spend_actions.len() as i64 * 10000;
+        let fee_amount = initial_fee_amount + spend_actions.len() as i64 * *self.settings.fee_table.get(&Name::from_string(&"spend".to_string()).unwrap()).unwrap();
 
         // no assets of fee token symbol are to be 'transferred' or 'burned' => spend only transaction fee
         if add_fee && !assets_to_transfer.contains_key(&self.settings.fee_token_symbol) && !assets_to_burn.contains_key(&self.settings.fee_token_symbol)
@@ -786,7 +816,7 @@ impl Wallet
         }
 
         // calculate final fee amount for return value
-        let final_fee_amount = initial_fee_amount + spend_actions.len() as i64 * 10000;
+        let final_fee_amount = initial_fee_amount + spend_actions.len() as i64 * *self.settings.fee_table.get(&Name::from_string(&"spend".to_string()).unwrap()).unwrap();
 
         Some((spend_actions, final_fee_amount))
     }
@@ -820,7 +850,7 @@ impl Wallet
         // as long as the list of sets is ordered from small sets to large sets, the first combination found is (one of) the cheapest
         for set in sets_sym
         {
-            let final_fee_amount = inital_fee_amount + set.len() as i64 * 10000;
+            let final_fee_amount = inital_fee_amount + set.len() as i64 * *self.settings.fee_table.get(&Name::from_string(&"spend".to_string()).unwrap()).unwrap();
 
             let seq = self.find_combination(
                 rng,
@@ -1600,7 +1630,13 @@ impl Wallet
         // process BURN actions
         if !assets_to_burn.is_empty()
         {
-            let spend_actions = self.spend_notes(rng, &mut HashMap::new(), &mut assets_to_burn, true, 50000);
+            let spend_actions = self.spend_notes(
+                rng,
+                &mut HashMap::new(),
+                &mut assets_to_burn,
+                true,
+                *self.settings.fee_table.get(&Name::from_string(&"begin".to_string()).unwrap()).unwrap()
+            );
             if spend_actions.is_none() { log("requested transaction impossible"); return None; }
             let (spend_actions, _) = spend_actions.unwrap();
             //println!("{:?}", spend_actions);
@@ -1764,7 +1800,13 @@ impl Wallet
             if address.is_none() && account.is_none() { log("transfer desc invalid [address/account]:"); log(&receiver); return None; } // must be either one or the other
         }
 
-        let spend_actions = self.spend_notes(rng, &mut assets_to_transfer, &mut assets_to_burn, true, 50000);
+        let spend_actions = self.spend_notes(
+            rng,
+            &mut assets_to_transfer,
+            &mut assets_to_burn,
+            true,
+            *self.settings.fee_table.get(&Name::from_string(&"begin".to_string()).unwrap()).unwrap()
+        );
         if spend_actions.is_none() { log("requested transaction impossible"); return None; }
         let (spend_actions, _) = spend_actions.unwrap();
         //println!("{:?}", spend_actions);
