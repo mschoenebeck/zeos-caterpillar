@@ -1598,107 +1598,110 @@ impl Wallet
         }
 
         // process BURN actions
-        let spend_actions = self.spend_notes(rng, &mut HashMap::new(), &mut assets_to_burn, true, 50000);
-        if spend_actions.is_none() { log("requested transaction impossible"); return None; }
-        let (spend_actions, _) = spend_actions.unwrap();
-        //println!("{:?}", spend_actions);
-
-        let sk = SpendingKey::from_seed(&self.seed);
-        let fvk = FullViewingKey::from_spending_key(&sk);
-        let mut burn_notes_to_mint = vec![];
-        let mut pls_burn_vec = vec![];
-
-        for sa in spend_actions
+        if !assets_to_burn.is_empty()
         {
-            if 'T' == sa.kind
+            let spend_actions = self.spend_notes(rng, &mut HashMap::new(), &mut assets_to_burn, true, 50000);
+            if spend_actions.is_none() { log("requested transaction impossible"); return None; }
+            let (spend_actions, _) = spend_actions.unwrap();
+            //println!("{:?}", spend_actions);
+
+            let sk = SpendingKey::from_seed(&self.seed);
+            let fvk = FullViewingKey::from_spending_key(&sk);
+            let mut burn_notes_to_mint = vec![];
+            let mut pls_burn_vec = vec![];
+
+            for sa in spend_actions
             {
-                // transfer case cannot occur
+                if 'T' == sa.kind
+                {
+                    // transfer case cannot occur
+                }
+                else if 'B' == sa.kind
+                {
+                    // create proof
+                    let (sister_path, root) = self.get_sister_path_and_root(&sa.note_a).unwrap();
+                    let circuit_instance = Burn {
+                        note_a: Some(sa.note_a.note.clone()),
+                        proof_generation_key: Some(sk.proof_generation_key()),
+                        auth_path: sister_path,
+                        value_b: Some(sa.note_b.amount()),
+                        account_b: Some(sa.account_b.raw()),
+                        value_c: Some(sa.note_c.amount()),
+                        account_c: Some(sa.account_c.raw()),
+                        value_d: Some(sa.note_d.amount()),
+                        address_d: Some(sa.note_d.address()),
+                        rcm_d: Some(sa.note_d.rcm()),
+                    };
+                    let proof = create_random_proof(circuit_instance, &burn_params, rng).unwrap();
+                    let nf: ExtractedNullifier = sa.note_a.note.nullifier(&fvk.nk, sa.note_a.position()).into();
+
+                    pls_burn_vec.push(PlsBurn{
+                        root,
+                        nf: ScalarBytes(nf.to_bytes()),
+                        cm_d: ScalarBytes(sa.note_d.commitment().to_bytes()),
+                        value_b: sa.note_b.amount(),
+                        symbol: sa.note_b.symbol().clone(),
+                        code: sa.note_b.code().clone(),
+                        account_b: sa.account_b.clone(),
+                        memo_b: sa.memo_b.clone(),
+                        amount_c: sa.note_c.amount(),
+                        account_c: sa.account_c.clone(),
+                        memo_c: sa.memo_c.clone(),
+                        proof: AffineProofBytes::from(proof)
+                    });
+
+                    burn_notes_to_mint.push(sa.note_b);
+                    burn_notes_to_mint.push(sa.note_c);
+                    burn_notes_to_mint.push(sa.note_d);
+                }
             }
-            else if 'B' == sa.kind
-            {
-                // create proof
-                let (sister_path, root) = self.get_sister_path_and_root(&sa.note_a).unwrap();
-                let circuit_instance = Burn {
-                    note_a: Some(sa.note_a.note.clone()),
-                    proof_generation_key: Some(sk.proof_generation_key()),
-                    auth_path: sister_path,
-                    value_b: Some(sa.note_b.amount()),
-                    account_b: Some(sa.account_b.raw()),
-                    value_c: Some(sa.note_c.amount()),
-                    account_c: Some(sa.account_c.raw()),
-                    value_d: Some(sa.note_d.amount()),
-                    address_d: Some(sa.note_d.address()),
-                    rcm_d: Some(sa.note_d.rcm()),
-                };
-                let proof = create_random_proof(circuit_instance, &burn_params, rng).unwrap();
-                let nf: ExtractedNullifier = sa.note_a.note.nullifier(&fvk.nk, sa.note_a.position()).into();
 
-                pls_burn_vec.push(PlsBurn{
-                    root,
-                    nf: ScalarBytes(nf.to_bytes()),
-                    cm_d: ScalarBytes(sa.note_d.commitment().to_bytes()),
-                    value_b: sa.note_b.amount(),
-                    symbol: sa.note_b.symbol().clone(),
-                    code: sa.note_b.code().clone(),
-                    account_b: sa.account_b.clone(),
-                    memo_b: sa.memo_b.clone(),
-                    amount_c: sa.note_c.amount(),
-                    account_c: sa.account_c.clone(),
-                    memo_c: sa.memo_c.clone(),
-                    proof: AffineProofBytes::from(proof)
-                });
+            let mut note_ct_burn = vec![];
 
-                burn_notes_to_mint.push(sa.note_b);
-                burn_notes_to_mint.push(sa.note_c);
-                burn_notes_to_mint.push(sa.note_d);
-            }
-        }
-
-        let mut note_ct_burn = vec![];
-
-        // add 'begin' action
-        transaction.actions.push(Action {
-            account: self.settings.alias_authority.actor.clone(),
-            name: Name::from_string(&format!("begin")).unwrap(),
-            authorization: vec![self.settings.alias_authority.clone()],
-            data: json!({})
-        });
-
-        // encrypt burn notes to mint
-        for note in burn_notes_to_mint
-        {
-            let esk = derive_esk(&note).unwrap();
-            let epk = ka_derive_public(&note, &esk);
-            let ne = NoteEncryption::new(Some(fvk.ovk), note.clone());
-            let encrypted_note = TransmittedNoteCiphertext {
-                epk_bytes: epk.to_bytes().0,
-                enc_ciphertext: ne.encrypt_note_plaintext(),
-                out_ciphertext: ne.encrypt_outgoing_plaintext(rng),
-            };
-            note_ct_burn.push(encrypted_note.to_base64());
-        }
-
-        // add 'burn' action
-        if !pls_burn_vec.is_empty()
-        {
+            // add 'begin' action
             transaction.actions.push(Action {
                 account: self.settings.alias_authority.actor.clone(),
-                name: Name::from_string(&format!("burn")).unwrap(),
+                name: Name::from_string(&format!("begin")).unwrap(),
                 authorization: vec![self.settings.alias_authority.clone()],
-                data: PlsBurnAction{
-                    actions: pls_burn_vec,
-                    note_ct: note_ct_burn
-                }.into()
+                data: json!({})
+            });
+
+            // encrypt burn notes to mint
+            for note in burn_notes_to_mint
+            {
+                let esk = derive_esk(&note).unwrap();
+                let epk = ka_derive_public(&note, &esk);
+                let ne = NoteEncryption::new(Some(fvk.ovk), note.clone());
+                let encrypted_note = TransmittedNoteCiphertext {
+                    epk_bytes: epk.to_bytes().0,
+                    enc_ciphertext: ne.encrypt_note_plaintext(),
+                    out_ciphertext: ne.encrypt_outgoing_plaintext(rng),
+                };
+                note_ct_burn.push(encrypted_note.to_base64());
+            }
+
+            // add 'burn' action
+            if !pls_burn_vec.is_empty()
+            {
+                transaction.actions.push(Action {
+                    account: self.settings.alias_authority.actor.clone(),
+                    name: Name::from_string(&format!("burn")).unwrap(),
+                    authorization: vec![self.settings.alias_authority.clone()],
+                    data: PlsBurnAction{
+                        actions: pls_burn_vec,
+                        note_ct: note_ct_burn
+                    }.into()
+                });
+            }
+
+            // add 'end' action
+            transaction.actions.push(Action {
+                account: self.settings.alias_authority.actor.clone(),
+                name: Name::from_string(&format!("end")).unwrap(),
+                authorization: vec![self.settings.alias_authority.clone()],
+                data: json!({})
             });
         }
-
-        // add 'end' action
-        transaction.actions.push(Action {
-            account: self.settings.alias_authority.actor.clone(),
-            name: Name::from_string(&format!("end")).unwrap(),
-            authorization: vec![self.settings.alias_authority.clone()],
-            data: json!({})
-        });
 
         Some(transaction)
     }
