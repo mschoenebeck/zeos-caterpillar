@@ -1405,8 +1405,7 @@ impl Wallet
 
         let mut fts_to_mint = vec![];
         let mut nfts_to_mint = vec![];
-        let mut fts_to_burn = vec![];
-        let mut nfts_to_burn = vec![];
+        let mut assets_to_burn: HashMap<Symbol, Vec<(Asset, Name, String)>> = HashMap::new();
 
         // process action descriptors
         for desc in descs
@@ -1429,14 +1428,14 @@ impl Wallet
             }
             else
             {
-                if asset.is_nft()
+                if !asset.is_nft() && asset.amount() <= 0 { log("move desc invalid [asset amount]:"); log(&asset.to_string()); return None; }
+                if assets_to_burn.contains_key(asset.symbol())
                 {
-                    nfts_to_burn.push((asset, memo));
+                    assets_to_burn.get_mut(asset.symbol()).unwrap().push((asset.clone(), auth.actor.clone(), memo.clone()));
                 }
                 else
                 {
-                    if asset.amount() <= 0 { log("move desc invalid [asset amount]:"); log(&asset.to_string()); return None; }
-                    fts_to_burn.push((asset, memo));
+                    assets_to_burn.insert(asset.symbol().clone(), vec![(asset.clone(), auth.actor.clone(), memo.clone())]);
                 }
             }
         }
@@ -1599,152 +1598,74 @@ impl Wallet
         }
 
         // process BURN actions
-        let mut unspent_notes = self.unspent_notes.clone();
-        let mut notes_to_mint = vec![];
+        let spend_actions = self.spend_notes(rng, &mut HashMap::new(), &mut assets_to_burn, true, 50000);
+        if spend_actions.is_none() { log("requested transaction impossible"); return None; }
+        let (spend_actions, _) = spend_actions.unwrap();
+        //println!("{:?}", spend_actions);
+
+        let sk = SpendingKey::from_seed(&self.seed);
+        let fvk = FullViewingKey::from_spending_key(&sk);
+        let mut burn_notes_to_mint = vec![];
         let mut pls_burn_vec = vec![];
 
-        // process fungible tokens to burn
-        for (asset, memo) in fts_to_burn
+        for sa in spend_actions
         {
-            let note_selection = self.select_notes(&mut unspent_notes, &asset);
-            if note_selection.is_none() { log("note selection error [FT burn]:"); log(&asset.to_string()); return None; }
-            let (notes_to_spend, change) = note_selection.unwrap();
-
-            for i in 0..notes_to_spend.len()
+            if 'T' == sa.kind
             {
-                let nf = notes_to_spend[i].note.nullifier(&fvk.nk, notes_to_spend[i].position()).into();
-                let note_b = Note::from_parts(
-                    1 << 63, // set burn flag
-                    Address::dummy(rng),
-                    Asset::new(
-                        if i == notes_to_spend.len()-1 {
-                            notes_to_spend[i].note.amount() - change
-                        } else {
-                            notes_to_spend[i].note.amount()
-                        } as i64,
-                        notes_to_spend[i].note.symbol().clone()
-                    ).unwrap(),
-                    notes_to_spend[i].note.code().clone(),
-                    Rseed::new(rng),
-                    nf,
-                    [0; 512]
-                );
-                let note_d = Note::from_parts(
-                    0,
-                    if i == notes_to_spend.len()-1 && change > 0 {
-                        notes_to_spend[i].note.address()
-                    } else {
-                        Address::dummy(rng) // send the zero notes to dummy addresses
-                    },
-                    Asset::new(
-                        if i == notes_to_spend.len()-1 {
-                            change
-                        } else {
-                            0
-                        } as i64,
-                        notes_to_spend[i].note.symbol().clone()
-                    ).unwrap(),
-                    notes_to_spend[i].note.code().clone(),
-                    Rseed::new(rng),
-                    nf,
-                    [0; 512]
-                );
-
+                // transfer case cannot occur
+            }
+            else if 'B' == sa.kind
+            {
                 // create proof
-                let (sister_path, root) = self.get_sister_path_and_root(&notes_to_spend[i]).unwrap();
+                let (sister_path, root) = self.get_sister_path_and_root(&sa.note_a).unwrap();
                 let circuit_instance = Burn {
-                    note_a: Some(notes_to_spend[i].note.clone()),
+                    note_a: Some(sa.note_a.note.clone()),
                     proof_generation_key: Some(sk.proof_generation_key()),
                     auth_path: sister_path,
-                    value_b: Some(note_b.amount()),
-                    account_b: Some(auth.actor.raw()),
-                    value_c: Some(0),
-                    account_c: Some(0),
-                    value_d: Some(note_d.amount()),
-                    address_d: Some(note_d.address()),
-                    rcm_d: Some(note_d.rcm()),
+                    value_b: Some(sa.note_b.amount()),
+                    account_b: Some(sa.account_b.raw()),
+                    value_c: Some(sa.note_c.amount()),
+                    account_c: Some(sa.account_c.raw()),
+                    value_d: Some(sa.note_d.amount()),
+                    address_d: Some(sa.note_d.address()),
+                    rcm_d: Some(sa.note_d.rcm()),
                 };
                 let proof = create_random_proof(circuit_instance, &burn_params, rng).unwrap();
+                let nf: ExtractedNullifier = sa.note_a.note.nullifier(&fvk.nk, sa.note_a.position()).into();
 
                 pls_burn_vec.push(PlsBurn{
                     root,
                     nf: ScalarBytes(nf.to_bytes()),
-                    cm_d: ScalarBytes(note_d.commitment().to_bytes()),
-                    value_b: note_b.amount(),
-                    symbol: note_b.symbol().clone(),
-                    code: note_b.code().clone(),
-                    account_b: auth.actor.clone(),
-                    memo_b: memo.clone(),
-                    amount_c: 0,
-                    account_c: Name::new(0),
-                    memo_c: "".to_string(),
+                    cm_d: ScalarBytes(sa.note_d.commitment().to_bytes()),
+                    value_b: sa.note_b.amount(),
+                    symbol: sa.note_b.symbol().clone(),
+                    code: sa.note_b.code().clone(),
+                    account_b: sa.account_b.clone(),
+                    memo_b: sa.memo_b.clone(),
+                    amount_c: sa.note_c.amount(),
+                    account_c: sa.account_c.clone(),
+                    memo_c: sa.memo_c.clone(),
                     proof: AffineProofBytes::from(proof)
                 });
 
-                notes_to_mint.push(note_b);
-                notes_to_mint.push(note_d);
+                burn_notes_to_mint.push(sa.note_b);
+                burn_notes_to_mint.push(sa.note_c);
+                burn_notes_to_mint.push(sa.note_d);
             }
-        }
-
-        // process non-fungible tokens to burn
-        for (asset, memo) in nfts_to_burn
-        {
-            let note_selection = self.select_notes(&mut unspent_notes, &asset);
-            if note_selection.is_none() { log("note selection error [NFT burn]:"); log(&asset.to_string()); return None; }
-            let (notes_to_spend, _) = note_selection.unwrap();
-            assert!(notes_to_spend.len() == 1); // there can only be one NFT of it's type
-            let note_a = &notes_to_spend[0];
-
-            let nf = note_a.note.nullifier(&fvk.nk, note_a.position()).into();
-            let note_b = Note::from_parts(
-                1 << 63, // set burn flag
-                Address::dummy(rng),
-                note_a.note.asset().clone(),
-                note_a.note.code().clone(),
-                Rseed::new(rng),
-                nf,
-                [0; 512]
-            );
-            let note_d = Note::dummy(rng, Some(nf), Asset::new(0, Symbol::new(0)), Some(note_a.note.code().clone())).2;
-
-            // create proof
-            let (sister_path, root) = self.get_sister_path_and_root(&note_a).unwrap();
-            let circuit_instance = Burn {
-                note_a: Some(note_a.note.clone()),
-                proof_generation_key: Some(sk.proof_generation_key()),
-                auth_path: sister_path,
-                value_b: Some(note_b.amount()),
-                account_b: Some(auth.actor.raw()),
-                value_c: Some(0),
-                account_c: Some(0),
-                value_d: Some(note_d.amount()),
-                address_d: Some(note_d.address()),
-                rcm_d: Some(note_d.rcm()),
-            };
-            let proof = create_random_proof(circuit_instance, &burn_params, rng).unwrap();
-
-            pls_burn_vec.push(PlsBurn{
-                root,
-                nf: ScalarBytes(nf.to_bytes()),
-                cm_d: ScalarBytes(note_d.commitment().to_bytes()),
-                value_b: note_b.amount(),
-                symbol: note_b.symbol().clone(),
-                code: note_b.code().clone(),
-                account_b: auth.actor.clone(),
-                memo_b: memo.clone(),
-                amount_c: 0,
-                account_c: Name::new(0),
-                memo_c: "".to_string(),
-                proof: AffineProofBytes::from(proof)
-            });
-
-            notes_to_mint.push(note_b);
         }
 
         let mut note_ct_burn = vec![];
 
-        // encrypt notes to mint
-        for note in notes_to_mint
+        // add 'begin' action
+        transaction.actions.push(Action {
+            account: self.settings.alias_authority.actor.clone(),
+            name: Name::from_string(&format!("begin")).unwrap(),
+            authorization: vec![self.settings.alias_authority.clone()],
+            data: json!({})
+        });
+
+        // encrypt burn notes to mint
+        for note in burn_notes_to_mint
         {
             let esk = derive_esk(&note).unwrap();
             let epk = ka_derive_public(&note, &esk);
@@ -1761,15 +1682,23 @@ impl Wallet
         if !pls_burn_vec.is_empty()
         {
             transaction.actions.push(Action {
-                account: self.settings.protocol_contract.clone(),
+                account: self.settings.alias_authority.actor.clone(),
                 name: Name::from_string(&format!("burn")).unwrap(),
-                authorization: vec![auth.clone()],
+                authorization: vec![self.settings.alias_authority.clone()],
                 data: PlsBurnAction{
                     actions: pls_burn_vec,
                     note_ct: note_ct_burn
                 }.into()
             });
         }
+
+        // add 'end' action
+        transaction.actions.push(Action {
+            account: self.settings.alias_authority.actor.clone(),
+            name: Name::from_string(&format!("end")).unwrap(),
+            authorization: vec![self.settings.alias_authority.clone()],
+            data: json!({})
+        });
 
         Some(transaction)
     }
@@ -2150,51 +2079,6 @@ impl Wallet
         self.block_num = block_num;
 
         notes_found
-    }
-
-    /// Very simple note selection algorithm: walk through all notes and pick notes of the demanded type until the sum
-    /// is equal or greater than the requested 'amount'. Returns tuple of vector of notes to be spent and the change that
-    /// is left over from the last note. Returns 'None' if there are not enough notes to reach 'amount'.
-    fn select_notes(&self, notes: &mut Vec<NoteEx>, asset: &Asset) -> Option<(Vec<NoteEx>, u64)>
-    {
-        let mut code = &self.settings.nft_contract;
-        if !asset.is_nft()
-        {
-            let ft_code = self.settings.ft_symbols.get(&asset.symbol().code());
-            if ft_code.is_none() { log("symbol code invalid [select notes]:"); log(&asset.symbol().to_string()); return None; }
-            code = &ft_code.unwrap().0;
-        }
-        // sort 'notes' by note amount, ascending order and walk backwards through them in order to be able to safely remove elements
-        notes.sort_by(|a, b| a.note.amount().cmp(&b.note.amount()));
-        let mut res = Vec::new();
-        let mut sum = 0;
-        for i in (0..notes.len()).rev()
-        {
-            if code.eq(notes[i].note.code()) &&             // same contract
-                asset.symbol().eq(notes[i].note.symbol())   // same symbol
-                // TODO:                                    // filter out AUTH TOKEN
-            {
-                if asset.is_nft() && asset.amount() as u64 == notes[i].note.amount()
-                {
-                    // found NFT
-                    res.push(notes.remove(i));
-                    return Some((res, 0));
-                }
-                sum += notes[i].note.amount() as u64;
-                res.push(notes.remove(i));
-                if sum >= asset.amount() as u64
-                {
-                    // collected enough fungible notes, return notes & change amount
-                    return Some((res, sum - asset.amount() as u64));
-                }
-            }
-        }
-        // Not enough notes! Move picked notes in 'res' back to 'notes' and return 'None'.
-        notes.append(&mut res);
-
-        log("insufficient notes [select notes]:");
-        log(&asset.to_string());
-        None
     }
 
     fn find_nft(&self, notes: &mut Vec<NoteEx>, asset: &Asset) -> Option<NoteEx>
