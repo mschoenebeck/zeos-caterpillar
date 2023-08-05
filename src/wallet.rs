@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 use lazy_static::lazy_static;
 use serde::{Serialize, Deserialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use rand_core::RngCore;
 use crate::{
     address::Address,
@@ -19,7 +19,7 @@ use crate::{
     keys::{IncomingViewingKey, SpendingKey, FullViewingKey, PreparedIncomingViewingKey},
     note::{Note, Rseed, nullifier::ExtractedNullifier},
     note_encryption::{derive_esk, ka_derive_public, try_note_decryption, try_output_recovery_with_ovk, NoteEncryption, TransmittedNoteCiphertext},
-    log, clog,
+    log
 };
 
 // helper macros for merkle tree operations
@@ -120,7 +120,11 @@ pub struct Settings
     // maps symbol code (=key) to (contract code, symbol precision) tuple (=value) of known fungible token contracts
     pub ft_symbols: HashMap<SymbolCode, (Name, u8)>,
     // the NFT contract account
-    pub nft_contract: Name
+    pub nft_contract: Name,
+
+    pub protocol_contract: Name,
+    pub alias_authority: Authorization,
+    pub fee_token_symbol: Symbol
 }
 
 impl Settings
@@ -143,6 +147,10 @@ impl Settings
         }
 
         writer.write_u64::<LittleEndian>(self.nft_contract.raw())?;
+        writer.write_u64::<LittleEndian>(self.protocol_contract.raw())?;
+        writer.write_u64::<LittleEndian>(self.alias_authority.actor.raw())?;
+        writer.write_u64::<LittleEndian>(self.alias_authority.permission.raw())?;
+        writer.write_u64::<LittleEndian>(self.fee_token_symbol.raw())?;
 
         Ok(())
     }
@@ -170,11 +178,19 @@ impl Settings
         }
 
         let nft_contract = Name::new(reader.read_u64::<LittleEndian>()?);
+        let protocol_contract = Name::new(reader.read_u64::<LittleEndian>()?);
+        let alias_actor = Name::new(reader.read_u64::<LittleEndian>()?);
+        let alias_permission = Name::new(reader.read_u64::<LittleEndian>()?);
+        let alias_authority = Authorization{ actor: alias_actor, permission: alias_permission };
+        let fee_token_symbol = Symbol::new(reader.read_u64::<LittleEndian>()?);
 
         Ok(Settings {
             peers,
             ft_symbols,
-            nft_contract
+            nft_contract,
+            protocol_contract,
+            alias_authority,
+            fee_token_symbol
         })
     }
 
@@ -190,6 +206,9 @@ impl Settings
         nb +
         1 +
         self.ft_symbols.len() * (8 + 8 + 1) +
+        8 +
+        8 +
+        16 +
         8
     }
 }
@@ -200,13 +219,17 @@ impl Default for Settings
     {
         Settings{
             peers: vec![
+                "http://localhost:8888".to_string(),
                 "http://api.eostitan.com".to_string()
             ],
             ft_symbols: HashMap::from([
                 (SymbolCode::from_string(&"EOS".to_string()).unwrap(), (Name::from_string(&"eosio.token".to_string()).unwrap(), 4)),
                 (SymbolCode::from_string(&"ZEOS".to_string()).unwrap(), (Name::from_string(&"thezeostoken".to_string()).unwrap(), 4)),
             ]),
-            nft_contract: Name::from_string(&"atomicassets".to_string()).unwrap()
+            nft_contract: Name::from_string(&"atomicassets".to_string()).unwrap(),
+            protocol_contract: Name::from_string(&"zeoscontract".to_string()).unwrap(),
+            alias_authority: Authorization { actor: Name::from_string(&"thezeosproxy".to_string()).unwrap(), permission: Name::from_string(&"public".to_string()).unwrap() },
+            fee_token_symbol: Symbol::from_string(&"4,ZEOS".to_string()).unwrap()
         }
     }
 }
@@ -218,7 +241,6 @@ pub struct Wallet
     seed: Vec<u8>,
     ivk: IncomingViewingKey, // READ-ONLY WALLET: only valid if seed == ""
     diversifiers: Vec<u64>,
-    privacy_account: Authorization,
     
     // contract global data
     block_num: u32,
@@ -236,6 +258,21 @@ pub struct Wallet
     merkle_tree: HashMap<u64, ScalarBytes>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct SpendAction
+{
+    kind: char, // either 'T' (transfer) or 'B' (burn)
+    note_a: NoteEx,
+    note_b: Note,
+    note_c: Note,
+    note_d: Note,
+    account_b: Name,
+    account_c: Name,
+    memo_b: String,
+    memo_c: String
+}
+
+
 
 // TODO: add_notes(note_ct: [String])
 
@@ -243,24 +280,15 @@ impl Wallet
 {
     pub fn create(
         seed: &[u8],
-        is_ivk: bool,
-        authorization: &String
+        is_ivk: bool
     ) -> Option<Self>
     {
-        if is_ivk { if seed.len() != 64 { clog("ivk seed length must equal 64 bytes"); return None; } }
-        else      { if seed.len() < 32  { clog("seed length must equal at least 32 bytes"); return None; } }
-
-        let auth = if is_ivk {
-            Authorization{ actor: Name::new(0), permission: Name::new(0) }
-        } else {
-            let auth = Authorization::from_string(&authorization);
-            if auth.is_none() { clog("authorization string invalid"); return None; }
-            auth.unwrap()
-        };
+        if is_ivk { if seed.len() != 64 { log("ivk seed length must equal 64 bytes"); return None; } }
+        else      { if seed.len() < 32  { log("seed length must equal at least 32 bytes"); return None; } }
 
         let ivk = if is_ivk {
             let ivk = IncomingViewingKey::from_bytes(&seed.try_into().unwrap());
-            if ivk.is_none().into() { clog("ivk invalid"); return None; }
+            if ivk.is_none().into() { log("ivk invalid"); return None; }
             ivk.unwrap()
         } else {
             FullViewingKey::from_spending_key(&SpendingKey::from_seed(seed)).ivk()
@@ -276,7 +304,6 @@ impl Wallet
             seed: seed.to_vec(),
             ivk,
             diversifiers,
-            privacy_account: auth,
             block_num: 0,
             leaf_count: 0,
             settings: Default::default(),
@@ -297,8 +324,6 @@ impl Wallet
         {
             writer.write_u64::<LittleEndian>(*d)?;
         }
-        writer.write_u64::<LittleEndian>(self.privacy_account.actor.raw())?;
-        writer.write_u64::<LittleEndian>(self.privacy_account.permission.raw())?;
         writer.write_u32::<LittleEndian>(self.block_num)?;
         writer.write_u64::<LittleEndian>(self.leaf_count)?;
         self.settings.write(&mut writer)?;
@@ -352,8 +377,6 @@ impl Wallet
             diversifiers.push(d);
         }
 
-        let actor = Name::new(reader.read_u64::<LittleEndian>()?);
-        let permission = Name::new(reader.read_u64::<LittleEndian>()?);
         let block_num = reader.read_u32::<LittleEndian>()?;
         let leaf_count = reader.read_u64::<LittleEndian>()?;
         let settings = Settings::read(&mut reader)?;
@@ -388,7 +411,6 @@ impl Wallet
             seed,
             ivk,
             diversifiers,
-            privacy_account: Authorization { actor, permission },
             block_num,
             leaf_count: 0,
             settings,
@@ -426,7 +448,6 @@ impl Wallet
         64 +                                // Incoming Viewing Key
         4 +                                 // diversifiers.len()
         self.diversifiers.len() * 8 +
-        16 +                                // EOS Authority (actor & permission)
         4 +                                 // latest block number
         8 +                                 // leaf count
         self.settings.size() +
@@ -454,6 +475,11 @@ impl Wallet
         self.leaf_count
     }
 
+    pub fn settings(&self) -> &Settings
+    {
+        &self.settings
+    }
+
     // desc format: <(+/- | i/o | in/out)> <asset> [<memo>]
     // examples:
     //      + 10 EOS "this is an optional memo"
@@ -467,7 +493,7 @@ impl Wallet
     fn process_move_desc(&self, desc: &String) -> Option<(bool, Asset, String)>
     {
         // the minimum desc length is 3 (in case of mint/burn NFT with single digit ID: "+ 1")
-        if desc.len() < 3 { clog("desc invalid:"); log(&desc); return None; }
+        if desc.len() < 3 { log("desc invalid:"); log(&desc); return None; }
 
         // extract the memo first, so we can split the remaining string by spaces
         let mut desc = desc.clone();
@@ -477,7 +503,7 @@ impl Wallet
         // process "in/out" part
         let is_mint = parts[0].eq("+") || parts[0].eq("i") || parts[0].eq("in");
         if !is_mint && !(parts[0].eq("-") || parts[0].eq("o") || parts[0].eq("out"))
-        { clog("desc invalid [in/out part]:"); log(&parts[0]); return None; }
+        { log("desc invalid [in/out part]:"); log(&parts[0]); return None; }
 
         // process asset part
         if parts.len() == 2 // NFT
@@ -509,7 +535,7 @@ impl Wallet
     fn process_transfer_desc(&self, desc: &String) -> Option<(Asset, String, String)>
     {
         // the minimum desc length is 3 (in case of burn NFT with single digit ID to an EOS account with just one letter): "1 a")
-        if desc.len() < 3 { clog("desc invalid:"); log(&desc); return None; }
+        if desc.len() < 3 { log("desc invalid:"); log(&desc); return None; }
 
         // extract the memo first, so we can split the remaining string by spaces
         let mut desc = desc.clone();
@@ -520,14 +546,14 @@ impl Wallet
         if parts.len() == 2 // NFT
         {
             let asset = Asset::from_string(&parts[0]);
-            if asset.is_none() { clog("desc invalid [NFT asset]:"); log(&parts[0]); return None; }
+            if asset.is_none() { log("desc invalid [NFT asset]:"); log(&parts[0]); return None; }
             return Some((asset.unwrap(), parts[1].clone(), memo));
         }
         if parts.len() == 3 // FT
         {
             let asset_str = parts[0].clone() + " " + &parts[1];
             let asset = self.process_asset_desc(&asset_str);
-            if asset.is_none() { clog("desc invalid [FT asset]:"); log(&asset_str); return None; }
+            if asset.is_none() { log("desc invalid [FT asset]:"); log(&asset_str); return None; }
 
             return Some((asset.unwrap(), parts[2].clone(), memo));
         }
@@ -573,10 +599,10 @@ impl Wallet
         if parts.len() == 2 // FT
         {
             let sc = SymbolCode::from_string(&parts[1]);
-            if sc.is_none() { clog("asset desc invalid [symbol code]:"); log(&parts[1]); return None; }
+            if sc.is_none() { log("asset desc invalid [symbol code]:"); log(&parts[1]); return None; }
             let sc = sc.unwrap();
             let code_precision = self.settings.ft_symbols.get(&sc);
-            if code_precision.is_none() { clog("asset desc invalid [symbol code]:"); log(&sc.to_string()); return None; }
+            if code_precision.is_none() { log("asset desc invalid [symbol code]:"); log(&sc.to_string()); return None; }
             let precision = code_precision.unwrap().1;
 
             if precision > 0
@@ -608,9 +634,755 @@ impl Wallet
             let asset_str = parts[0].clone() + " " + &parts[1];
             return Asset::from_string(&asset_str);
         }
-        clog("asset desc invalid:");
+        log("asset desc invalid:");
         log(&desc);
         None
+    }
+
+    // create sequence of spend actions to perform the requested spending of assets
+    fn spend_notes(
+        &self,
+        rng: &mut impl RngCore,
+        assets_to_transfer: &mut HashMap<Symbol, Vec<(Asset, Address, String)>>,
+        assets_to_burn: &mut HashMap<Symbol, Vec<(Asset, Name, String)>>,
+        add_fee: bool,
+        initial_fee_amount: i64
+    ) -> Option<(Vec<SpendAction>, i64)>
+    {
+        let sk = SpendingKey::from_seed(&self.seed);
+        let fvk = FullViewingKey::from_spending_key(&sk);
+        let mut spend_actions = vec![];
+        let mut unspent_notes = self.unspent_notes.clone();
+
+        // insert NFT transfer actions first
+        if assets_to_transfer.contains_key(&Symbol::new(0))
+        {
+            for (asset, address, memo) in assets_to_transfer.get(&Symbol::new(0)).unwrap()
+            {
+                let nft = self.find_nft(&mut unspent_notes, &asset);
+                if nft.is_none() { log("note selection error [NFT transfer]:"); log(&asset.to_string()); return None; }
+                let note_a = nft.unwrap();
+                let nf = note_a.note.nullifier(&fvk.nk, note_a.position()).into();
+
+                // convert memo string to bytes
+                let mut memo_bytes = [0; 512];
+                memo_bytes[0..min(512, memo.len())].copy_from_slice(&memo.as_bytes()[0..min(512, memo.len())]);
+
+                let note_b = Note::from_parts(
+                    0,
+                    address.clone(),
+                    note_a.note.asset().clone(),
+                    note_a.note.code().clone(),
+                    Rseed::new(rng),
+                    nf,
+                    memo_bytes
+                );
+                let note_c = Note::dummy(rng, Some(nf), Asset::new(0, Symbol::new(0)), Some(note_a.note.code().clone())).2;
+                let note_d = Note::dummy(rng, Some(nf), Asset::new(0, Symbol::new(0)), Some(note_a.note.code().clone())).2;
+
+                spend_actions.push(SpendAction {
+                    kind: 'T',
+                    note_a,
+                    note_b,
+                    note_c,
+                    note_d,
+                    account_b: Name::new(0),
+                    account_c: Name::new(0),
+                    memo_b: "".to_string(),
+                    memo_c: "".to_string()
+                });
+            }
+            assets_to_transfer.remove(&Symbol::new(0));
+        }
+
+        // insert NFT burn actions next
+        if assets_to_burn.contains_key(&Symbol::new(0))
+        {
+            for (asset, account, memo) in assets_to_burn.get(&Symbol::new(0)).unwrap()
+            {
+                let nft = self.find_nft(&mut unspent_notes, &asset);
+                if nft.is_none() { log("note selection error [NFT burn]:"); log(&asset.to_string()); return None; }
+                let note_a = nft.unwrap();
+                let nf = note_a.note.nullifier(&fvk.nk, note_a.position()).into();
+
+                // convert memo string to bytes
+                let mut memo_bytes = [0; 512];
+                memo_bytes[0..min(512, memo.len())].copy_from_slice(&memo.as_bytes()[0..min(512, memo.len())]);
+
+                let note_b = Note::from_parts(
+                    1 << 63, // set burn flag
+                    Address::dummy(rng),
+                    note_a.note.asset().clone(),
+                    note_a.note.code().clone(),
+                    Rseed::new(rng),
+                    nf,
+                    memo_bytes
+                );
+                let note_c = Note::dummy(rng, Some(nf), Asset::new(0, Symbol::new(0)), Some(note_a.note.code().clone())).2;
+                let note_d = Note::dummy(rng, Some(nf), Asset::new(0, Symbol::new(0)), Some(note_a.note.code().clone())).2;
+
+                spend_actions.push(SpendAction {
+                    kind: 'B',
+                    note_a,
+                    note_b,
+                    note_c,
+                    note_d,
+                    account_b: account.clone(),
+                    account_c: Name::new(0),
+                    memo_b: memo.to_string(),
+                    memo_c: "".to_string()
+                });
+            }
+            assets_to_burn.remove(&Symbol::new(0));
+        }
+
+        // transfer & burn FTs (except fee token symbol)
+        for (sym, att) in assets_to_transfer.clone()
+        {
+            if !sym.eq(&self.settings.fee_token_symbol)
+            {
+                // remove assets of this symbol from the burn hash map, to avoid double spending in the second loop
+                let atb = if assets_to_burn.contains_key(&sym) { assets_to_burn.remove(&sym).unwrap() } else { vec![] };
+                let seq = self.spend_notes_sym(rng, &sym, &att, &atb, false, 0);
+                if seq.is_none() { log("note selection error [FT transfer/burn]:"); log(&sym.to_string()); return None; }
+                spend_actions.append(&mut seq.unwrap());
+            }
+        }
+        // burn FTs only (if there are assets to burn that were'nt in the transfer hash map)
+        for (sym, atb) in assets_to_burn.clone()
+        {
+            if !sym.eq(&self.settings.fee_token_symbol)
+            {
+                let seq = self.spend_notes_sym(rng, &sym,  &vec![], &atb, false, 0);
+                if seq.is_none() { log("note selection error [FT burn]:"); log(&sym.to_string()); return None; }
+                spend_actions.append(&mut seq.unwrap());
+            }
+        }
+
+        // calculate fee for this sequence of spend actions (excluding the notes of fee symbol to be spend)
+        let fee_amount = initial_fee_amount + spend_actions.len() as i64 * 10000;
+
+        // no assets of fee token symbol are to be 'transferred' or 'burned' => spend only transaction fee
+        if add_fee && !assets_to_transfer.contains_key(&self.settings.fee_token_symbol) && !assets_to_burn.contains_key(&self.settings.fee_token_symbol)
+        {
+            let seq = self.spend_notes_sym(rng, &self.settings.fee_token_symbol, &vec![], &vec![], true, fee_amount);
+            if seq.is_none() { log("note selection error [FT fee only]:"); log(&self.settings.fee_token_symbol.to_string()); return None; }
+            spend_actions.append(&mut seq.unwrap());
+        }
+        // transfer & burn fee token symbol
+        if assets_to_transfer.contains_key(&self.settings.fee_token_symbol)
+        {
+            let atb = if assets_to_burn.contains_key(&self.settings.fee_token_symbol) { assets_to_burn.remove(&self.settings.fee_token_symbol).unwrap() } else { vec![] };
+            let seq = self.spend_notes_sym(rng, &self.settings.fee_token_symbol, &assets_to_transfer.get(&self.settings.fee_token_symbol).unwrap(), &atb, add_fee, fee_amount);
+            if seq.is_none() { log("note selection error [FT transfer/burn fee]:"); log(&self.settings.fee_token_symbol.to_string()); return None; }
+            spend_actions.append(&mut seq.unwrap());
+        }
+        // burn fee token symbol only (if there were no transfers of this symbol)
+        if assets_to_burn.contains_key(&self.settings.fee_token_symbol)
+        {
+            let seq = self.spend_notes_sym(rng, &self.settings.fee_token_symbol,  &vec![], &assets_to_burn.get(&self.settings.fee_token_symbol).unwrap(), add_fee, fee_amount);
+            if seq.is_none() { log("note selection error [FT burn fee]:"); log(&self.settings.fee_token_symbol.to_string()); return None; }
+            spend_actions.append(&mut seq.unwrap());
+        }
+
+        // calculate final fee amount for return value
+        let final_fee_amount = initial_fee_amount + spend_actions.len() as i64 * 10000;
+
+        Some((spend_actions, final_fee_amount))
+    }
+
+    // 3-stage backtracking algorithm
+    // for a particular token symbol:
+    // find all subsets of unspent_notes
+    // sort them by number of elements (smallest subsets first as we want to spent as few notes as possible)
+    // for each subset:
+    //     try all T/B permutations
+    //     for each T/B permutation:
+    //         try all receiver permutations (transparent and shielded separately)
+    fn spend_notes_sym(
+        &self,
+        rng: &mut impl RngCore,
+        sym: &Symbol,
+        assets_to_transfer: &Vec<(Asset, Address, String)>,
+        assets_to_burn: &Vec<(Asset, Name, String)>,
+        add_fee: bool,
+        inital_fee_amount: i64
+    ) -> Option<Vec<SpendAction>>
+    {
+        // find all subsets of unspent notes for this particular token symbol
+        let unspent_notes_sym: Vec<NoteEx> = self.unspent_notes.iter().filter(|&n| n.note.symbol().eq(&sym)).cloned().collect();
+        let sets_sym = Self::subsets(&unspent_notes_sym);
+
+        // find all recipients for this particular token symbol
+        let assets_to_transfer_sym: Vec<(Asset, Address, String)> = assets_to_transfer.iter().filter(|&e| e.0.symbol().eq(&sym)).cloned().collect();
+        let assets_to_burn_sym: Vec<(Asset, Name, String)> = assets_to_burn.iter().filter(|&e| e.0.symbol().eq(&sym)).cloned().collect();
+
+        // as long as the list of sets is ordered from small sets to large sets, the first combination found is (one of) the cheapest
+        for set in sets_sym
+        {
+            let final_fee_amount = inital_fee_amount + set.len() as i64 * 10000;
+
+            let seq = self.find_combination(
+                rng,
+                &set,
+                &assets_to_transfer_sym,
+                &{
+                    if add_fee
+                    {
+                        let mut atb_plus_fee = assets_to_burn_sym.clone();
+                        atb_plus_fee.push((
+                            Asset::new(final_fee_amount, sym.clone()).unwrap(),
+                            self.settings.alias_authority.actor.clone(),
+                            "tx fee".to_string()
+                        ));
+                        atb_plus_fee
+                    }
+                    else
+                    {
+                        assets_to_burn_sym.clone()
+                    }
+                }
+            );
+
+            if seq.is_some()
+            {
+                return seq;
+            }
+        }
+
+        None
+    }
+
+    fn find_combination(
+        &self,
+        rng: &mut impl RngCore,
+        set: &Vec<NoteEx>,
+        assets_to_transfer: &Vec<(Asset, Address, String)>,
+        assets_to_burn: &Vec<(Asset, Name, String)>,
+    ) -> Option<Vec<SpendAction>>
+    {
+        // find all permutations of both recipient lists
+        let mut transfer_permutations = vec![];
+        let mut burn_permutations = vec![];
+        Self::permutations(assets_to_transfer.len(), &mut assets_to_transfer.clone(), &mut transfer_permutations);
+        Self::permutations(assets_to_burn.len(), &mut assets_to_burn.clone(), &mut burn_permutations);
+
+        // for all possible transfer recipient permutations...
+            // for all possible burn recipient permutations...
+                // try all possible combinations of 'burn' and 'transfer' actions:
+                // each note in 'set' can either be 'transferred' or 'burned'
+                // the bit representation of 'i' is used to determine if the note at a particular bit position within the
+                // set is being transferred (0) or burned (1). For example, a set of two notes (note_0, note_1) has 2^2 possible T/B combinations:
+                // T T <-> (00)
+                // T B <-> (01)
+                // B T <-> (10)
+                // B B <-> (11)
+
+        let mut inner_loop = |tp: &Vec<(Asset, Address, String)> , bp: &Vec<(Asset, Name, String)>| {
+            let base: u64 = 2;
+            for i in 0..base.pow(set.len() as u32)
+            {
+                // clone permutations as attempts to find valid combinations might modify the recipient's values
+                let seq = self.try_combination(
+                    rng,
+                    &set,
+                    &mut tp.clone(),
+                    &mut bp.clone(),
+                    i
+                );
+
+                if seq.is_some()
+                {
+                    return seq;
+                }
+            }
+            None
+        };
+
+        if transfer_permutations.is_empty()
+        {
+            for bp in burn_permutations.clone()
+            {
+                let seq = inner_loop(&vec![], &bp);
+                if seq.is_some() { return seq; }
+            }
+        }
+        else
+        {
+            if burn_permutations.is_empty()
+            {
+                for tp in transfer_permutations.clone()
+                {
+                    let seq = inner_loop(&tp, &vec![]);
+                    if seq.is_some() { return seq; }
+                }
+            }
+            else
+            {
+                for tp in transfer_permutations.clone()
+                {
+                    for bp in burn_permutations.clone()
+                    {
+                        let seq = inner_loop(&tp, &bp);
+                        if seq.is_some() { return seq; }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    fn try_combination(
+        &self,
+        rng: &mut impl RngCore,
+        set: &Vec<NoteEx>,
+        tp: &mut Vec<(Asset, Address, String)>,
+        bp: &mut Vec<(Asset, Name, String)>,
+        tb_bit_pattern: u64
+    ) -> Option<Vec<SpendAction>>
+    {
+        let sk = SpendingKey::from_seed(&self.seed);
+        let fvk = FullViewingKey::from_spending_key(&sk);
+        let mut seq = vec![];
+
+        // walk through all notes in the set
+        for j in 0..set.len()
+        {
+            // the note to be spent
+            let note_a = &set[j];
+            let nf = note_a.note.nullifier(&fvk.nk, note_a.position()).into();
+
+            // if the position bit of this note is set, it is being 'burned'
+            if (tb_bit_pattern & (1 << j)) != 0
+            {
+                // Note B (burn recipient)
+                let (note_b, account_b, memo_b) = {
+                    // this case should actually only occur for invalid combinations
+                    if bp.is_empty()
+                    {
+                        (
+                            Note::dummy(rng, Some(nf), Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2,
+                            Name::new(0),
+                            "".to_string()
+                        )
+                    }
+                    else
+                    {
+                        // look at the next 'burn' recipient and check if note A gets fully consumed by serving him
+                        assert!(note_a.note.symbol().eq(bp[0].0.symbol()));
+                        if bp[0].0.amount() as u64 >= note_a.note.amount()
+                        {
+                            // note a gets fully consumed: subtract amount from recipient and remove from list if fully served
+                            bp[0].0.sub_assign(note_a.note.asset());
+                            let (_, account_b, memo_b) = if bp[0].0.amount() == 0 {
+                                bp.remove(0)
+                            } else {
+                                bp[0].clone()
+                            };
+
+                            // convert memo string to bytes
+                            let mut memo_bytes = [0; 512];
+                            memo_bytes[0..min(512, memo_b.len())].copy_from_slice(&memo_b.as_bytes()[0..min(512, memo_b.len())]);
+
+                            (
+                                Note::from_parts(
+                                    1 << 63, // set burn flag
+                                    Address::dummy(rng),
+                                    note_a.note.asset().clone(),
+                                    note_a.note.code().clone(),
+                                    Rseed::new(rng),
+                                    nf,
+                                    memo_bytes
+                                ),
+                                account_b,
+                                memo_b
+                            )
+                        }
+                        // note_a fully consumes this recipient
+                        else
+                        {
+                            let (asset_b, account_b, memo_b) = bp.remove(0);
+
+                            // convert memo string to bytes
+                            let mut memo_bytes = [0; 512];
+                            memo_bytes[0..min(512, memo_b.len())].copy_from_slice(&memo_b.as_bytes()[0..min(512, memo_b.len())]);
+
+                            (
+                                Note::from_parts(
+                                    1 << 63, // set burn flag
+                                    Address::dummy(rng),
+                                    asset_b,
+                                    note_a.note.code().clone(),
+                                    Rseed::new(rng),
+                                    nf,
+                                    memo_bytes
+                                ),
+                                account_b,
+                                memo_b
+                            )
+                        }
+                    }
+                };
+
+                // Note C (burn recipient)
+                let (note_c, account_c, memo_c) = {
+                    // in case note A is fully consumed OR
+                    // in case there is no further recipient
+                    if bp.is_empty() || 0 == (note_a.note.amount() - note_b.amount())
+                    {
+                        (
+                            Note::dummy(rng, Some(nf), Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2,
+                            Name::new(0),
+                            "".to_string()
+                        )
+                    }
+                    else
+                    {
+                        // look at the next 'burn' recipient and check if note A gets fully consumed by serving him
+                        assert!(note_a.note.symbol().eq(bp[0].0.symbol()));
+                        if bp[0].0.amount() as u64 >= (note_a.note.amount() - note_b.amount())
+                        {
+                            // note a gets fully consumed: subtract note a leftover (amount A - amount B) from recipient and remove from list if fully served
+                            bp[0].0.sub_assign(&note_a.note.asset().sub(&note_b.asset()));
+                            let (_, account_c, memo_c) = if bp[0].0.amount() == 0 {
+                                bp.remove(0)
+                            } else {
+                                bp[0].clone()
+                            };
+
+                            // convert memo string to bytes
+                            let mut memo_bytes = [0; 512];
+                            memo_bytes[0..min(512, memo_c.len())].copy_from_slice(&memo_c.as_bytes()[0..min(512, memo_c.len())]);
+
+                            (
+                                Note::from_parts(
+                                    1 << 63, // set burn flag
+                                    Address::dummy(rng),
+                                    note_a.note.asset().sub(note_b.asset()),
+                                    note_a.note.code().clone(),
+                                    Rseed::new(rng),
+                                    nf,
+                                    memo_bytes
+                                ),
+                                account_c,
+                                memo_c
+                            )
+                        }
+                        // note_a fully consumes this recipient
+                        else
+                        {
+                            let (asset_c, account_c, memo_c) = bp.remove(0);
+
+                            // convert memo string to bytes
+                            let mut memo_bytes = [0; 512];
+                            memo_bytes[0..min(512, memo_c.len())].copy_from_slice(&memo_c.as_bytes()[0..min(512, memo_c.len())]);
+
+                            (
+                                Note::from_parts(
+                                    1 << 63, // set burn flag
+                                    Address::dummy(rng),
+                                    asset_c,
+                                    note_a.note.code().clone(),
+                                    Rseed::new(rng),
+                                    nf,
+                                    memo_bytes
+                                ),
+                                account_c,
+                                memo_c
+                            )
+                        }
+                    }
+                };
+
+                // Note D (transfer recipient)
+                let note_d = {
+                    // in case note A is fully consumed OR
+                    // in case there is no further recipient
+                    if tp.is_empty() || 0 == (note_a.note.amount() - note_b.amount() - note_c.amount())
+                    {
+                        // send leftover back into our wallet
+                        if (note_a.note.amount() - note_b.amount() - note_c.amount()) > 0
+                        {
+                            Note::from_parts(
+                                0,
+                                note_a.note.address(),
+                                note_a.note.asset().sub(&note_b.asset().add(&note_c.asset())),
+                                note_a.note.code().clone(),
+                                Rseed::new(rng),
+                                nf,
+                                [0; 512]
+                            )
+                        }
+                        // leftover equals zero
+                        else
+                        {
+                            Note::dummy(rng, Some(nf), Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2
+                        }
+                    }
+                    else
+                    {
+                        // only if the leftover of note A is smaller or equal than what goes to the next recipient we're gonna send it
+                        // otherwise it goes back into our own wallet (because we cannot split the UTXO further and thus couldn't handle the change)
+                        if (note_a.note.amount() - note_b.amount() - note_c.amount()) <= tp[0].0.amount() as u64
+                        {
+                            assert!(note_a.note.symbol().eq(tp[0].0.symbol()));
+
+                            tp[0].0.sub_assign(&note_a.note.asset().sub(&note_b.asset().add(&note_c.asset())));
+                            let (_, address_d, memo_d) = if tp[0].0.amount() == 0 {
+                                tp.remove(0)
+                            } else {
+                                tp[0].clone()
+                            };
+
+                            // convert memo string to bytes
+                            let mut memo_bytes = [0; 512];
+                            memo_bytes[0..min(512, memo_d.len())].copy_from_slice(&memo_d.as_bytes()[0..min(512, memo_d.len())]);
+
+                            Note::from_parts(
+                                0,
+                                address_d,
+                                note_a.note.asset().sub(&note_b.asset().add(&note_c.asset())),
+                                note_a.note.code().clone(),
+                                Rseed::new(rng),
+                                nf,
+                                memo_bytes
+                            )
+                        }
+                        // send leftover back into our wallet (as change)
+                        else
+                        {
+                            Note::from_parts(
+                                0,
+                                note_a.note.address(),
+                                note_a.note.asset().sub(&note_b.asset().add(&note_c.asset())),
+                                note_a.note.code().clone(),
+                                Rseed::new(rng),
+                                nf,
+                                [0; 512]
+                            )
+                        }
+                    }
+                };
+
+                seq.push(SpendAction {
+                    kind: 'B',
+                    note_a: note_a.clone(),
+                    note_b,
+                    note_c,
+                    note_d,
+                    account_b,
+                    account_c,
+                    memo_b,
+                    memo_c
+                });
+            }
+            // if the position bit of this note is not set, it is being 'transferred'
+            else
+            {
+                // Note B
+                let note_b = {
+                    // this case should actually only occur for invalid combinations
+                    if tp.is_empty()
+                    {
+                        Note::dummy(rng, Some(nf), Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2
+                    }
+                    else
+                    {
+                        // look at the next 'transfer' recipient and check if note A gets fully consumed by serving him
+                        assert!(note_a.note.symbol().eq(tp[0].0.symbol()));
+                        if tp[0].0.amount() as u64 >= note_a.note.amount()
+                        {
+                            // note A gets fully consumed: subtract amount from recipient and remove from list if fully served
+                            tp[0].0.sub_assign(note_a.note.asset());
+                            let (_, address_b, memo_b) = if tp[0].0.amount() == 0 {
+                                tp.remove(0)
+                            } else {
+                                tp[0].clone()
+                            };
+
+                            // convert memo string to bytes
+                            let mut memo_bytes = [0; 512];
+                            memo_bytes[0..min(512, memo_b.len())].copy_from_slice(&memo_b.as_bytes()[0..min(512, memo_b.len())]);
+
+                            Note::from_parts(
+                                0,
+                                address_b,
+                                note_a.note.asset().clone(),
+                                note_a.note.code().clone(),
+                                Rseed::new(rng),
+                                nf,
+                                memo_bytes
+                            )
+                        }
+                        // note A fully consumes this recipient
+                        else
+                        {
+                            let (asset_b, address_b, memo_b) = tp.remove(0);
+
+                            // convert memo string to bytes
+                            let mut memo_bytes = [0; 512];
+                            memo_bytes[0..min(512, memo_b.len())].copy_from_slice(&memo_b.as_bytes()[0..min(512, memo_b.len())]);
+
+                            Note::from_parts(
+                                0,
+                                address_b,
+                                asset_b,
+                                note_a.note.code().clone(),
+                                Rseed::new(rng),
+                                nf,
+                                memo_bytes
+                            )
+                        }
+                    }
+                };
+
+                // Note C
+                let note_c = {
+                    // in case note A is fully consumed OR
+                    // in case there is no further recipient
+                    if tp.is_empty() || 0 == (note_a.note.amount() - note_b.amount())
+                    {
+                        // send leftover back into our wallet
+                        if (note_a.note.amount() - note_b.amount()) > 0
+                        {
+                            Note::from_parts(
+                                0,
+                                note_a.note.address(),
+                                note_a.note.asset().sub(&note_b.asset()),
+                                note_a.note.code().clone(),
+                                Rseed::new(rng),
+                                nf,
+                                [0; 512]
+                            )
+                        }
+                        // leftover equals zero
+                        else
+                        {
+                            Note::dummy(rng, Some(nf), Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2
+                        }
+                    }
+                    else
+                    {
+                        // only if the leftover of note A is smaller or equal than what goes to the next recipient we're gonna send it
+                        // otherwise it goes back into our own wallet, since we cannot split the UTXO further
+                        if (note_a.note.amount() - note_b.amount()) <= tp[0].0.amount() as u64
+                        {
+                            assert!(note_a.note.symbol().eq(tp[0].0.symbol()));
+
+                            tp[0].0.sub_assign(&note_a.note.asset().sub(&note_b.asset()));
+                            let (_, address_c, memo_c) = if tp[0].0.amount() == 0 {
+                                tp.remove(0)
+                            } else {
+                                tp[0].clone()
+                            };
+
+                            // convert memo string to bytes
+                            let mut memo_bytes = [0; 512];
+                            memo_bytes[0..min(512, memo_c.len())].copy_from_slice(&memo_c.as_bytes()[0..min(512, memo_c.len())]);
+
+                            Note::from_parts(
+                                0,
+                                address_c,
+                                note_a.note.asset().sub(&note_b.asset()),
+                                note_a.note.code().clone(),
+                                Rseed::new(rng),
+                                nf,
+                                memo_bytes
+                            )
+                        }
+                        // send leftover back into our wallet (as change)
+                        else
+                        {
+                            Note::from_parts(
+                                0,
+                                note_a.note.address(),
+                                note_a.note.asset().sub(&note_b.asset()),
+                                note_a.note.code().clone(),
+                                Rseed::new(rng),
+                                nf,
+                                [0; 512]
+                            )
+                        }
+                    }
+                };
+
+                seq.push(SpendAction {
+                    kind: 'T',
+                    note_a: note_a.clone(),
+                    note_b,
+                    note_c,
+                    note_d: Note::dummy(rng, Some(nf), Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2,
+                    account_b: Name::new(0),
+                    account_c: Name::new(0),
+                    memo_b: "".to_string(),
+                    memo_c: "".to_string()
+                });
+            }
+        }
+
+        // if and only if both recipient lists are empty (i.e. all of them have successfully been served) the sequence
+        // of actions can be considered valid
+        if tp.len() == 0 && bp.len() == 0
+        {
+            return Some(seq);
+        }
+
+        None
+    }
+
+    // borrowed from: https://www.educative.io/answers/how-to-find-nonidentical-subsets-of-the-given-input
+    fn subsets<T: Clone>(notes: &Vec<T>) -> Vec<Vec<T>>
+    {
+        let n = notes.len();
+        let pow_size = 1 << n;
+        let mut res = vec![];
+
+        // start counter at one in order to skip the first, empty set
+        for counter in 1..pow_size
+        {
+            let mut set = vec![];
+            for j in 0..n
+            {
+                if (counter & (1 << j)) != 0
+                {
+                    set.push(notes[j].clone())
+                }
+            }
+            res.push(set);
+        }
+
+        res.sort_by(|a, b| a.len().cmp(&b.len()));
+        res
+    }
+
+    // heap's permutations, borrowed from: https://gist.github.com/RichardJohnn/8e6af62e7272cf39e8b6#file-heapsalgorithmforpermutationgeneration-rs
+    fn permutations<T: Clone>(n: usize, a: &mut Vec<T>, out: &mut Vec<Vec<T>>)
+    {
+        if n == 0
+        {
+            return;
+        }
+        if n == 1
+        {
+            out.push(a.clone());
+        }
+        else
+        {
+            for i in  0 .. n - 1
+            {
+                Self::permutations(n - 1, a, out);
+                if n % 2 == 0
+                {
+                    a.swap(i, n - 1);
+                }
+                else
+                {
+                    a.swap(0, n - 1);
+                }
+            }
+            Self::permutations(n - 1, a, out);
+        }
     }
 
     pub fn move_asset(
@@ -628,7 +1400,7 @@ impl Wallet
         let burn_params = Parameters::<Bls12>::read(f, false).unwrap();
 
         let auth = Authorization::from_string(&authorization);
-        if auth.is_none() { clog("authorization string invalid:"); log(&authorization); return None; }
+        if auth.is_none() { log("authorization string invalid:"); log(&authorization); return None; }
         let auth = auth.unwrap();
 
         let mut fts_to_mint = vec![];
@@ -640,7 +1412,7 @@ impl Wallet
         for desc in descs
         {
             let processed_desc = self.process_move_desc(&desc);
-            if processed_desc.is_none() { clog("move desc invalid:"); log(&desc); return None; }
+            if processed_desc.is_none() { log("move desc invalid:"); log(&desc); return None; }
             let (is_mint, asset, memo) = processed_desc.unwrap();
 
             if is_mint
@@ -651,7 +1423,7 @@ impl Wallet
                 }
                 else
                 {
-                    if asset.amount() <= 0 { clog("move desc invalid [asset amount]:"); log(&asset.to_string()); return None; }
+                    if asset.amount() <= 0 { log("move desc invalid [asset amount]:"); log(&asset.to_string()); return None; }
                     fts_to_mint.push((asset, memo));
                 }
             }
@@ -663,7 +1435,7 @@ impl Wallet
                 }
                 else
                 {
-                    if asset.amount() <= 0 { clog("move desc invalid [asset amount]:"); log(&asset.to_string()); return None; }
+                    if asset.amount() <= 0 { log("move desc invalid [asset amount]:"); log(&asset.to_string()); return None; }
                     fts_to_burn.push((asset, memo));
                 }
             }
@@ -690,7 +1462,7 @@ impl Wallet
                 authorization: vec![auth.clone()],
                 data: PlsFtTransfer{
                     from: auth.actor.clone(),
-                    to: Name::from_string(&"zeoscontract".to_string()).unwrap(),
+                    to: self.settings.protocol_contract.clone(),
                     quantity: asset.clone(),
                     memo: "ZEOS MINT".to_string()
                 }.into()
@@ -789,7 +1561,7 @@ impl Wallet
                 authorization: vec![auth.clone()],
                 data: PlsNftTransfer{
                     from: auth.actor.clone(),
-                    to: Name::from_string(&"zeoscontract".to_string()).unwrap(),
+                    to: self.settings.protocol_contract.clone(),
                     asset_ids: nfts,
                     memo: "ZEOS MINT".to_string()
                 }.into()
@@ -816,7 +1588,7 @@ impl Wallet
         if !pls_mint_vec.is_empty()
         {
             transaction.actions.push(Action {
-                account: Name::from_string(&format!("zeoscontract")).unwrap(),
+                account: self.settings.protocol_contract.clone(),
                 name: Name::from_string(&format!("mint")).unwrap(),
                 authorization: vec![auth.clone()],
                 data: PlsMintAction{
@@ -835,7 +1607,7 @@ impl Wallet
         for (asset, memo) in fts_to_burn
         {
             let note_selection = self.select_notes(&mut unspent_notes, &asset);
-            if note_selection.is_none() { clog("note selection error [FT burn]:"); log(&asset.to_string()); return None; }
+            if note_selection.is_none() { log("note selection error [FT burn]:"); log(&asset.to_string()); return None; }
             let (notes_to_spend, change) = note_selection.unwrap();
 
             for i in 0..notes_to_spend.len()
@@ -918,7 +1690,7 @@ impl Wallet
         for (asset, memo) in nfts_to_burn
         {
             let note_selection = self.select_notes(&mut unspent_notes, &asset);
-            if note_selection.is_none() { clog("note selection error [NFT burn]:"); log(&asset.to_string()); return None; }
+            if note_selection.is_none() { log("note selection error [NFT burn]:"); log(&asset.to_string()); return None; }
             let (notes_to_spend, _) = note_selection.unwrap();
             assert!(notes_to_spend.len() == 1); // there can only be one NFT of it's type
             let note_a = &notes_to_spend[0];
@@ -989,7 +1761,7 @@ impl Wallet
         if !pls_burn_vec.is_empty()
         {
             transaction.actions.push(Action {
-                account: Name::from_string(&format!("zeoscontract")).unwrap(),
+                account: self.settings.protocol_contract.clone(),
                 name: Name::from_string(&format!("burn")).unwrap(),
                 authorization: vec![auth.clone()],
                 data: PlsBurnAction{
@@ -1015,16 +1787,14 @@ impl Wallet
         let f = File::open("params_burn.bin").unwrap();
         let burn_params = Parameters::<Bls12>::read(f, false).unwrap();
 
-        let mut fts_to_transfer = vec![];
-        let mut nfts_to_transfer = vec![];
-        let mut fts_to_burn = vec![];
-        let mut nfts_to_burn = vec![];
+        let mut assets_to_transfer: HashMap<Symbol, Vec<(Asset, Address, String)>> = HashMap::new();
+        let mut assets_to_burn: HashMap<Symbol, Vec<(Asset, Name, String)>> = HashMap::new();
 
         // process action descriptors
         for desc in descs
         {
             let processed_desc = self.process_transfer_desc(&desc);
-            if processed_desc.is_none() { clog("transfer desc invalid:"); log(&desc); return None; }
+            if processed_desc.is_none() { log("transfer desc invalid:"); log(&desc); return None; }
             let (asset, receiver, memo) = processed_desc.unwrap();
 
             // determine trasfer/burn by receiver string:
@@ -1035,174 +1805,130 @@ impl Wallet
 
             if address.is_some()
             {
-                if asset.is_nft()
+                assert!(account.is_none());
+                if !asset.is_nft() && asset.amount() <= 0 { log("transfer desc invalid [asset amount]:"); log(&asset.to_string()); return None; }
+                if assets_to_transfer.contains_key(asset.symbol())
                 {
-                    nfts_to_transfer.push((asset.clone(), address.clone().unwrap(), memo.clone()));
+                    assets_to_transfer.get_mut(asset.symbol()).unwrap().push((asset.clone(), address.clone().unwrap(), memo.clone()));
                 }
                 else
                 {
-                    if asset.amount() <= 0 { clog("transfer desc invalid [asset amount]:"); log(&asset.to_string()); return None; }
-                    fts_to_transfer.push((asset.clone(), address.clone().unwrap(),memo.clone()));
+                    assets_to_transfer.insert(asset.symbol().clone(), vec![(asset.clone(), address.clone().unwrap(), memo.clone())]);
                 }
             }
             if account.is_some()
             {
-                if asset.is_nft()
+                assert!(address.is_none());
+                if !asset.is_nft() && asset.amount() <= 0 { log("transfer desc invalid [asset amount]:"); log(&asset.to_string()); return None; }
+                if assets_to_burn.contains_key(asset.symbol())
                 {
-                    nfts_to_burn.push((asset.clone(), account.clone().unwrap(), memo.clone()));
+                    assets_to_burn.get_mut(asset.symbol()).unwrap().push((asset.clone(), account.clone().unwrap(), memo.clone()));
                 }
                 else
                 {
-                    if asset.amount() <= 0 { clog("transfer desc invalid [asset amount]:"); log(&asset.to_string()); return None; }
-                    fts_to_burn.push((asset.clone(), account.clone().unwrap(), memo.clone()));
+                    assets_to_burn.insert(asset.symbol().clone(), vec![(asset.clone(), account.clone().unwrap(), memo.clone())]);
                 }
             }
-            if address.is_none() && account.is_none() { clog("transfer desc invalid [address/account]:"); log(&receiver); return None; } // must be either one or the other
+            if address.is_none() && account.is_none() { log("transfer desc invalid [address/account]:"); log(&receiver); return None; } // must be either one or the other
         }
 
-        // process TRANSFER actions
+        let spend_actions = self.spend_notes(rng, &mut assets_to_transfer, &mut assets_to_burn, true, 50000);
+        if spend_actions.is_none() { log("requested transaction impossible"); return None; }
+        let (spend_actions, _) = spend_actions.unwrap();
+        //println!("{:?}", spend_actions);
+
         let sk = SpendingKey::from_seed(&self.seed);
         let fvk = FullViewingKey::from_spending_key(&sk);
-        let mut transaction = Transaction{ actions: vec![] };
-        let mut unspent_notes = self.unspent_notes.clone();
-        let mut notes_to_mint = vec![];
+        let mut transfer_notes_to_mint = vec![];
+        let mut burn_notes_to_mint = vec![];
         let mut pls_transfer_vec = vec![];
+        let mut pls_burn_vec = vec![];
 
-        // process fungible token to transfer
-        for (asset, address, memo) in fts_to_transfer
+        for sa in spend_actions
         {
-            let note_selection = self.select_notes(&mut unspent_notes, &asset);
-            if note_selection.is_none() { clog("note selection error [FT transfer]:"); log(&asset.to_string()); return None; }
-            let (notes_to_spend, change) = note_selection.unwrap();
-
-            // convert memo string to bytes
-            let mut memo_bytes = [0; 512];
-            memo_bytes[0..min(512, memo.len())].copy_from_slice(&memo.as_bytes()[0..min(512, memo.len())]);
-
-            for i in 0..notes_to_spend.len()
+            if 'T' == sa.kind
             {
-                let nf = notes_to_spend[i].note.nullifier(&fvk.nk, notes_to_spend[i].position()).into();
-                let note_b = Note::from_parts(
-                    0,
-                    address,
-                    Asset::new(
-                        if i == notes_to_spend.len()-1 {
-                            notes_to_spend[i].note.amount() - change
-                        } else {
-                            notes_to_spend[i].note.amount()
-                        } as i64,
-                        notes_to_spend[i].note.symbol().clone()
-                    ).unwrap(),
-                    notes_to_spend[i].note.code().clone(),
-                    Rseed::new(rng),
-                    nf,
-                    memo_bytes
-                );
-                let note_c = Note::from_parts(
-                    0,
-                    if i == notes_to_spend.len()-1 && change > 0 {
-                        notes_to_spend[i].note.address()
-                    } else {
-                        Address::dummy(rng) // send the zero notes to dummy addresses
-                    },
-                    Asset::new(
-                        if i == notes_to_spend.len()-1 {
-                            change
-                        } else {
-                            0
-                        } as i64,
-                        notes_to_spend[i].note.symbol().clone()
-                    ).unwrap(),
-                    notes_to_spend[i].note.code().clone(),
-                    Rseed::new(rng),
-                    nf,
-                    [0; 512]
-                );
-
                 // create proof
-                let (sister_path, root) = self.get_sister_path_and_root(&notes_to_spend[i]).unwrap();
+                let (sister_path, root) = self.get_sister_path_and_root(&sa.note_a).unwrap();
                 let circuit_instance = Transfer {
-                    note_a: Some(notes_to_spend[i].note.clone()),
+                    note_a: Some(sa.note_a.note.clone()),
                     proof_generation_key: Some(sk.proof_generation_key()),
                     auth_path: sister_path,
-                    value_b: Some(note_b.amount()),
-                    address_b: Some(address),
-                    rcm_b: Some(note_b.rcm()),
-                    value_c: Some(note_c.amount()),
-                    address_c: Some(note_c.address()),
-                    rcm_c: Some(note_c.rcm()),
+                    value_b: Some(sa.note_b.amount()),
+                    address_b: Some(sa.note_b.address()),
+                    rcm_b: Some(sa.note_b.rcm()),
+                    value_c: Some(sa.note_c.amount()),
+                    address_c: Some(sa.note_c.address()),
+                    rcm_c: Some(sa.note_c.rcm()),
                 };
                 let proof = create_random_proof(circuit_instance, &transfer_params, rng).unwrap();
+                let nf: ExtractedNullifier = sa.note_a.note.nullifier(&fvk.nk, sa.note_a.position()).into();
 
                 pls_transfer_vec.push(PlsTransfer{
                     root,
                     nf: ScalarBytes(nf.to_bytes()),
-                    cm_b: ScalarBytes(note_b.commitment().to_bytes()),
-                    cm_c: ScalarBytes(note_c.commitment().to_bytes()),
+                    cm_b: ScalarBytes(sa.note_b.commitment().to_bytes()),
+                    cm_c: ScalarBytes(sa.note_c.commitment().to_bytes()),
                     proof: AffineProofBytes::from(proof)
                 });
 
-                notes_to_mint.push(note_b);
-                notes_to_mint.push(note_c);
+                transfer_notes_to_mint.push(sa.note_b);
+                transfer_notes_to_mint.push(sa.note_c);
+            }
+            else if 'B' == sa.kind
+            {
+                // create proof
+                let (sister_path, root) = self.get_sister_path_and_root(&sa.note_a).unwrap();
+                let circuit_instance = Burn {
+                    note_a: Some(sa.note_a.note.clone()),
+                    proof_generation_key: Some(sk.proof_generation_key()),
+                    auth_path: sister_path,
+                    value_b: Some(sa.note_b.amount()),
+                    account_b: Some(sa.account_b.raw()),
+                    value_c: Some(sa.note_c.amount()),
+                    account_c: Some(sa.account_c.raw()),
+                    value_d: Some(sa.note_d.amount()),
+                    address_d: Some(sa.note_d.address()),
+                    rcm_d: Some(sa.note_d.rcm()),
+                };
+                let proof = create_random_proof(circuit_instance, &burn_params, rng).unwrap();
+                let nf: ExtractedNullifier = sa.note_a.note.nullifier(&fvk.nk, sa.note_a.position()).into();
+
+                pls_burn_vec.push(PlsBurn{
+                    root,
+                    nf: ScalarBytes(nf.to_bytes()),
+                    cm_d: ScalarBytes(sa.note_d.commitment().to_bytes()),
+                    value_b: sa.note_b.amount(),
+                    symbol: sa.note_b.symbol().clone(),
+                    code: sa.note_b.code().clone(),
+                    account_b: sa.account_b.clone(),
+                    memo_b: sa.memo_b.clone(),
+                    amount_c: sa.note_c.amount(),
+                    account_c: sa.account_c.clone(),
+                    memo_c: sa.memo_c.clone(),
+                    proof: AffineProofBytes::from(proof)
+                });
+
+                burn_notes_to_mint.push(sa.note_b);
+                burn_notes_to_mint.push(sa.note_c);
+                burn_notes_to_mint.push(sa.note_d);
             }
         }
 
-        // process non-fungible tokens to transfer
-        for (asset, address, memo) in nfts_to_transfer
-        {
-            let note_selection = self.select_notes(&mut unspent_notes, &asset);
-            if note_selection.is_none() { clog("note selection error [NFT transfer]:"); log(&asset.to_string()); return None; }
-            let (notes_to_spend, _) = note_selection.unwrap();
-            assert!(notes_to_spend.len() == 1); // there can only be one NFT of it's type
-            let note_a = &notes_to_spend[0];
-
-            // convert memo string to bytes
-            let mut memo_bytes = [0; 512];
-            memo_bytes[0..min(512, memo.len())].copy_from_slice(&memo.as_bytes()[0..min(512, memo.len())]);
-
-            let nf = note_a.note.nullifier(&fvk.nk, note_a.position()).into();
-            let note_b = Note::from_parts(
-                0,
-                address,
-                note_a.note.asset().clone(),
-                note_a.note.code().clone(),
-                Rseed::new(rng),
-                nf,
-                memo_bytes
-            );
-            let note_c = Note::dummy(rng, Some(nf), Asset::new(0, Symbol::new(0)), Some(note_a.note.code().clone())).2;
-
-            // create proof
-            let (sister_path, root) = self.get_sister_path_and_root(&note_a).unwrap();
-            let circuit_instance = Transfer {
-                note_a: Some(note_a.note.clone()),
-                proof_generation_key: Some(sk.proof_generation_key()),
-                auth_path: sister_path,
-                value_b: Some(note_b.amount()),
-                address_b: Some(note_b.address()),
-                rcm_b: Some(note_b.rcm()),
-                value_c: Some(note_c.amount()),
-                address_c: Some(note_c.address()),
-                rcm_c: Some(note_c.rcm()),
-            };
-            let proof = create_random_proof(circuit_instance, &transfer_params, rng).unwrap();
-
-            pls_transfer_vec.push(PlsTransfer{
-                root,
-                nf: ScalarBytes(nf.to_bytes()),
-                cm_b: ScalarBytes(note_b.commitment().to_bytes()),
-                cm_c: ScalarBytes(note_c.commitment().to_bytes()),
-                proof: AffineProofBytes::from(proof)
-            });
-
-            notes_to_mint.push(note_b);
-            notes_to_mint.push(note_c);
-        }
-
         let mut note_ct_transfer = vec![];
+        let mut note_ct_burn = vec![];
+        let mut transaction = Transaction{ actions: vec![] };
 
-        // encrypt notes to mint
-        for note in notes_to_mint
+        // add 'begin' action
+        transaction.actions.push(Action {
+            account: self.settings.alias_authority.actor.clone(),
+            name: Name::from_string(&format!("begin")).unwrap(),
+            authorization: vec![self.settings.alias_authority.clone()],
+            data: json!({})
+        });
+
+        // encrypt transfer notes to mint
+        for note in transfer_notes_to_mint
         {
             let esk = derive_esk(&note).unwrap();
             let epk = ka_derive_public(&note, &esk);
@@ -1219,9 +1945,9 @@ impl Wallet
         if !pls_transfer_vec.is_empty()
         {
             transaction.actions.push(Action {
-                account: Name::from_string(&format!("zeoscontract")).unwrap(),
+                account: self.settings.alias_authority.actor.clone(),
                 name: Name::from_string(&format!("transfer")).unwrap(),
-                authorization: vec![self.privacy_account.clone()],
+                authorization: vec![self.settings.alias_authority.clone()],
                 data: PlsTransferAction{
                     actions: pls_transfer_vec,
                     note_ct: note_ct_transfer
@@ -1229,152 +1955,8 @@ impl Wallet
             });
         }
 
-        // process BURN actions
-        let mut notes_to_mint = vec![];
-        let mut pls_burn_vec = vec![];
-
-        // process fungible tokens to burn
-        for (asset, account, memo) in fts_to_burn
-        {
-            let note_selection = self.select_notes(&mut unspent_notes, &asset);
-            if note_selection.is_none() { clog("note selection error [FT burn]:"); log(&asset.to_string()); return None; }
-            let (notes_to_spend, change) = note_selection.unwrap();
-
-            for i in 0..notes_to_spend.len()
-            {
-                let nf = notes_to_spend[i].note.nullifier(&fvk.nk, notes_to_spend[i].position()).into();
-                let note_b = Note::from_parts(
-                    1 << 63, // set burn flag
-                    Address::dummy(rng),
-                    Asset::new(
-                        if i == notes_to_spend.len()-1 {
-                            notes_to_spend[i].note.amount() - change
-                        } else {
-                            notes_to_spend[i].note.amount()
-                        } as i64,
-                        notes_to_spend[i].note.symbol().clone()
-                    ).unwrap(),
-                    notes_to_spend[i].note.code().clone(),
-                    Rseed::new(rng),
-                    nf,
-                    [0; 512]
-                );
-                let note_d = Note::from_parts(
-                    0,
-                    if i == notes_to_spend.len()-1 && change > 0 {
-                        notes_to_spend[i].note.address()
-                    } else {
-                        Address::dummy(rng) // send the zero notes to dummy addresses
-                    },
-                    Asset::new(
-                        if i == notes_to_spend.len()-1 {
-                            change
-                        } else {
-                            0
-                        } as i64,
-                        notes_to_spend[i].note.symbol().clone()
-                    ).unwrap(),
-                    notes_to_spend[i].note.code().clone(),
-                    Rseed::new(rng),
-                    nf,
-                    [0; 512]
-                );
-
-                // create proof
-                let (sister_path, root) = self.get_sister_path_and_root(&notes_to_spend[i]).unwrap();
-                let circuit_instance = Burn {
-                    note_a: Some(notes_to_spend[i].note.clone()),
-                    proof_generation_key: Some(sk.proof_generation_key()),
-                    auth_path: sister_path,
-                    value_b: Some(note_b.amount()),
-                    account_b: Some(account.raw()),
-                    value_c: Some(0),
-                    account_c: Some(0),
-                    value_d: Some(note_d.amount()),
-                    address_d: Some(note_d.address()),
-                    rcm_d: Some(note_d.rcm()),
-                };
-                let proof = create_random_proof(circuit_instance, &burn_params, rng).unwrap();
-
-                pls_burn_vec.push(PlsBurn{
-                    root,
-                    nf: ScalarBytes(nf.to_bytes()),
-                    cm_d: ScalarBytes(note_d.commitment().to_bytes()),
-                    value_b: note_b.amount(),
-                    symbol: note_b.symbol().clone(),
-                    code: note_b.code().clone(),
-                    account_b: account.clone(),
-                    memo_b: memo.clone(),
-                    amount_c: 0,
-                    account_c: Name::new(0),
-                    memo_c: "".to_string(),
-                    proof: AffineProofBytes::from(proof)
-                });
-
-                notes_to_mint.push(note_b);
-                notes_to_mint.push(note_d);
-            }
-        }
-
-        // process non-fungible tokens to burn
-        for (asset, account, memo) in nfts_to_burn
-        {
-            let note_selection = self.select_notes(&mut unspent_notes, &asset);
-            if note_selection.is_none() { clog("note selection error [NFT burn]:"); log(&asset.to_string()); return None; }
-            let (notes_to_spend, _) = note_selection.unwrap();
-            assert!(notes_to_spend.len() == 1); // there can only be one NFT of it's type
-            let note_a = &notes_to_spend[0];
-
-            let nf = note_a.note.nullifier(&fvk.nk, note_a.position()).into();
-            let note_b = Note::from_parts(
-                1 << 63, // set burn flag
-                Address::dummy(rng),
-                note_a.note.asset().clone(),
-                note_a.note.code().clone(),
-                Rseed::new(rng),
-                nf,
-                [0; 512]
-            );
-            let note_d = Note::dummy(rng, Some(nf), Asset::new(0, Symbol::new(0)), Some(note_a.note.code().clone())).2;
-
-            // create proof
-            let (sister_path, root) = self.get_sister_path_and_root(&note_a).unwrap();
-            let circuit_instance = Burn {
-                note_a: Some(note_a.note.clone()),
-                proof_generation_key: Some(sk.proof_generation_key()),
-                auth_path: sister_path,
-                value_b: Some(note_b.amount()),
-                account_b: Some(account.raw()),
-                value_c: Some(0),
-                account_c: Some(0),
-                value_d: Some(note_d.amount()),
-                address_d: Some(note_d.address()),
-                rcm_d: Some(note_d.rcm()),
-            };
-            let proof = create_random_proof(circuit_instance, &burn_params, rng).unwrap();
-
-            pls_burn_vec.push(PlsBurn{
-                root,
-                nf: ScalarBytes(nf.to_bytes()),
-                cm_d: ScalarBytes(note_d.commitment().to_bytes()),
-                value_b: note_b.amount(),
-                symbol: note_b.symbol().clone(),
-                code: note_b.code().clone(),
-                account_b: account.clone(),
-                memo_b: memo.clone(),
-                amount_c: 0,
-                account_c: Name::new(0),
-                memo_c: "".to_string(),
-                proof: AffineProofBytes::from(proof)
-            });
-
-            notes_to_mint.push(note_b);
-        }
-
-        let mut note_ct_burn = vec![];
-
-        // encrypt notes to mint
-        for note in notes_to_mint
+        // encrypt burn notes to mint
+        for note in burn_notes_to_mint
         {
             let esk = derive_esk(&note).unwrap();
             let epk = ka_derive_public(&note, &esk);
@@ -1391,15 +1973,23 @@ impl Wallet
         if !pls_burn_vec.is_empty()
         {
             transaction.actions.push(Action {
-                account: Name::from_string(&format!("zeoscontract")).unwrap(),
+                account: self.settings.alias_authority.actor.clone(),
                 name: Name::from_string(&format!("burn")).unwrap(),
-                authorization: vec![self.privacy_account.clone()],
+                authorization: vec![self.settings.alias_authority.clone()],
                 data: PlsBurnAction{
                     actions: pls_burn_vec,
                     note_ct: note_ct_burn
                 }.into()
             });
         }
+
+        // add 'end' action
+        transaction.actions.push(Action {
+            account: self.settings.alias_authority.actor.clone(),
+            name: Name::from_string(&format!("end")).unwrap(),
+            authorization: vec![self.settings.alias_authority.clone()],
+            data: json!({})
+        });
 
         Some(transaction)
     }
@@ -1497,7 +2087,8 @@ impl Wallet
         {
             for action in tx["trx"]["transaction"]["actions"].as_array().unwrap()
             {
-                if action["account"].as_str().unwrap().eq("zeoscontract") && (
+                if (action["account"].as_str().unwrap().eq(&self.settings.protocol_contract.to_string()) || 
+                    action["account"].as_str().unwrap().eq(&self.settings.alias_authority.actor.to_string())) && (
                     action["name"].as_str().unwrap().eq("mint") ||
                     action["name"].as_str().unwrap().eq("transfer") ||
                     action["name"].as_str().unwrap().eq("burn") ||
@@ -1570,7 +2161,7 @@ impl Wallet
         if !asset.is_nft()
         {
             let ft_code = self.settings.ft_symbols.get(&asset.symbol().code());
-            if ft_code.is_none() { clog("symbol code invalid [select notes]:"); log(&asset.symbol().to_string()); return None; }
+            if ft_code.is_none() { log("symbol code invalid [select notes]:"); log(&asset.symbol().to_string()); return None; }
             code = &ft_code.unwrap().0;
         }
         // sort 'notes' by note amount, ascending order and walk backwards through them in order to be able to safely remove elements
@@ -1601,7 +2192,31 @@ impl Wallet
         // Not enough notes! Move picked notes in 'res' back to 'notes' and return 'None'.
         notes.append(&mut res);
 
-        clog("insufficient notes [select notes]:");
+        log("insufficient notes [select notes]:");
+        log(&asset.to_string());
+        None
+    }
+
+    fn find_nft(&self, notes: &mut Vec<NoteEx>, asset: &Asset) -> Option<NoteEx>
+    {
+        if !asset.is_nft() || asset.amount() == 0
+        {
+            return None;
+        }
+
+        for i in (0..notes.len()).rev()
+        {
+            if notes[i].note.code().eq(&self.settings.nft_contract) && notes[i].note.symbol().raw() == 0
+            {
+                if asset.amount() as u64 == notes[i].note.amount()
+                {
+                    // found NFT
+                    return Some(notes.remove(i));
+                }
+            }
+        }
+
+        log("nft not found");
         log(&asset.to_string());
         None
     }
@@ -1686,7 +2301,7 @@ mod tests
 {
     use crate::{
         wallet::{Wallet, NoteEx},
-        eosio::{Authorization, Name, Transaction, Action, Symbol},
+        eosio::{Authorization, Name, Transaction, Action, Symbol, Asset},
         contract::{PlsMint, ScalarBytes, AffineProofBytes}
     };
     use rand::rngs::OsRng;
@@ -1698,8 +2313,7 @@ mod tests
     {
         let mut w = Wallet::create(
             b"this is a sample seed which should be at least 32 bytes long...",
-            false,
-            &format!("mschoenebeck@owner")
+            false
         ).unwrap();
         w.insert_into_merkle_tree(&EMPTY_ROOTS[1]);
         w.insert_into_merkle_tree(&EMPTY_ROOTS[2]);
@@ -1761,8 +2375,7 @@ mod tests
     {
         let w = Wallet::create(
             b"this is a sample seed which should be at least 32 bytes long...",
-            false,
-            &format!("aliceaccount")
+            false
         ).unwrap();
 
         let nft = w.process_move_desc(&"i 1234567890".to_string());
@@ -1788,8 +2401,7 @@ mod tests
         let mut rng = OsRng.clone();
         let w = Wallet::create(
             b"this is a sample seed which should be at least 32 bytes long...",
-            false,
-            &format!("aliceaccount")
+            false
         ).unwrap();
 
         let tx = w.move_asset(
@@ -1839,8 +2451,7 @@ mod tests
 
         let mut w = Wallet::create(
             &vec![116,104,105,115,32,105,115,32,97,32,114,97,110,100,111,109,32,115,101,101,100,32,119,104,105,99,104,32,105,115,32,97,116,32,108,101,97,115,116,32,51,50,32,98,121,116,101,115,32,108,111,110,103,33],
-            false,
-            &format!("aliceaccount")
+            false
         ).unwrap();
 
         w.add_leaves(leaves.as_slice());
@@ -1855,4 +2466,53 @@ mod tests
         println!("{:?}", serde_json::to_string(&w.get_sister_path_and_root(&w.unspent_notes[0])));
 
     }
+
+    #[test]
+    fn test_transfer_asset()
+    {
+        let mut rng = OsRng.clone();
+        let mut w = Wallet::create(
+            b"this is a sample seed which should be at least 32 bytes long...",
+            false
+        ).unwrap();
+
+        w.unspent_notes.push(NoteEx { block_num: 0, block_ts: 0, wallet_ts: 0, leaf_idx_arr: 7, note: Note::dummy(&mut rng, None, Some(Asset::new(100000, Symbol::from_string(&"4,ZEOS".to_string()).unwrap()).unwrap()), Some(Name::new(6138663591592764928))).2 });
+        w.unspent_notes.push(NoteEx { block_num: 0, block_ts: 0, wallet_ts: 0, leaf_idx_arr: 8, note: Note::dummy(&mut rng, None, Some(Asset::new(50000, Symbol::from_string(&"4,EOS".to_string()).unwrap()).unwrap()), Some(Name::new(6138663591592764928))).2 });
+        w.unspent_notes.push(NoteEx { block_num: 0, block_ts: 0, wallet_ts: 0, leaf_idx_arr: 9, note: Note::dummy(&mut rng, None, Some(Asset::new(50000, Symbol::from_string(&"4,EOS".to_string()).unwrap()).unwrap()), Some(Name::new(6138663591592764928))).2 });
+
+        let tx = w.transfer_asset(
+            &mut rng,
+            vec![
+                format!("1 EOS mschoenebeck 'this is memo one'"),
+                format!("3 EOS randomaccoun 'here is another memo'"),
+                format!("4 EOS aliceaccount 'let's try to make it more interesting'"),
+                format!("2 EOS bobssaccount 'last action in this transaction'"),
+            ]
+        );
+        assert!(tx.is_some());
+        println!("{}", serde_json::to_string(&tx.unwrap()).unwrap());
+    }
+
+    #[test]
+    fn test_subsets()
+    {
+        let res = Wallet::subsets(&vec![1,2,3,4]);
+        println!("{:?}", res);
+    }
+
+    #[test]
+    fn test_permutations()
+    {
+        let mut array = vec![1,2,3,4];
+        let mut out = vec![];
+        Wallet::permutations(4, &mut array, &mut out);
+        println!("{:?}", out);
+
+        let mut array: Vec<i32> = vec![];
+        let mut out = vec![];
+        Wallet::permutations(0, &mut array, &mut out);
+        println!("{:?}", out);
+    }
+
+
 }

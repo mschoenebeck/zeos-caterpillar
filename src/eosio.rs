@@ -540,6 +540,30 @@ impl Asset
         &self.symbol
     }
 
+    pub fn add(&self, rhs: &Self) -> Self
+    {
+        assert!(self.symbol.eq(&rhs.symbol));
+        Asset { amount: self.amount + rhs.amount, symbol: self.symbol.clone() }
+    }
+
+    pub fn add_assign(&mut self, rhs: &Self)
+    {
+        assert!(self.symbol.eq(&rhs.symbol));
+        self.amount += rhs.amount;
+    }
+
+    pub fn sub(&self, rhs: &Self) -> Self
+    {
+        assert!(self.symbol.eq(&rhs.symbol));
+        Asset { amount: self.amount - rhs.amount, symbol: self.symbol.clone() }
+    }
+
+    pub fn sub_assign(&mut self, rhs: &Self)
+    {
+        assert!(self.symbol.eq(&rhs.symbol));
+        self.amount -= rhs.amount;
+    }
+
     pub fn write_decimal(number: u64, precision: u8, negative: bool) -> String
     {
         let num_digits = successors(Some(number), |&n| (n >= 10).then(|| n / 10)).count() as i64;
@@ -864,8 +888,9 @@ mod tests
 
     #[test]
     fn test2()
-    {
-        println!("{:?}", Name::from_string(&"zeos1fractal".to_string()).unwrap().raw().to_le_bytes());
+    {   let raw: i64 = 6138663577826885632;
+        println!("{}", Name::new(raw as u64).to_string());
+        println!("{}", Name::from_string(&"thezeosproxy".to_string()).unwrap().raw() as i64);
         println!("{:?}", Name::from_string(&"cryptkeeper".to_string()).unwrap().raw().to_le_bytes());
         println!("{:?}", Symbol::from_string(&"4,EOS".to_string()).unwrap().raw().to_le_bytes());
         println!("{:?}", Name::from_string(&"active".to_string()).unwrap().raw().to_le_bytes());

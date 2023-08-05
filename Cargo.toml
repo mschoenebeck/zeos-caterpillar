@@ -36,7 +36,13 @@ rand_core = "0.6"
 serde = { version = "1.0.164", features = ["derive"] }
 serde_json = "1.0.99"
 subtle = "2.2.3"
+wasm-bindgen = "0.2.87"
+getrandom = { version = "0.2.10", features = ["js"] }
 
 [dev-dependencies]
 rand_xorshift = "0.3"
 hex-literal = "0.4.1"
+
+[features]
+multicore = [] #["halo2_proofs/multicore", "rustzeos/multicore", "wasm-bindgen-rayon"]
+default = ["multicore"]

@@ -14,31 +14,188 @@ pub mod spec;
 pub mod wallet;
 
 use wallet::Wallet;
+#[cfg(target_os = "linux")]
 use std::slice;
+#[cfg(target_os = "linux")]
 use std::ffi::CString;
+#[cfg(target_os = "linux")]
 use std::ffi::CStr;
 use rand_core::OsRng;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
 
 // generalized log function for use in different targets
-pub fn log(msg: &String)
+#[cfg(target_os = "linux")]
+pub fn log(msg: &str)
 {
     println!("{}", msg);
 }
-pub fn clog(msg: &str)
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+extern "C"
 {
-    println!("{}", msg);
+    // Use `js_namespace` here to bind `console.log(..)` instead of just
+    // `log(..)`
+    #[wasm_bindgen(js_namespace = console, js_name = log)]
+    fn log(s: &str);
+
+    // The `console.log` is quite polymorphic, so we can bind it with multiple
+    // signatures. Note that we need to use `js_name` to ensure we always call
+    // `log` in JS.
+    #[wasm_bindgen(js_namespace = console, js_name = log)]
+    fn log_u32(a: u32);
+
+    // Multiple arguments too!
+    #[wasm_bindgen(js_namespace = console, js_name = log)]
+    fn log_many(a: &str, b: &str);
+}
+
+// WASM Bindgen Resouces:
+// https://rustwasm.github.io/wasm-bindgen/examples/hello-world.html
+//
+// The following class is a wallet-wrapper for use in JS Browser applications
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub struct JSWallet
+{
+    wallet: Wallet
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl JSWallet
+{
+    pub fn create(
+        seed: &[u8]
+    ) -> Result<JSWallet, JsError>
+    {
+        let w = Wallet::create(seed, false);
+        if w.is_none() { return Err(JsError::new("error creating wallet")) }
+        Ok(JSWallet{
+            wallet: w.unwrap()
+        })
+    }
+
+    pub fn write(&self, bytes: &mut [u8]) -> Result<(), JsError>
+    {
+        let res = self.wallet.write(bytes);
+        if res.is_err() { return Err(JsError::new("error writing wallet")); }
+        Ok(())
+    }
+
+    pub fn read(bytes: &[u8]) -> Result<JSWallet, JsError>
+    {
+        let w = Wallet::read(bytes);
+        if w.is_err() { return Err(JsError::new("error reading wallet")); }
+        Ok(JSWallet { wallet: w.unwrap() })
+    }
+
+    pub fn to_json(&self, pretty: bool) -> String
+    {
+        self.wallet.to_json(pretty)
+    }
+
+    pub fn from_json(json: String) -> Result<JSWallet, JsError>
+    {
+        let w = Wallet::from_json(&json);
+        if w.is_err() { return Err(JsError::new("error reading wallet")); }
+        Ok(JSWallet { wallet: w.unwrap() })
+    }
+
+    pub fn size(&self) -> u32
+    {
+        self.wallet.size() as u32
+    }
+
+    pub fn block_num(&self) -> u32
+    {
+        self.wallet.block_num()
+    }
+
+    pub fn leaf_count(&self) -> u32
+    {
+        self.wallet.leaf_count() as u32
+    }
+
+    pub fn move_asset(
+        &self,
+        authorization: String,
+        descs: String
+    ) -> Result<String, JsError>
+    {
+        let mut rng = OsRng.clone();
+        let descs_parts: Vec<String> = descs.split("|").map(|s| s.to_string()).collect();
+        let tx = self.wallet.move_asset(&mut rng, authorization, descs_parts);
+        if tx.is_none() { return Err(JsError::new("error creating transaction")) }
+        Ok(serde_json::to_string(&tx.unwrap()).unwrap())
+    }
+
+    pub fn transfer_asset(
+        &self,
+        descs: String
+    ) -> Result<String, JsError>
+    {
+        let mut rng = OsRng.clone();
+        let descs_parts: Vec<String> = descs.split("|").map(|s| s.to_string()).collect();
+        let tx = self.wallet.transfer_asset(&mut rng, descs_parts);
+        if tx.is_none() { return Err(JsError::new("error creating transaction")) }
+        Ok(serde_json::to_string(&tx.unwrap()).unwrap())
+    }
+
+    pub fn peers(&self) -> String
+    {
+        serde_json::to_string(&self.wallet.settings().peers).unwrap()
+    }
+
+    pub fn balances(&self, pretty: bool) -> String
+    {
+        if pretty { serde_json::to_string_pretty(&self.wallet.balances()).unwrap() }
+        else { serde_json::to_string(&self.wallet.balances()).unwrap() }
+    }
+
+    pub fn notes(&self, pretty: bool) -> String
+    {
+        if pretty { serde_json::to_string_pretty(&self.wallet.notes()).unwrap() }
+        else { serde_json::to_string(&self.wallet.notes()).unwrap() }
+    }
+
+    pub fn addresses(&self, pretty: bool) -> String
+    {
+        if pretty { serde_json::to_string_pretty(&self.wallet.addresses()).unwrap() }
+        else { serde_json::to_string(&self.wallet.addresses()).unwrap() }
+    }
+
+    pub fn derive_address(&mut self) -> String
+    {
+        serde_json::to_string(&self.wallet.derive_next_address()).unwrap()
+    }
+
+    pub fn add_leaves(&mut self, leaves: &[u8])
+    {
+        self.wallet.add_leaves(leaves);
+    }
+
+    pub fn process_block(&mut self, block: String)
+    {
+        self.wallet.process_block(&block);
+    }
 }
 
 // FFI Resources:
 // https://gist.github.com/iskakaushik/1c5b8aa75c77479c33c4320913eebef6
 // https://jakegoulding.com/rust-ffi-omnibus/objects/
+// https://jakegoulding.com/rust-ffi-omnibus/slice_arguments/
+// https://dev.to/kgrech/7-ways-to-pass-a-string-between-rust-and-c-4ieb
+// https://rust-unofficial.github.io/patterns/idioms/ffi/accepting-strings.html
 //
 // The following functions are exposed to C via FFI:
 
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn wallet_create(
-    seed: *const libc::c_char,
-    auth: *const libc::c_char
+    seed: *const libc::c_char
 ) -> *mut Wallet
 {
     let seed_str: &str = match std::ffi::CStr::from_ptr(seed).to_str() {
@@ -48,18 +205,10 @@ pub unsafe extern "C" fn wallet_create(
             "FFI seed string conversion failed"
         }
     };
-    let auth_str: &str = match std::ffi::CStr::from_ptr(auth).to_str() {
-        Ok(s) => s,
-        Err(_e) => {
-            println!("FFI auth string conversion failed");
-            "FFI auth string conversion failed"
-        }
-    };
 
     Box::into_raw(Box::new(Wallet::create(
         seed_str.as_bytes(),
-        false,
-        &auth_str.to_string()
+        false
     ).unwrap()))
 }
 
@@ -98,6 +247,7 @@ pub unsafe extern "C" fn wallet_block_num(
     wallet.block_num()
 }
 
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn wallet_leaf_count(
     p_wallet: *mut Wallet
@@ -110,6 +260,7 @@ pub unsafe extern "C" fn wallet_leaf_count(
     wallet.leaf_count()
 }
 
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn wallet_write(
     p_wallet: *mut Wallet,
@@ -127,6 +278,7 @@ pub unsafe extern "C" fn wallet_write(
     if res.is_err() { -1 } else { 0 }
 }
 
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn wallet_read(
     p_bytes: *const u8,
@@ -145,6 +297,7 @@ pub unsafe extern "C" fn wallet_read(
     Box::into_raw(Box::new(wallet))
 }
 
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub extern fn wallet_json(
     p_wallet: *mut Wallet,
@@ -160,6 +313,23 @@ pub extern fn wallet_json(
     c_string.into_raw() // Move ownership to C
 }
 
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub extern fn wallet_peers_json(
+    p_wallet: *mut Wallet
+) -> *const libc::c_char
+{
+    let wallet = unsafe {
+        assert!(!p_wallet.is_null());
+        &mut *p_wallet
+    };
+
+    let peers = serde_json::to_string(&wallet.settings().peers).unwrap();
+    let c_string = CString::new(peers).expect("CString::new failed");
+    c_string.into_raw() // Move ownership to C
+}
+
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub extern fn wallet_balances_json(
     p_wallet: *mut Wallet,
@@ -178,6 +348,7 @@ pub extern fn wallet_balances_json(
     c_string.into_raw() // Move ownership to C
 }
 
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub extern fn wallet_notes_json(
     p_wallet: *mut Wallet,
@@ -196,6 +367,7 @@ pub extern fn wallet_notes_json(
     c_string.into_raw() // Move ownership to C
 }
 
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub extern fn wallet_addresses_bech32m(
     p_wallet: *mut Wallet,
@@ -214,6 +386,7 @@ pub extern fn wallet_addresses_bech32m(
     c_string.into_raw() // Move ownership to C
 }
 
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub extern fn wallet_derive_address(
     p_wallet: *mut Wallet,
@@ -230,6 +403,7 @@ pub extern fn wallet_derive_address(
 
 /// The ptr should be a valid pointer to the string allocated by rust
 /// source: https://dev.to/kgrech/7-ways-to-pass-a-string-between-rust-and-c-4ieb
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern fn free_string(ptr: *const libc::c_char)
 {
@@ -237,6 +411,7 @@ pub unsafe extern fn free_string(ptr: *const libc::c_char)
     let _ = CString::from_raw(ptr as *mut _);
 }
 
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern fn wallet_move(
     p_wallet: *mut Wallet,
@@ -258,6 +433,7 @@ pub unsafe extern fn wallet_move(
     CString::new(serde_json::to_string(&tx.unwrap()).unwrap()).expect("CString::new failed").into_raw()
 }
 
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern fn wallet_transfer(
     p_wallet: *mut Wallet,
@@ -277,6 +453,7 @@ pub unsafe extern fn wallet_transfer(
     CString::new(serde_json::to_string(&tx.unwrap()).unwrap()).expect("CString::new failed").into_raw()
 }
 
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern fn wallet_add_leaves(
     p_wallet: *mut Wallet,
@@ -296,6 +473,7 @@ pub unsafe extern fn wallet_add_leaves(
     wallet.add_leaves(bytes);
 }
 
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern fn wallet_process_block(
     p_wallet: *mut Wallet,
