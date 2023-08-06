@@ -1621,6 +1621,7 @@ impl Wallet
                 name: Name::from_string(&format!("mint")).unwrap(),
                 authorization: vec![auth.clone()],
                 data: PlsMintAction{
+                    payer: auth.actor.clone(),
                     actions: pls_mint_vec,
                     note_ct: note_ct_mint
                 }.into()

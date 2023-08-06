@@ -135,6 +135,7 @@ impl From<PlsMint> for Value {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PlsMintAction
 {
+    pub payer: Name,
     pub actions: Vec<PlsMint>,
     pub note_ct: Vec<String>,
 }
