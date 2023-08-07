@@ -1422,6 +1422,7 @@ impl Wallet
         descs: Vec<String>
     ) -> Option<Transaction>
     {
+        if descs.is_empty() { return None; }
         // read params files for zk-snark creation
         // TODO: params file names should be set under settings or something..
         let f = File::open("params_mint.bin").unwrap();
@@ -1597,6 +1598,38 @@ impl Wallet
             });
         }
 
+        // add 'begin' action
+        transaction.actions.push(Action {
+            account: self.settings.alias_authority.actor.clone(),
+            name: Name::from_string(&format!("begin")).unwrap(),
+            authorization: vec![self.settings.alias_authority.clone()],
+            data: json!({})
+        });
+
+        let mut begin_fee_paid = false;
+
+        // pay transaction fee for mint actions
+        if !notes_to_mint.is_empty()
+        {
+            transaction.actions.push(Action{
+                account: self.settings.ft_symbols.get(&self.settings.fee_token_symbol.code()).unwrap().0.clone(),
+                name: Name::from_string(&"transfer".to_string()).unwrap(),
+                authorization: vec![auth.clone()],
+                data: PlsFtTransfer{
+                    from: auth.actor.clone(),
+                    to: self.settings.alias_authority.actor.clone(),
+                    quantity: Asset::new(
+                        *self.settings.fee_table.get(&Name::from_string(&"begin".to_string()).unwrap()).unwrap() +
+                        notes_to_mint.len() as i64 * *self.settings.fee_table.get(&Name::from_string(&format!("mint")).unwrap()).unwrap(),
+                        self.settings.fee_token_symbol.clone()
+                    ).unwrap(),
+                    memo: "tx fee".to_string()
+                }.into()
+            });
+
+            begin_fee_paid = true;
+        }
+
         let mut note_ct_mint = vec![];
 
         // encrypt notes to mint
@@ -1617,11 +1650,10 @@ impl Wallet
         if !pls_mint_vec.is_empty()
         {
             transaction.actions.push(Action {
-                account: self.settings.protocol_contract.clone(),
+                account: self.settings.alias_authority.actor.clone(),
                 name: Name::from_string(&format!("mint")).unwrap(),
-                authorization: vec![auth.clone()],
+                authorization: vec![self.settings.alias_authority.clone()],
                 data: PlsMintAction{
-                    payer: auth.actor.clone(),
                     actions: pls_mint_vec,
                     note_ct: note_ct_mint
                 }.into()
@@ -1636,7 +1668,7 @@ impl Wallet
                 &mut HashMap::new(),
                 &mut assets_to_burn,
                 true,
-                *self.settings.fee_table.get(&Name::from_string(&"begin".to_string()).unwrap()).unwrap()
+                if begin_fee_paid { 0 } else { *self.settings.fee_table.get(&Name::from_string(&"begin".to_string()).unwrap()).unwrap() }
             );
             if spend_actions.is_none() { log("requested transaction impossible"); return None; }
             let (spend_actions, _) = spend_actions.unwrap();
@@ -1695,14 +1727,6 @@ impl Wallet
 
             let mut note_ct_burn = vec![];
 
-            // add 'begin' action
-            transaction.actions.push(Action {
-                account: self.settings.alias_authority.actor.clone(),
-                name: Name::from_string(&format!("begin")).unwrap(),
-                authorization: vec![self.settings.alias_authority.clone()],
-                data: json!({})
-            });
-
             // encrypt burn notes to mint
             for note in burn_notes_to_mint
             {
@@ -1730,15 +1754,15 @@ impl Wallet
                     }.into()
                 });
             }
-
-            // add 'end' action
-            transaction.actions.push(Action {
-                account: self.settings.alias_authority.actor.clone(),
-                name: Name::from_string(&format!("end")).unwrap(),
-                authorization: vec![self.settings.alias_authority.clone()],
-                data: json!({})
-            });
         }
+
+        // add 'end' action
+        transaction.actions.push(Action {
+            account: self.settings.alias_authority.actor.clone(),
+            name: Name::from_string(&format!("end")).unwrap(),
+            authorization: vec![self.settings.alias_authority.clone()],
+            data: json!({})
+        });
 
         Some(transaction)
     }
@@ -1749,6 +1773,7 @@ impl Wallet
         descs: Vec<String>
     ) -> Option<Transaction>
     {
+        if descs.is_empty() { return None; }
         // read params files for zk-snark creation
         // TODO: params file names should be set under settings or something..
         let f = File::open("params_transfer.bin").unwrap();
