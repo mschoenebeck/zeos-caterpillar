@@ -239,11 +239,14 @@ impl Default for Settings
     {
         Settings{
             peers: vec![
+                "https://testnet.uxnetwork.io".to_string(),
+                "https://ux5.goldenplatform.com".to_string(),
                 "http://localhost:8888".to_string(),
                 "http://api.eostitan.com".to_string()
             ],
             ft_symbols: HashMap::from([
                 (SymbolCode::from_string(&"EOS".to_string()).unwrap(), (Name::from_string(&"eosio.token".to_string()).unwrap(), 4)),
+                (SymbolCode::from_string(&"UTX".to_string()).unwrap(), (Name::from_string(&"eosio.token".to_string()).unwrap(), 4)),
                 (SymbolCode::from_string(&"ZEOS".to_string()).unwrap(), (Name::from_string(&"thezeostoken".to_string()).unwrap(), 4)),
             ]),
             nft_contract: Name::from_string(&"atomicassets".to_string()).unwrap(),
@@ -253,7 +256,7 @@ impl Default for Settings
             fee_table: HashMap::from([
                 (Name::from_string(&"begin".to_string()).unwrap(), 50000),
                 (Name::from_string(&"mint".to_string()).unwrap(), 10000),
-                (Name::from_string(&"spend".to_string()).unwrap(), 10000)
+                (Name::from_string(&"spend".to_string()).unwrap(), 20000)
             ])
         }
     }
