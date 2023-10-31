@@ -14,7 +14,7 @@ arrayref = "0.3.7"
 arrayvec = "0.7.2"
 base64 = "0.21.2"
 bech32 = "0.9.1"
-bellman = "0.14.0"
+bellman = { version = "0.14.0", default-features = false, features = ["groth16"] }
 bitvec = "1"
 blake2b_simd = "1"
 blake2s_simd = "1"
@@ -44,5 +44,5 @@ rand_xorshift = "0.3"
 hex-literal = "0.4.1"
 
 [features]
-multicore = [] #["halo2_proofs/multicore", "rustzeos/multicore", "wasm-bindgen-rayon"]
+multicore = ["bellman/multicore"] #["halo2_proofs/multicore", "rustzeos/multicore", "wasm-bindgen-rayon"]
 default = ["multicore"]

@@ -1,7 +1,7 @@
 use bellman::groth16::{create_random_proof, Parameters};
 use bls12_381::Bls12;
 use chrono::DateTime;
-use std::{cmp::min, collections::HashMap, fs::File};
+use std::{cmp::min, collections::HashMap};
 use std::io::{self, Read, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
@@ -1422,16 +1422,15 @@ impl Wallet
         &self,
         rng: &mut impl RngCore,
         authorization: String,
-        descs: Vec<String>
+        descs: Vec<String>,
+        mint_params_bytes: &[u8],
+        burn_params_bytes: &[u8]
     ) -> Option<Transaction>
     {
         if descs.is_empty() { return None; }
         // read params files for zk-snark creation
-        // TODO: params file names should be set under settings or something..
-        let f = File::open("params_mint.bin").unwrap();
-        let mint_params = Parameters::<Bls12>::read(f, false).unwrap();
-        let f = File::open("params_burn.bin").unwrap();
-        let burn_params = Parameters::<Bls12>::read(f, false).unwrap();
+        let mint_params = Parameters::<Bls12>::read(mint_params_bytes, false).unwrap();
+        let burn_params = Parameters::<Bls12>::read(burn_params_bytes, false).unwrap();
 
         let auth = Authorization::from_string(&authorization);
         if auth.is_none() { log("authorization string invalid:"); log(&authorization); return None; }
@@ -1773,16 +1772,15 @@ impl Wallet
     pub fn transfer_asset(
         &self,
         rng: &mut impl RngCore,
-        descs: Vec<String>
+        descs: Vec<String>,
+        transfer_params_bytes: &[u8],
+        burn_params_bytes: &[u8]
     ) -> Option<Transaction>
     {
         if descs.is_empty() { return None; }
         // read params files for zk-snark creation
-        // TODO: params file names should be set under settings or something..
-        let f = File::open("params_transfer.bin").unwrap();
-        let transfer_params = Parameters::<Bls12>::read(f, false).unwrap();
-        let f = File::open("params_burn.bin").unwrap();
-        let burn_params = Parameters::<Bls12>::read(f, false).unwrap();
+        let transfer_params = Parameters::<Bls12>::read(transfer_params_bytes, false).unwrap();
+        let burn_params = Parameters::<Bls12>::read(burn_params_bytes, false).unwrap();
 
         let mut assets_to_transfer: HashMap<Symbol, Vec<(Asset, Address, String)>> = HashMap::new();
         let mut assets_to_burn: HashMap<Symbol, Vec<(Asset, Name, String)>> = HashMap::new();
@@ -2265,6 +2263,8 @@ mod tests
     use rand::rngs::OsRng;
     use super::EMPTY_ROOTS;
     use crate::wallet::Note;
+    use std::fs::File;
+    use std::io::Read;
 
     #[test]
     fn test_serde()
@@ -2362,15 +2362,26 @@ mod tests
             false
         ).unwrap();
 
+        let mut f = File::open("params_mint.bin").expect("params_mint.bin not found");
+        let metadata = std::fs::metadata("params_mint.bin").expect("unable to read metadata of params_mint.bin");
+        let mut mint_params_bytes = vec![0; metadata.len() as usize];
+        f.read(&mut mint_params_bytes).expect("buffer overflow");
+        let mut f = File::open("params_burn.bin").expect("params_burn.bin not found");
+        let metadata = std::fs::metadata("params_burn.bin").expect("unable to read metadata of params_burn.bin");
+        let mut burn_params_bytes = vec![0; metadata.len() as usize];
+        f.read(&mut burn_params_bytes).expect("buffer overflow");
+
         let tx = w.move_asset(
             &mut rng,
             format!("mschoenebeck"),
             vec![
                 format!("+ 10 EOS 'moving in!'"),
-                format!("- 10.5 ZEOS 'moving out!'"),
+                //format!("- 10.5 ZEOS 'moving out!'"),
                 format!("i 1234567890"),
                 format!("in 1234567890987654321"),
-            ]
+            ],
+            &mint_params_bytes,
+            &burn_params_bytes
         );
         assert!(tx.is_some());
         println!("{}", serde_json::to_string(&tx.unwrap()).unwrap());
@@ -2434,9 +2445,24 @@ mod tests
             false
         ).unwrap();
 
-        w.unspent_notes.push(NoteEx { block_num: 0, block_ts: 0, wallet_ts: 0, leaf_idx_arr: 7, note: Note::dummy(&mut rng, None, Some(Asset::new(100000, Symbol::from_string(&"4,ZEOS".to_string()).unwrap()).unwrap()), Some(Name::new(6138663591592764928))).2 });
+        let mut f = File::open("params_transfer.bin").expect("params_transfer.bin not found");
+        let metadata = std::fs::metadata("params_transfer.bin").expect("unable to read metadata of params_transfer.bin");
+        let mut transfer_params_bytes = vec![0; metadata.len() as usize];
+        f.read(&mut transfer_params_bytes).expect("buffer overflow");
+        let mut f = File::open("params_burn.bin").expect("params_burn.bin not found");
+        let metadata = std::fs::metadata("params_burn.bin").expect("unable to read metadata of params_burn.bin");
+        let mut burn_params_bytes = vec![0; metadata.len() as usize];
+        f.read(&mut burn_params_bytes).expect("buffer overflow");
+
+        w.unspent_notes.push(NoteEx { block_num: 0, block_ts: 0, wallet_ts: 0, leaf_idx_arr: 7, note: Note::dummy(&mut rng, None, Some(Asset::new(200000, Symbol::from_string(&"4,ZEOS".to_string()).unwrap()).unwrap()), Some(Name::new(6138663591592764928))).2 });
         w.unspent_notes.push(NoteEx { block_num: 0, block_ts: 0, wallet_ts: 0, leaf_idx_arr: 8, note: Note::dummy(&mut rng, None, Some(Asset::new(50000, Symbol::from_string(&"4,EOS".to_string()).unwrap()).unwrap()), Some(Name::new(6138663591592764928))).2 });
         w.unspent_notes.push(NoteEx { block_num: 0, block_ts: 0, wallet_ts: 0, leaf_idx_arr: 9, note: Note::dummy(&mut rng, None, Some(Asset::new(50000, Symbol::from_string(&"4,EOS".to_string()).unwrap()).unwrap()), Some(Name::new(6138663591592764928))).2 });
+
+        let mut leaves = Vec::new();
+        leaves.extend(w.unspent_notes[0].note.commitment().to_bytes());
+        leaves.extend(w.unspent_notes[1].note.commitment().to_bytes());
+        leaves.extend(w.unspent_notes[2].note.commitment().to_bytes());
+        w.add_leaves(&leaves);
 
         let tx = w.transfer_asset(
             &mut rng,
@@ -2445,7 +2471,9 @@ mod tests
                 format!("3 EOS randomaccoun 'here is another memo'"),
                 format!("4 EOS aliceaccount 'let's try to make it more interesting'"),
                 format!("2 EOS bobssaccount 'last action in this transaction'"),
-            ]
+            ],
+            &transfer_params_bytes,
+            &burn_params_bytes
         );
         assert!(tx.is_some());
         println!("{}", serde_json::to_string(&tx.unwrap()).unwrap());

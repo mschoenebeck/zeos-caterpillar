@@ -1,19 +1,45 @@
 <html>
 <head>
+    <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/jquery/1.9.1/jquery.min.js" ></script>
 </head>
 <body>
     <!-- load wasm as --target web https://rustwasm.github.io/wasm-bindgen/examples/without-a-bundler.html -->    
     <script type="module">
-        import init, { JSWallet } from './pkg_st/zeos_caterpillar.js';
+        import init, { js_move_asset_in } from './pkg_st/zeos_caterpillar.js';
         await init();
         console.log('wasm loaded');
 
-        console.log("create wallet...");
-        let utf8Encode = new TextEncoder();
-        var sender = JSWallet.create(utf8Encode.encode("This is the sender wallets seed string. It must be at least 32 characters long!"))
-        console.log("sender wallet: " + sender.to_json(true));
+        $(document).ready(function()
+        {
+            $('#mint').on('click', async function()
+            {
+                if(0 === document.getElementById('mint-params').files.length)
+                {
+                    alert('No mint params file selected');
+                    return;
+                }
 
+                var mint_params;
+                const mint_file = document.getElementById('mint-params').files[0];
+                mint_params = new Uint8Array(await mint_file.arrayBuffer());
+                console.log(mint_params);
+                var json = await js_move_asset_in(
+                    "aliceaccount",
+                    "eosio.token 10.0000 EOS za1qa92vppxewu2s5p9k8ha396490xs5llgl5md8pt0scyv9t27a4f9nx4mvvpj2kkxq6t35cfdu93 \"this is a memo\"|thezeostoken 5400.5000 ZEOS za1qa92vppxewu2s5p9k8ha396490xs5llgl5md8pt0scyv9t27a4f9nx4mvvpj2kkxq6t35cfdu93 \"\"|atomicassets 1234567890987654321 za1qa92vppxewu2s5p9k8ha396490xs5llgl5md8pt0scyv9t27a4f9nx4mvvpj2kkxq6t35cfdu93 \"NFT mint memo\"",
+                    "zeos4privacy",
+                    "thezeosalias@public",
+                    "thezeostoken",
+                    "4,ZEOS",
+                    50000,
+                    10000,
+                    mint_params
+                );
+                console.log(json);
+            });
+        });
 
     </script>
+    <input type='file' id='mint-params' />
+    <button id="mint">mint</button>
 </body>
 </html>
