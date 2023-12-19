@@ -523,7 +523,7 @@ mod tests
     use bellman::groth16::VerifyingKey;
     use std::fs::File;
     use hex;
-    use crate::contract::AffineProofBytes;
+    use crate::contract::AffineProofBytesLE;
 
     #[test]
     fn test_transfer_circuit()
@@ -851,7 +851,7 @@ mod tests
 
         let f = File::create("proof_transfer.bin").unwrap();
         proof.write(f).unwrap();
-        println!("{}", AffineProofBytes::from(proof.clone()).to_string());
+        println!("{}", AffineProofBytesLE::from(proof.clone()).to_string());
 
         println!("pack inputs");
         let mut inputs = vec![];

@@ -14,7 +14,7 @@ use crate::{
     blake2s7r::Params as Blake2s7rParams,
     circuit::{burn::Burn, transfer::Transfer, mint::Mint},
     constants::MERKLE_TREE_DEPTH,
-    contract::{ScalarBytes, PlsFtTransfer, PlsNftTransfer, PlsMint, AffineProofBytes, PlsMintAction, PlsBurn, PlsBurnAction, PlsTransfer, PlsTransferAction},
+    contract::{ScalarBytes, PlsFtTransfer, PlsNftTransfer, PlsMint, AffineProofBytesLE, PlsMintAction, PlsBurn, PlsBurnAction, PlsTransfer, PlsTransferAction},
     eosio::{Asset, Authorization, Name, SymbolCode, Transaction, Action, Symbol},
     keys::{IncomingViewingKey, SpendingKey, FullViewingKey, PreparedIncomingViewingKey},
     note::{Note, Rseed, nullifier::ExtractedNullifier},
@@ -111,7 +111,7 @@ impl NoteEx
         self.leaf_idx_arr % MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH) - MT_ARR_LEAF_ROW_OFFSET!(MERKLE_TREE_DEPTH)
     }
 }
-
+/*
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Settings
 {
@@ -261,7 +261,7 @@ impl Default for Settings
         }
     }
 }
-
+*/
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Wallet
 {
@@ -270,12 +270,15 @@ pub struct Wallet
     ivk: IncomingViewingKey, // READ-ONLY WALLET: only valid if seed == ""
     diversifiers: Vec<u64>,
     
-    // contract global data
+    // wallet metadata
+    chain_id: [u8; 32],
+    protocol_contract: Name,
+    alias_authority: Authorization,
     block_num: u32,
     leaf_count: u64,
 
     // wallet specific settings
-    settings: Settings,
+    //settings: Settings,
 
     // the different note pools
     unspent_notes: Vec<NoteEx>,
@@ -308,7 +311,10 @@ impl Wallet
 {
     pub fn create(
         seed: &[u8],
-        is_ivk: bool
+        is_ivk: bool,
+        chain_id: [u8; 32],
+        protocol_contract: Name,
+        alias_authority: Authorization
     ) -> Option<Self>
     {
         if is_ivk { if seed.len() != 64 { log("ivk seed length must equal 64 bytes"); return None; } }
@@ -332,9 +338,11 @@ impl Wallet
             seed: seed.to_vec(),
             ivk,
             diversifiers,
+            chain_id,
+            protocol_contract,
+            alias_authority,
             block_num: 0,
             leaf_count: 0,
-            settings: Default::default(),
             unspent_notes: vec![],
             spent_notes: vec![],
             outgoing_notes: vec![],
@@ -352,9 +360,13 @@ impl Wallet
         {
             writer.write_u64::<LittleEndian>(*d)?;
         }
+        writer.write_all(&self.chain_id)?;
+        writer.write_u64::<LittleEndian>(self.protocol_contract.raw())?;
+        writer.write_u64::<LittleEndian>(self.alias_authority.actor.raw())?;
+        writer.write_u64::<LittleEndian>(self.alias_authority.permission.raw())?;
         writer.write_u32::<LittleEndian>(self.block_num)?;
         writer.write_u64::<LittleEndian>(self.leaf_count)?;
-        self.settings.write(&mut writer)?;
+        //self.settings.write(&mut writer)?;
         writer.write_u32::<LittleEndian>(self.unspent_notes.len() as u32)?;
         for n in self.unspent_notes.iter()
         {
@@ -405,9 +417,16 @@ impl Wallet
             diversifiers.push(d);
         }
 
+        let mut chain_id = [0; 32];
+        reader.read_exact(&mut chain_id)?;
+        let protocol_contract = Name::new(reader.read_u64::<LittleEndian>()?);
+        let alias_authority = Authorization{
+            actor: Name::new(reader.read_u64::<LittleEndian>()?),
+            permission: Name::new(reader.read_u64::<LittleEndian>()?)
+        };
         let block_num = reader.read_u32::<LittleEndian>()?;
         let leaf_count = reader.read_u64::<LittleEndian>()?;
-        let settings = Settings::read(&mut reader)?;
+        //let settings = Settings::read(&mut reader)?;
 
         let unspent_notes_len = reader.read_u32::<LittleEndian>()? as usize;
         let mut unspent_notes = vec![];
@@ -439,9 +458,12 @@ impl Wallet
             seed,
             ivk,
             diversifiers,
+            chain_id,
+            protocol_contract,
+            alias_authority,
             block_num,
             leaf_count: 0,
-            settings,
+            //settings,
             unspent_notes,
             spent_notes,
             outgoing_notes,
@@ -476,9 +498,12 @@ impl Wallet
         64 +                                // Incoming Viewing Key
         4 +                                 // diversifiers.len()
         self.diversifiers.len() * 8 +
+        32 +                                // chain ID
+        8 +                                 // protocol contract
+        16 +                                // alias authority
         4 +                                 // latest block number
         8 +                                 // leaf count
-        self.settings.size() +
+        //self.settings.size() +
         4 +                                 // unspent_notes.len()
         self.unspent_notes.len() * 679 +
         4 +                                 // spent_notes.len()
@@ -503,16 +528,16 @@ impl Wallet
         self.leaf_count
     }
 
-    pub fn settings(&self) -> &Settings
-    {
-        &self.settings
-    }
-
-    pub fn update_settings(&mut self, settings: Settings)
-    {
-        self.settings = settings;
-    }
-
+    //pub fn settings(&self) -> &Settings
+    //{
+    //    &self.settings
+    //}
+//
+    //pub fn update_settings(&mut self, settings: Settings)
+    //{
+    //    self.settings = settings;
+    //}
+/*
     // desc format: <(+/- | i/o | in/out)> <asset> [<memo>]
     // examples:
     //      + 10 EOS "this is an optional memo"
@@ -885,7 +910,7 @@ impl Wallet
 
         None
     }
-
+*/
     fn find_combination(
         &self,
         rng: &mut impl RngCore,
@@ -1417,7 +1442,7 @@ impl Wallet
             Self::permutations(n - 1, a, out);
         }
     }
-
+/*
     pub fn move_asset(
         &self,
         rng: &mut impl RngCore,
@@ -1994,7 +2019,7 @@ impl Wallet
 
         Some(transaction)
     }
-
+*/
     pub fn balances(&self) -> Vec<Asset>
     {
         let mut map = HashMap::new();
@@ -2088,8 +2113,8 @@ impl Wallet
         {
             for action in tx["trx"]["transaction"]["actions"].as_array().unwrap()
             {
-                if (action["account"].as_str().unwrap().eq(&self.settings.protocol_contract.to_string()) || 
-                    action["account"].as_str().unwrap().eq(&self.settings.alias_authority.actor.to_string())) && (
+                if (action["account"].as_str().unwrap().eq(&self.protocol_contract.to_string()) || 
+                    action["account"].as_str().unwrap().eq(&self.alias_authority.actor.to_string())) && (
                     action["name"].as_str().unwrap().eq("mint") ||
                     action["name"].as_str().unwrap().eq("transfer") ||
                     action["name"].as_str().unwrap().eq("burn") ||
@@ -2162,7 +2187,7 @@ impl Wallet
 
         for i in (0..notes.len()).rev()
         {
-            if notes[i].note.code().eq(&self.settings.nft_contract) && notes[i].note.symbol().raw() == 0
+            if notes[i].note.symbol().raw() == 0
             {
                 if asset.amount() as u64 == notes[i].note.amount()
                 {
@@ -2258,7 +2283,7 @@ mod tests
     use crate::{
         wallet::{Wallet, NoteEx},
         eosio::{Authorization, Name, Transaction, Action, Symbol, Asset},
-        contract::{PlsMint, ScalarBytes, AffineProofBytes}
+        contract::{PlsMint, ScalarBytes, AffineProofBytesLE}
     };
     use rand::rngs::OsRng;
     use super::EMPTY_ROOTS;
@@ -2271,7 +2296,10 @@ mod tests
     {
         let mut w = Wallet::create(
             b"this is a sample seed which should be at least 32 bytes long...",
-            false
+            false,
+            [0; 32],
+            Name::from_string(&format!("zeos4privacy")).unwrap(),
+            Authorization::from_string(&format!("thezeosalias@public")).unwrap()
         ).unwrap();
         w.insert_into_merkle_tree(&EMPTY_ROOTS[1]);
         w.insert_into_merkle_tree(&EMPTY_ROOTS[2]);
@@ -2319,7 +2347,7 @@ mod tests
                         value: 0,
                         symbol: Symbol::new(0),
                         code: Name::new(0),
-                        proof: AffineProofBytes([0; 384])
+                        proof: AffineProofBytesLE([0; 384])
                     }.into()
                 }
             ]
@@ -2327,7 +2355,7 @@ mod tests
 
         println!("{}", serde_json::to_string(&tx).unwrap());
     }
-
+/*
     #[test]
     fn test_process_move_desc()
     {
@@ -2386,7 +2414,7 @@ mod tests
         assert!(tx.is_some());
         println!("{}", serde_json::to_string(&tx.unwrap()).unwrap());
     }
-
+*/
     #[test]
     fn test_process_block()
     {
@@ -2420,7 +2448,10 @@ mod tests
 
         let mut w = Wallet::create(
             &vec![116,104,105,115,32,105,115,32,97,32,114,97,110,100,111,109,32,115,101,101,100,32,119,104,105,99,104,32,105,115,32,97,116,32,108,101,97,115,116,32,51,50,32,98,121,116,101,115,32,108,111,110,103,33],
-            false
+            false,
+            [0; 32],
+            Name::from_string(&format!("zeos4privacy")).unwrap(),
+            Authorization::from_string(&format!("thezeosalias@public")).unwrap()
         ).unwrap();
 
         w.add_leaves(leaves.as_slice());
@@ -2435,14 +2466,17 @@ mod tests
         println!("{:?}", serde_json::to_string(&w.get_sister_path_and_root(&w.unspent_notes[0])));
 
     }
-
+/*
     #[test]
     fn test_transfer_asset()
     {
         let mut rng = OsRng.clone();
         let mut w = Wallet::create(
             b"this is a sample seed which should be at least 32 bytes long...",
-            false
+            false,
+            [0; 32],
+            Name::from_string(&format!("zeos4privacy")).unwrap(),
+            Authorization::from_string(&format!("thezeosalias@public")).unwrap()
         ).unwrap();
 
         let mut f = File::open("params_transfer.bin").expect("params_transfer.bin not found");
@@ -2478,7 +2512,7 @@ mod tests
         assert!(tx.is_some());
         println!("{}", serde_json::to_string(&tx.unwrap()).unwrap());
     }
-
+*/
     #[test]
     fn test_subsets()
     {

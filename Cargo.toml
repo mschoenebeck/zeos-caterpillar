@@ -15,6 +15,7 @@ arrayvec = "0.7.2"
 base64 = "0.21.2"
 bech32 = "0.9.1"
 bellman = { version = "0.14.0", default-features = false, features = ["groth16"] }
+pairing = "0.23"
 bitvec = "1"
 blake2b_simd = "1"
 blake2s_simd = "1"

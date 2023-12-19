@@ -14,7 +14,7 @@ pub mod spec;
 pub mod wallet;
 
 use crate::eosio::{Name, Symbol, Asset, Authorization, Action, Transaction};
-use crate::contract::{PlsFtTransfer, PlsMint, PlsNftTransfer, PlsMintAction, ScalarBytes, AffineProofBytes};
+use crate::contract::{PlsFtTransfer, PlsMint, PlsNftTransfer, PlsMintAction, ScalarBytes, AffineProofBytesLE};
 use crate::address::Address;
 use crate::note::{Rseed, Note, nullifier::ExtractedNullifier};
 use crate::note_encryption::{NoteEncryption, TransmittedNoteCiphertext, derive_esk, ka_derive_public};
@@ -228,7 +228,7 @@ fn move_asset_in(
             value: note.amount(),
             symbol: note.symbol().clone(),
             code: contract.clone(),
-            proof: AffineProofBytes::from(proof)
+            proof: AffineProofBytesLE::from(proof)
         }];
         stack.append(&mut pls_mint_vec);
         pls_mint_vec = stack;
@@ -284,7 +284,7 @@ fn move_asset_in(
             value: note.amount(),
             symbol: note.symbol().clone(),
             code: contract.clone(),
-            proof: AffineProofBytes::from(proof)
+            proof: AffineProofBytesLE::from(proof)
         }];
         stack.append(&mut pls_mint_vec);
         pls_mint_vec = stack;
@@ -540,7 +540,10 @@ pub unsafe extern "C" fn wallet_create(
 
     Box::into_raw(Box::new(Wallet::create(
         seed_str.as_bytes(),
-        false
+        false,
+        [0; 32],
+        Name::new(0),
+        Authorization { actor: Name::new(0), permission: Name::new(0) }
     ).unwrap()))
 }
 
@@ -644,7 +647,7 @@ pub extern fn wallet_json(
     let c_string = CString::new(wallet.to_json(pretty)).expect("CString::new failed");
     c_string.into_raw() // Move ownership to C
 }
-
+/*
 #[cfg(target_os = "linux")]
 #[no_mangle]
 pub extern fn wallet_settings_json(
@@ -686,7 +689,7 @@ pub unsafe extern fn wallet_update_settings(
 
     wallet.update_settings(serde_json::from_str(settings_json_str).unwrap());
 }
-
+*/
 #[cfg(target_os = "linux")]
 #[no_mangle]
 pub extern fn wallet_balances_json(
@@ -768,7 +771,7 @@ pub unsafe extern fn free_string(ptr: *const libc::c_char)
     // Take the ownership back to rust and drop the owner
     let _ = CString::from_raw(ptr as *mut _);
 }
-
+/*
 #[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern fn wallet_move(
@@ -832,7 +835,7 @@ pub unsafe extern fn wallet_transfer(
     if tx.is_none() { return CString::new("Error: ".to_string()).unwrap().into_raw(); }
     CString::new(serde_json::to_string(&tx.unwrap()).unwrap()).expect("CString::new failed").into_raw()
 }
-
+*/
 #[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern fn wallet_add_leaves(

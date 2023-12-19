@@ -1,9 +1,11 @@
-use bellman::groth16::Proof;
+use bellman::groth16::{Proof, VerifyingKey};
 use bls12_381::Bls12;
+use pairing::{Engine, MillerLoopResult, MultiMillerLoop};
 use serde::{Serialize, Deserialize, Serializer, Deserializer, de::Visitor, de};
 use serde_json::Value;
 use crate::eosio::{Asset, Name, Symbol};
-use core::ops::{Mul, MulAssign};
+//use core::ops::{Mul, MulAssign};
+use std::ops::{AddAssign, Neg};
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -66,18 +68,18 @@ impl From<bls12_381::Scalar> for ScalarBytes {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct AffineProofBytes(pub [u8; 384]);
+pub struct AffineVerifyingKeyBytesLE(pub Vec<u8>);
 
-impl AffineProofBytes
+impl AffineVerifyingKeyBytesLE
 {
     pub fn to_string(&self) -> String
     {
-        hex::encode(self.0)
+        hex::encode(&self.0)
     }
 }
 
 // serde_json traits
-impl Serialize for AffineProofBytes
+impl Serialize for AffineVerifyingKeyBytesLE
 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -87,32 +89,145 @@ impl Serialize for AffineProofBytes
     }
 }
 
-impl From<Proof<Bls12>> for AffineProofBytes
+impl From<VerifyingKey<Bls12>> for AffineVerifyingKeyBytesLE
 {
+    fn from(vk: VerifyingKey<Bls12>) -> Self
+    {
+        // need to reverse endianess for all elements because 'to_uncompressed()' has big-endian byte encoding
+        let mut alpha_g1_bytes = vk.alpha_g1.to_uncompressed();
+        alpha_g1_bytes[ 0..48].reverse();       // alpha_g1.x
+        alpha_g1_bytes[48..96].reverse();       // alpha_g1.y
+        let mut beta_g1_bytes = vk.beta_g1.to_uncompressed();
+        beta_g1_bytes[ 0..48].reverse();        // beta_g1.x
+        beta_g1_bytes[48..96].reverse();        // beta_g1.y
+        let mut beta_g2_bytes = vk.beta_g2.to_uncompressed();
+        beta_g2_bytes[  0.. 48].reverse();      // beta_g2.x.c1
+        beta_g2_bytes[ 48.. 96].reverse();      // beta_g2.x.c0
+        beta_g2_bytes[ 96..144].reverse();      // beta_g2.y.c1
+        beta_g2_bytes[144..192].reverse();      // beta_g2.y.c0
+        let mut gamma_g2_bytes = vk.gamma_g2.to_uncompressed();
+        gamma_g2_bytes[  0.. 48].reverse();     // gamma_g2.x.c1
+        gamma_g2_bytes[ 48.. 96].reverse();     // gamma_g2.x.c0
+        gamma_g2_bytes[ 96..144].reverse();     // gamma_g2.y.c1
+        gamma_g2_bytes[144..192].reverse();     // gamma_g2.y.c0
+        let mut delta_g1_bytes = vk.delta_g1.to_uncompressed();
+        delta_g1_bytes[ 0..48].reverse();       // delta_g1.x
+        delta_g1_bytes[48..96].reverse();       // delta_g1.y
+        let mut delta_g2_bytes = vk.delta_g2.to_uncompressed();
+        delta_g2_bytes[  0.. 48].reverse();     // delta_g2.x.c1
+        delta_g2_bytes[ 48.. 96].reverse();     // delta_g2.x.c0
+        delta_g2_bytes[ 96..144].reverse();     // delta_g2.y.c1
+        delta_g2_bytes[144..192].reverse();     // delta_g2.y.c0
+        let mut ic_bytes = vec![0; 4 + vk.ic.len() * 96];
+        ic_bytes[0..4].copy_from_slice(&(vk.ic.len() as u32).to_le_bytes());
+        for (i, it) in vk.ic.iter().enumerate()
+        {
+            let mut it_bytes = it.to_uncompressed();
+            it_bytes[ 0..48].reverse();         // it.x
+            it_bytes[48..96].reverse();         // it.y
+            ic_bytes[4+i*96..4+(i+1)*96].copy_from_slice(&it_bytes);
+        }
+
+        let mut bytes = vec![0; 96 + 96 + 192 + 192 + 96 + 192 + 4 + vk.ic.len() * 96];
+        bytes[  0.. 48].copy_from_slice(&alpha_g1_bytes[  0.. 48]);     // alpha_g1_bytes.x
+        bytes[ 48.. 96].copy_from_slice(&alpha_g1_bytes[ 48.. 96]);     // alpha_g1_bytes.y
+        bytes[ 96..144].copy_from_slice(&beta_g1_bytes[  0.. 48]);      // beta_g1_bytes.x
+        bytes[144..192].copy_from_slice(&beta_g1_bytes[ 48.. 96]);      // beta_g1_bytes.y
+        bytes[192..240].copy_from_slice(&beta_g2_bytes[ 48.. 96]);      // beta_g2.x.c0
+        bytes[240..288].copy_from_slice(&beta_g2_bytes[  0.. 48]);      // beta_g2.x.c1
+        bytes[288..336].copy_from_slice(&beta_g2_bytes[144..192]);      // beta_g2.y.c0
+        bytes[336..384].copy_from_slice(&beta_g2_bytes[ 96..144]);      // beta_g2.y.c1
+        bytes[384..432].copy_from_slice(&gamma_g2_bytes[ 48.. 96]);     // gamma_g2.x.c0
+        bytes[432..480].copy_from_slice(&gamma_g2_bytes[  0.. 48]);     // gamma_g2.x.c1
+        bytes[480..528].copy_from_slice(&gamma_g2_bytes[144..192]);     // gamma_g2.y.c0
+        bytes[528..576].copy_from_slice(&gamma_g2_bytes[ 96..144]);     // gamma_g2.y.c1
+        bytes[576..624].copy_from_slice(&delta_g1_bytes[ 0..48]);       // delta_g1.x
+        bytes[624..672].copy_from_slice(&delta_g1_bytes[48..96]);       // delta_g1.y
+        bytes[672..720].copy_from_slice(&delta_g2_bytes[ 48.. 96]);     // delta_g2.x.c0
+        bytes[720..768].copy_from_slice(&delta_g2_bytes[  0.. 48]);     // delta_g2.x.c1
+        bytes[768..816].copy_from_slice(&delta_g2_bytes[144..192]);     // delta_g2.y.c0
+        bytes[816..864].copy_from_slice(&delta_g2_bytes[ 96..144]);     // delta_g2.y.c1
+        bytes[864..].copy_from_slice(&ic_bytes);
+
+        AffineVerifyingKeyBytesLE(bytes)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AffineProofBytesLE(pub [u8; 384]);
+
+impl AffineProofBytesLE
+{
+    pub fn to_string(&self) -> String
+    {
+        hex::encode(self.0)
+    }
+}
+
+// serde_json traits
+impl Serialize for AffineProofBytesLE
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl From<Proof<Bls12>> for AffineProofBytesLE
+{
+    //fn from(p: Proof<Bls12>) -> Self
+    //{
+    //    let a_bytes = p.a.to_uncompressed();
+    //    let a_x = Fp::from_bytes(&a_bytes[ 0..48].try_into().unwrap()).unwrap();
+    //    let a_y = Fp::from_bytes(&a_bytes[48..96].try_into().unwrap()).unwrap();
+    //    let b_bytes = p.b.to_uncompressed();
+    //    let b_x_c1 = Fp::from_bytes(&b_bytes[  0.. 48].try_into().unwrap()).unwrap();
+    //    let b_x_c0 = Fp::from_bytes(&b_bytes[ 48.. 96].try_into().unwrap()).unwrap();
+    //    let b_y_c1 = Fp::from_bytes(&b_bytes[ 96..144].try_into().unwrap()).unwrap();
+    //    let b_y_c0 = Fp::from_bytes(&b_bytes[144..192].try_into().unwrap()).unwrap();
+    //    let c_bytes = p.c.to_uncompressed();
+    //    let c_x = Fp::from_bytes(&c_bytes[ 0..48].try_into().unwrap()).unwrap();
+    //    let c_y = Fp::from_bytes(&c_bytes[48..96].try_into().unwrap()).unwrap();
+//
+    //    let mut bytes = [0; 384];
+    //    bytes[  0.. 48].copy_from_slice(&a_x.to_raw_le_bytes());
+    //    bytes[ 48.. 96].copy_from_slice(&a_y.to_raw_le_bytes());
+    //    bytes[ 96..144].copy_from_slice(&b_x_c0.to_raw_le_bytes());
+    //    bytes[144..192].copy_from_slice(&b_x_c1.to_raw_le_bytes());
+    //    bytes[192..240].copy_from_slice(&b_y_c0.to_raw_le_bytes());
+    //    bytes[240..288].copy_from_slice(&b_y_c1.to_raw_le_bytes());
+    //    bytes[288..336].copy_from_slice(&c_x.to_raw_le_bytes());
+    //    bytes[336..384].copy_from_slice(&c_y.to_raw_le_bytes());
+    //    AffineProofBytes(bytes)
+    //}
+
     fn from(p: Proof<Bls12>) -> Self
     {
-        let a_bytes = p.a.to_uncompressed();
-        let a_x = Fp::from_bytes(&a_bytes[ 0..48].try_into().unwrap()).unwrap();
-        let a_y = Fp::from_bytes(&a_bytes[48..96].try_into().unwrap()).unwrap();
-        let b_bytes = p.b.to_uncompressed();
-        let b_x_c1 = Fp::from_bytes(&b_bytes[  0.. 48].try_into().unwrap()).unwrap();
-        let b_x_c0 = Fp::from_bytes(&b_bytes[ 48.. 96].try_into().unwrap()).unwrap();
-        let b_y_c1 = Fp::from_bytes(&b_bytes[ 96..144].try_into().unwrap()).unwrap();
-        let b_y_c0 = Fp::from_bytes(&b_bytes[144..192].try_into().unwrap()).unwrap();
-        let c_bytes = p.c.to_uncompressed();
-        let c_x = Fp::from_bytes(&c_bytes[ 0..48].try_into().unwrap()).unwrap();
-        let c_y = Fp::from_bytes(&c_bytes[48..96].try_into().unwrap()).unwrap();
+        // need to reverse endianess for all elements because 'to_uncompressed()' has big-endian byte encoding
+        let mut a_bytes = p.a.to_uncompressed();
+        a_bytes[ 0..48].reverse();      // a.x
+        a_bytes[48..96].reverse();      // a.y
+        let mut b_bytes = p.b.to_uncompressed();
+        b_bytes[  0.. 48].reverse();    // b.x.c1
+        b_bytes[ 48.. 96].reverse();    // b.x.c0
+        b_bytes[ 96..144].reverse();    // b.y.c1
+        b_bytes[144..192].reverse();    // b.y.c0
+        let mut c_bytes = p.c.to_uncompressed();
+        c_bytes[ 0..48].reverse();      // c.x
+        c_bytes[48..96].reverse();      // c.y
 
         let mut bytes = [0; 384];
-        bytes[  0.. 48].copy_from_slice(&a_x.to_raw_le_bytes());
-        bytes[ 48.. 96].copy_from_slice(&a_y.to_raw_le_bytes());
-        bytes[ 96..144].copy_from_slice(&b_x_c0.to_raw_le_bytes());
-        bytes[144..192].copy_from_slice(&b_x_c1.to_raw_le_bytes());
-        bytes[192..240].copy_from_slice(&b_y_c0.to_raw_le_bytes());
-        bytes[240..288].copy_from_slice(&b_y_c1.to_raw_le_bytes());
-        bytes[288..336].copy_from_slice(&c_x.to_raw_le_bytes());
-        bytes[336..384].copy_from_slice(&c_y.to_raw_le_bytes());
-        AffineProofBytes(bytes)
+        bytes[  0.. 48].copy_from_slice(&a_bytes[  0.. 48]);    // a.x
+        bytes[ 48.. 96].copy_from_slice(&a_bytes[ 48.. 96]);    // a.y
+        bytes[ 96..144].copy_from_slice(&b_bytes[ 48.. 96]);    // b.x.c0
+        bytes[144..192].copy_from_slice(&b_bytes[  0.. 48]);    // b.x.c1
+        bytes[192..240].copy_from_slice(&b_bytes[144..192]);    // b.y.c0
+        bytes[240..288].copy_from_slice(&b_bytes[ 96..144]);    // b.y.c1
+        bytes[288..336].copy_from_slice(&c_bytes[  0.. 48]);    // c.x
+        bytes[336..384].copy_from_slice(&c_bytes[ 48.. 96]);    // c.y
+        AffineProofBytesLE(bytes)
     }
 }
 
@@ -123,7 +238,7 @@ pub struct PlsMint
     pub value: u64,
     pub symbol: Symbol,
     pub code: Name,
-    pub proof: AffineProofBytes
+    pub proof: AffineProofBytesLE
 }
 
 impl From<PlsMint> for Value {
@@ -152,7 +267,7 @@ pub struct PlsTransfer
     pub nf: ScalarBytes,
     pub cm_b: ScalarBytes,
     pub cm_c: ScalarBytes,
-    pub proof: AffineProofBytes
+    pub proof: AffineProofBytesLE
 }
 
 impl From<PlsTransfer> for Value {
@@ -188,7 +303,7 @@ pub struct PlsBurn
     pub amount_c: u64,
     pub account_c: Name,
     pub memo_c: String,
-    pub proof: AffineProofBytes
+    pub proof: AffineProofBytesLE
 }
 
 impl From<PlsBurn> for Value {
@@ -246,7 +361,7 @@ impl From<PlsNftTransfer> for Value {
 
 // Helper class 'Fp' copied from bls crate because bytes are not accessible rawly in
 // original version (i.e. without implicitly performing montgomery reduce)
-
+/*
 #[derive(Copy, Clone)]
 pub struct Fp(pub [u64; 6]);
 
@@ -511,5 +626,85 @@ impl Fp
         let (t10, t11) = mac(t10, self.0[5], rhs.0[5], carry);
 
         Self::montgomery_reduce(t0, t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11)
+    }
+}
+*/
+
+#[cfg(test)]
+mod tests
+{
+    use super::*;
+    use crate::Parameters;
+    use crate::note::Note;
+    use std::fs::File;
+    use std::io::Read;
+    use bellman::groth16::{verify_proof, prepare_verifying_key};
+    use bellman::gadgets::{blake2s, boolean, boolean::Boolean, multipack};
+    use bls12_381::Scalar;
+    use bls12_381::Bls12;
+    use crate::Mint;
+    use rand::rngs::OsRng;
+    use crate::create_random_proof;
+    use crate::SpendingKey;
+    use crate::FullViewingKey;
+    use crate::Rseed;
+    use crate::ExtractedNullifier;
+
+    #[test]
+    fn test()
+    {
+        let mut f = File::open("params_mint.bin").expect("params_mint.bin not found");
+        let metadata = std::fs::metadata("params_mint.bin").expect("unable to read metadata of params_mint.bin");
+        let mut mint_params_bytes = vec![0; metadata.len() as usize];
+        f.read(&mut mint_params_bytes).expect("buffer overflow");
+        let mint_params = Parameters::<Bls12>::read(mint_params_bytes.as_slice(), false).unwrap();
+        println!("{}", AffineVerifyingKeyBytesLE::from(mint_params.vk.clone()).to_string());
+        let mut rng = OsRng.clone();
+
+        // create proof
+        // key material
+        let sk = SpendingKey::from_seed(b"This is Alice seed string! Usually this is just a listing of words. Here we just use sentences.");
+        let fvk = FullViewingKey::from_spending_key(&sk);
+        let recipient = fvk.default_address().1;
+        let note = Note::from_parts(
+            0,
+            recipient,
+            Asset::from_string(&"5000.0000 EOS".to_string()).unwrap(),
+            Name::from_string(&"eosio.token".to_string()).unwrap(),
+            Rseed([42; 32]),
+            ExtractedNullifier(Scalar::one()),
+            [0; 512]
+        );
+        let circuit_instance = Mint {
+            value: Some(note.amount()),
+            symbol: Some(note.symbol().raw()),
+            code: Some(note.code().raw()),
+            address: Some(note.address()),
+            rcm: Some(note.rcm()),
+            proof_generation_key: Some(sk.proof_generation_key()),
+        };
+        let proof = create_random_proof(circuit_instance, &mint_params, &mut rng).unwrap();
+
+        let a = PlsMint{
+            cm: ScalarBytes(note.commitment().to_bytes()),
+            value: note.amount(),
+            symbol: note.symbol().clone(),
+            code: note.code().clone(),
+            proof: AffineProofBytesLE::from(proof.clone())
+        };
+        println!("{}", serde_json::to_string(&a).unwrap());
+
+        let mut asset_contents = [0; 24];
+        asset_contents[0..8].copy_from_slice(&note.amount().to_le_bytes());
+        asset_contents[8..16].copy_from_slice(&note.symbol().raw().to_le_bytes());
+        asset_contents[16..24].copy_from_slice(&note.code().raw().to_le_bytes());
+        let asset_contents = multipack::bytes_to_bits_le(&asset_contents);
+        let asset_contents: Vec<Scalar> = multipack::compute_multipacking(&asset_contents);
+        assert_eq!(asset_contents.len(), 1);
+        let mut inputs = vec![];
+        inputs.push(note.commitment().0);
+        inputs.extend(asset_contents.clone());
+
+        assert!(verify_proof(&prepare_verifying_key(&mint_params.vk), &proof, &inputs).is_ok());
     }
 }
