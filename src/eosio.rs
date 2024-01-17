@@ -1,73 +1,86 @@
 //! Helper structs to deal with EOSIO/Antelope related types.
 
-use std::cmp::{min, max};
+use std::{error::Error, fmt, cmp::{min, max}};
 use serde::{Serialize, Serializer, ser::SerializeStruct, Deserialize, Deserializer, de::Visitor, de::SeqAccess, de::MapAccess, de};
 use serde_json::Value;
-use std::fmt;
 use std::iter::successors;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Name(u64);
+#[derive(Debug)]
+pub enum NameError
+{
+    StringTooLong,
+    CharNotAllowed(String),
+    ThirteenthCharacter,
+}
+impl Error for NameError {}
+impl fmt::Display for NameError
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result
+    {
+        match self
+        {
+            Self::StringTooLong => write!(f, "invalid EOSIO name: string is too long to be a valid name"),
+            Self::CharNotAllowed(s) => write!(f, "invalid EOSIO name: character '{}' not allowed in character set for names", s),
+            Self::ThirteenthCharacter => write!(f, "invalid EOSIO name: thirteenth character in name cannot be a letter that comes after j"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Name(pub u64);
 
 impl Name
 {
-    pub fn new(raw: u64) -> Self
-    {
-        Name(raw)
-    }
-
-    pub fn from_string(str: &String) -> Option<Self>
+    pub fn from_string(str: &String) -> Result<Self, NameError>
     {
         let mut value = 0;
         if str.len() > 13
         {
             // string is too long to be a valid name
-            return None;
+            return Err(NameError::StringTooLong);
         }
         if str.is_empty()
         {
-            return Some(Name(0));
+            return Ok(Name(0));
         }
         let n = min(str.len(), 12);
         for i in 0..n
         {
             value <<= 5;
-            let c = Self::char_to_value(str.as_bytes()[i]);
-            if c.is_none() { return None; }
-            value |= c.unwrap() as u64;
+            let c = Self::char_to_value(str.as_bytes()[i])?;
+            value |= c as u64;
         }
         value <<= 4 + 5*(12 - n);
         if str.len() == 13
         {
-            let c = Self::char_to_value(str.as_bytes()[12]);
-            if c.is_none() { return None; }
-            let v = c.unwrap() as u64;
+            let c = Self::char_to_value(str.as_bytes()[12])?;
+            let v = c as u64;
             if v > 0x0F
             {
                 // thirteenth character in name cannot be a letter that comes after j
-                return None;
+                return Err(NameError::ThirteenthCharacter);
             }
             value |= v;
         }
-        Some(Name(value))
+        Ok(Name(value))
     }
 
-    pub fn char_to_value(c: u8) -> Option<u8>
+    pub fn char_to_value(c: u8) -> Result<u8, NameError>
     {
         if c == '.' as u8
         {
-        return Some(0);
+        return Ok(0);
         }
         else if  c >= '1' as u8 && c <= '5' as u8
         {
-        return Some((c - '1' as u8) + 1);
+        return Ok((c - '1' as u8) + 1);
         }
         else if c >= 'a' as u8 && c <= 'z' as u8
         {
-        return Some((c - 'a' as u8) + 6);
+        return Ok((c - 'a' as u8) + 6);
         }
         // character is not in allowed character set for names
-        return None;
+        return Err(NameError::CharNotAllowed((c as char).to_string()));
     }
 
     pub fn length(&self) -> u8
@@ -238,7 +251,7 @@ impl<'de> Deserialize<'de> for Name
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SymbolCode(u64);
 
 impl SymbolCode
@@ -359,15 +372,10 @@ impl<'de> Deserialize<'de> for SymbolCode
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Symbol(u64);
+pub struct Symbol(pub u64);
 
 impl Symbol
 {
-    pub fn new(raw: u64) -> Self
-    {
-        Symbol(raw)
-    }
-
     pub fn from_sc_precision(sc: SymbolCode, precision: u8) -> Self
     {
         Symbol((sc.raw() << 8) | precision as u64)
@@ -535,6 +543,11 @@ impl Asset
         self.amount
     }
 
+    pub fn set_amount(&mut self, amount: i64)
+    {
+        self.amount = amount;
+    }
+
     pub fn symbol(&self) -> &Symbol
     {
         &self.symbol
@@ -658,7 +671,7 @@ impl<'de> Visitor<'de> for AssetVisitor {
     type Value = Asset;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a string of the format: '10.000 EOS'")
+        formatter.write_str("a string of the format: '10.0000 EOS'")
     }
 
     fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
@@ -691,10 +704,10 @@ impl Authorization
     {
         // determine EOSIO Authorization tuple: actor@permission
         let authorization_parts: Vec<String> = str.split('@').map(|s| s.to_string()).collect();
-        let actor = Name::from_string(&authorization_parts[0]);
+        let actor = Some(Name::from_string(&authorization_parts[0]).unwrap());
         let permission =
-            if authorization_parts.len() == 1 { Name::from_string(&"active".to_string()) } else
-            if authorization_parts.len() == 2 { Name::from_string(&authorization_parts[1]) } else
+            if authorization_parts.len() == 1 { Some(Name::from_string(&"active".to_string()).unwrap()) } else
+            if authorization_parts.len() == 2 { Some(Name::from_string(&authorization_parts[1]).unwrap()) } else
             { None };
         if actor.is_none() || permission.is_none() { return None; }
         Some(Authorization{
@@ -814,7 +827,7 @@ impl<'de> Deserialize<'de> for Authorization {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Action
 {
     pub account: Name,
@@ -823,23 +836,7 @@ pub struct Action
     pub data: Value,
 }
 
-impl Serialize for Action
-{
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        // 4 is the number of fields in the struct.
-        let mut state = serializer.serialize_struct("Action", 4)?;
-        state.serialize_field("account", &self.account)?;
-        state.serialize_field("name", &self.name)?;
-        state.serialize_field("authorization", &self.authorization)?;
-        state.serialize_field("data", &self.data)?;
-        state.end()
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction
 {
     // For now, we simplify EOSIO transactions to just a single vector of actions.
@@ -889,7 +886,7 @@ mod tests
     #[test]
     fn test2()
     {   let raw: i64 = 6138663577826885632;
-        println!("{}", Name::new(raw as u64).to_string());
+        println!("{}", Name(raw as u64).to_string());
         println!("{}", Name::from_string(&"thezeosproxy".to_string()).unwrap().raw() as i64);
         println!("{:?}", Name::from_string(&"cryptkeeper".to_string()).unwrap().raw().to_le_bytes());
         println!("{:?}", Symbol::from_string(&"4,EOS".to_string()).unwrap().raw().to_le_bytes());
@@ -928,31 +925,43 @@ mod tests
                 actor: Name::from_string(&"eosio".to_string()).unwrap(),
                 permission: Name::from_string(&"active".to_string()).unwrap()
             }],
-            data: PlsFtTransfer{
+            data: serde_json::to_value(PlsFtTransfer{
                 from: Name::from_string(&"eosio".to_string()).unwrap(),
                 to: Name::from_string(&"zeoscontract".to_string()).unwrap(),
                 quantity: Asset::from_string(&"1.0000 EOS".to_string()).unwrap(),
                 memo: "this is a memo!".to_string()
-            }.into()
+            }).unwrap()
         };
-        let tx = Transaction{ actions: vec![a] };
+        let tx = Transaction{ actions: vec![a.clone()] };
         println!("{}", serde_json::to_string(&tx).unwrap());
 
-        let a = Action{
+        let b = Action{
             account: Name::from_string(&"atomicassets".to_string()).unwrap(),
             name: Name::from_string(&"transfer".to_string()).unwrap(),
             authorization: vec![Authorization{
                 actor: Name::from_string(&"eosio".to_string()).unwrap(),
                 permission: Name::from_string(&"active".to_string()).unwrap()
             }],
-            data: PlsNftTransfer{
+            data: serde_json::to_value(PlsNftTransfer{
                 from: Name::from_string(&"eosio".to_string()).unwrap(),
                 to: Name::from_string(&"zeoscontract".to_string()).unwrap(),
                 asset_ids: vec![Asset::from_string(&"1234567890987654321".to_string()).unwrap()],
                 memo: "this is a memo!".to_string()
-            }.into()
+            }).unwrap()
         };
-        let tx = Transaction{ actions: vec![a] };
+        let tx = Transaction{ actions: vec![b.clone()] };
         println!("{}", serde_json::to_string(&tx).unwrap());
+
+        let tx = Transaction{ actions: vec![a.clone(), b.clone()] };
+        println!("{}", serde_json::to_string(&tx).unwrap());
+
+        let tx_str = serde_json::to_string(&tx).unwrap();
+        let tx: Transaction = serde_json::from_str(&tx_str).unwrap();
+        println!("{:?}", tx);
+
+        let act_str = serde_json::to_string(&a).unwrap();
+        let act: Action = serde_json::from_str(&act_str).unwrap();
+        let pls: PlsFtTransfer = serde_json::from_value(act.data).unwrap();
+        println!("{:?}", pls);
     }
 }

@@ -10,6 +10,7 @@ use crate::constants::{PEDERSEN_HASH_CHUNKS_PER_GENERATOR, PEDERSEN_HASH_EXP_TAB
 pub enum Personalization {
     Nullifier,
     NoteCommitment,
+    SymbolCommitment,
     MerkleTree(usize),
 }
 
@@ -18,6 +19,7 @@ impl Personalization {
         match *self {
             Personalization::Nullifier => vec![false, false, false, false, false, false],
             Personalization::NoteCommitment => vec![true, true, true, true, true, true],
+            Personalization::SymbolCommitment => vec![true, false, true, false, true, false],
             Personalization::MerkleTree(num) => {
                 assert!(num < 63);
 

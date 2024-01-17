@@ -20,7 +20,6 @@
 #![deny(missing_docs)]
 
 use core::fmt;
-use bls12_381::Scalar;
 use chacha20poly1305::{
     aead::AeadInPlace,
     ChaCha20Poly1305,
@@ -29,7 +28,7 @@ use chacha20poly1305::{
 use std::io::{self, Read, Write};
 use base64::{engine::general_purpose, Engine as _};
 use crate::{
-    note::{Note, nullifier::ExtractedNullifier},
+    note::Note,
     eosio::Symbol
 };
 use rand_core::RngCore;
@@ -39,11 +38,12 @@ use subtle::{Choice, ConstantTimeEq};
 pub const NOTE_PLAINTEXT_SIZE: usize = 
     8  + // header
     11 + // diversifier
+    8  + // account
     8  + // value
     8  + // symbol
     8  + // code
     32 + // rseed (or rcm prior to ZIP 212)
-    32 + // rho
+//    32 + // rho
     512; // memo
 /// The size of [`OutPlaintextBytes`].
 pub const OUT_PLAINTEXT_SIZE: usize = 
@@ -512,20 +512,22 @@ where
     let header = u64::from_le_bytes(plaintext[0..8].try_into().unwrap());
     // TODO: check if header field is correct?
     let diversifier = Diversifier(plaintext[8..19].try_into().unwrap());
-    let amount = u64::from_le_bytes(plaintext[19..27].try_into().unwrap()) as i64;
-    let symbol = u64::from_le_bytes(plaintext[27..35].try_into().unwrap());
-    let asset = Asset::new(amount, Symbol::new(symbol)).unwrap();
-    let code = u64::from_le_bytes(plaintext[35..43].try_into().unwrap());
-    let code = Name::new(code);
-    let r: [u8; 32] = plaintext[43..75].try_into().unwrap();
+    let account = u64::from_le_bytes(plaintext[19..27].try_into().unwrap());
+    let account = Name(account);
+    let amount = u64::from_le_bytes(plaintext[27..35].try_into().unwrap()) as i64;
+    let symbol = u64::from_le_bytes(plaintext[35..43].try_into().unwrap());
+    let asset = Asset::new(amount, Symbol(symbol)).unwrap();
+    let code = u64::from_le_bytes(plaintext[43..51].try_into().unwrap());
+    let code = Name(code);
+    let r: [u8; 32] = plaintext[51..83].try_into().unwrap();
     let rseed = Rseed(r);
-    let r: [u8; 32] = plaintext[75..107].try_into().unwrap();
-    let rho = ExtractedNullifier(Scalar::from_bytes(&r).unwrap());
-    let memo = plaintext[107..NOTE_PLAINTEXT_SIZE].try_into().unwrap();
+    //let r: [u8; 32] = plaintext[75..107].try_into().unwrap();
+    //let rho = ExtractedNullifier(Scalar::from_bytes(&r).unwrap());
+    let memo = plaintext[83..NOTE_PLAINTEXT_SIZE].try_into().unwrap();
 
     let pk_d = get_validated_pk_d(&diversifier)?;
     let recipient = Address::from_parts(diversifier, pk_d)?;
-    Some(Note::from_parts(header, recipient, asset, code, rseed, rho, memo))
+    Some(Note::from_parts(header, recipient, account, asset, code, rseed, /*rho, */memo))
 }
 
 /// Derives the `EphemeralSecretKey` corresponding to this note.
@@ -596,12 +598,13 @@ fn note_plaintext_bytes(
     let mut np = [0; NOTE_PLAINTEXT_SIZE];
     np[0..8].copy_from_slice(&note.header().to_le_bytes());
     np[8..19].copy_from_slice(&note.address().diversifier().0);
-    np[19..27].copy_from_slice(&note.amount().to_le_bytes());
-    np[27..35].copy_from_slice(&note.symbol().raw().to_le_bytes());
-    np[35..43].copy_from_slice(&note.code().raw().to_le_bytes());
-    np[43..75].copy_from_slice(&note.rseed().0);
-    np[75..107].copy_from_slice(&note.rho().to_bytes());
-    np[107..NOTE_PLAINTEXT_SIZE].copy_from_slice(note.memo());
+    np[19..27].copy_from_slice(&note.account().raw().to_le_bytes());
+    np[27..35].copy_from_slice(&note.amount().to_le_bytes());
+    np[35..43].copy_from_slice(&note.symbol().raw().to_le_bytes());
+    np[43..51].copy_from_slice(&note.code().raw().to_le_bytes());
+    np[51..83].copy_from_slice(&note.rseed().0);
+    //np[75..107].copy_from_slice(&note.rho().to_bytes());
+    np[83..NOTE_PLAINTEXT_SIZE].copy_from_slice(note.memo());
     NotePlaintextBytes(np)
 }
 
@@ -717,12 +720,11 @@ fn extract_esk(out_plaintext: &OutPlaintextBytes) -> Option<EphemeralSecretKey> 
 #[cfg(test)]
 mod tests {
     use rand::rngs::OsRng;
-    use bls12_381::Scalar;
     use super::{try_note_decryption, try_output_recovery_with_ovk};
     use super::{derive_esk, ka_derive_public, NoteEncryption, TransmittedNoteCiphertext};
     use crate::{
         keys::{PreparedIncomingViewingKey, SpendingKey, FullViewingKey},
-        note::{Note, Rseed, nullifier::ExtractedNullifier},
+        note::{Note, Rseed},
         eosio::{Asset, Name}
     };
 
@@ -744,10 +746,11 @@ mod tests {
         let note = Note::from_parts(
             0,
             recipient,
+            Name(0),
             Asset::from_string(&"10.0000 ZEOS".to_string()).unwrap(),
             Name::from_string(&"thezeostoken".to_string()).unwrap(),
             Rseed([42; 32]),
-            ExtractedNullifier(Scalar::one()),
+            //ExtractedNullifier(Scalar::one()),
             [0; 512]
         );
 

@@ -2,7 +2,28 @@ use super::keys::{DiversifiedTransmissionKey, Diversifier, SpendingKey, FullView
 use bech32::{FromBase32, ToBase32, Variant};
 use rand::RngCore;
 use serde::{Serialize, Serializer, Deserialize, Deserializer, de::Visitor, de};
-use std::fmt;
+use std::{error::Error, fmt};
+
+#[derive(Debug)]
+pub enum AddressError
+{
+    InvalidStringLength,
+    InvalidDiversifier,
+    IvkWallet
+}
+impl Error for AddressError {}
+impl fmt::Display for AddressError
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result
+    {
+        match self
+        {
+            Self::InvalidStringLength => write!(f, "invalid bech32m address string length (must be 78)"),
+            Self::InvalidDiversifier => write!(f, "invalid address diversifier"),
+            Self::IvkWallet => write!(f, "Read-Only Wallet (spending not possible)")
+        }
+    }
+}
 
 /// A Sapling payment address.
 ///
@@ -47,7 +68,7 @@ impl Address {
     }
 
     /// Parses a PaymentAddress from bytes.
-    pub fn from_bytes(bytes: &[u8; 43]) -> Option<Self> {
+    pub fn from_bytes(bytes: &[u8; 43]) -> Result<Self, AddressError> {
         let diversifier = {
             let mut tmp = [0; 11];
             tmp.copy_from_slice(&bytes[0..11]);
@@ -57,9 +78,9 @@ impl Address {
         let pk_d = DiversifiedTransmissionKey::from_bytes(bytes[11..43].try_into().unwrap());
         if pk_d.is_some().into() {
             // The remaining invariants are checked here.
-            Address::from_parts(diversifier, pk_d.unwrap())
+            Ok(Address::from_parts(diversifier, pk_d.unwrap()).unwrap())
         } else {
-            None
+            Err(AddressError::InvalidDiversifier)
         }
     }
 
@@ -72,20 +93,20 @@ impl Address {
     }
 
     /// Encodes this address as Bech32m
-    pub fn to_bech32m(&self) -> String
+    pub fn to_bech32m(&self) -> Result<String, bech32::Error>
     {
-        bech32::encode("za", self.to_bytes().to_base32(), Variant::Bech32m).unwrap()
+        bech32::encode("za", self.to_bytes().to_base32(), Variant::Bech32m)
     }
 
     /// Parse a Bech32m encoded address
-    pub fn from_bech32m(str: &String) -> Option<Self>
+    pub fn from_bech32m(str: &String) -> Result<Self, Box<dyn Error>>
     {
-        if str.len() < 78 { return None; }
+        if str.len() < 78 { Err(AddressError::InvalidStringLength)? }
         let (hrp, data, variant) = bech32::decode(&str).unwrap();
-        let bytes: [u8; 43] = Vec::<u8>::from_base32(&data).unwrap()[0..43].try_into().expect("from_bech32m: incorrect length");
+        let bytes: [u8; 43] = Vec::<u8>::from_base32(&data)?[0..43].try_into().expect("from_bech32m: incorrect length");
         assert_eq!(hrp, "za");
         assert_eq!(variant, Variant::Bech32m);
-        Address::from_bytes(&bytes)
+        Ok(Address::from_bytes(&bytes)?)
     }
 
     /// creates a dummy address
@@ -118,7 +139,7 @@ impl Serialize for Address
     where
         S: Serializer,
     {
-        serializer.serialize_str(&self.to_bech32m())
+        serializer.serialize_str(&self.to_bech32m().unwrap())
     }
 }
 struct AddressVisitor;
@@ -273,7 +294,7 @@ mod tests
     {
         let mut rng = OsRng.clone();
         let a = Address::dummy(&mut rng);
-        let encoded = a.to_bech32m();
+        let encoded = a.to_bech32m().unwrap();
         println!("{}", encoded);
         let decoded = Address::from_bech32m(&encoded).unwrap();
         assert_eq!(a.to_bytes(), decoded.to_bytes());

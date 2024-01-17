@@ -15,14 +15,6 @@ pub struct NoteCommitTrapdoor(pub jubjub::Fr);
 #[derive(Clone, Debug)]
 pub struct NoteCommitment(pub jubjub::SubgroupPoint);
 
-/*
-impl NoteCommitment {
-    pub(crate) fn inner(&self) -> jubjub::SubgroupPoint {
-        self.0
-    }
-}
-*/
-
 impl NoteCommitment
 {
     /// $NoteCommit^Sapling$.
@@ -33,22 +25,22 @@ impl NoteCommitment
     pub fn derive(
         g_d: [u8; 32],
         pk_d: [u8; 32],
+        account: u64,
         value: u64,
         symbol: u64,
         code: u64,
         rcm: NoteCommitTrapdoor,
-        rho: [u8; 32]
     ) -> Self
     {
         NoteCommitment(windowed_pedersen_commit(
             Personalization::NoteCommitment,
             iter::empty()
+                .chain(BitArray::<_, Lsb0>::new(account.to_le_bytes()).iter().by_vals())
                 .chain(BitArray::<_, Lsb0>::new(value.to_le_bytes()).iter().by_vals())
                 .chain(BitArray::<_, Lsb0>::new(symbol.to_le_bytes()).iter().by_vals())
                 .chain(BitArray::<_, Lsb0>::new(code.to_le_bytes()).iter().by_vals())
                 .chain(BitArray::<_, Lsb0>::new(g_d).iter().by_vals())
-                .chain(BitArray::<_, Lsb0>::new(pk_d).iter().by_vals())
-                .chain(BitArray::<_, Lsb0>::new(rho).iter().by_vals()),
+                .chain(BitArray::<_, Lsb0>::new(pk_d).iter().by_vals()),
             rcm.0,
         ))
     }

@@ -1,5 +1,7 @@
 
 mod address;
+pub mod value;
+//pub mod redjubjub;
 pub mod circuit;
 pub mod constants;
 pub mod eosio;
@@ -12,11 +14,13 @@ pub mod blake2s7r;
 pub mod group_hash;
 pub mod spec;
 pub mod wallet;
+pub mod transaction;
+pub mod transaction_spend_tests;
 
 use crate::eosio::{Name, Symbol, Asset, Authorization, Action, Transaction};
 use crate::contract::{PlsFtTransfer, PlsMint, PlsNftTransfer, PlsMintAction, ScalarBytes, AffineProofBytesLE};
 use crate::address::Address;
-use crate::note::{Rseed, Note, nullifier::ExtractedNullifier};
+use crate::note::{Rseed, Note};
 use crate::note_encryption::{NoteEncryption, TransmittedNoteCiphertext, derive_esk, ka_derive_public};
 use crate::circuit::mint::Mint;
 use keys::{SpendingKey, FullViewingKey};
@@ -87,7 +91,7 @@ fn process_move_in_desc(desc: &String) -> Option<(Name, Asset, Address, String)>
 
     // process <contract> part
     let contract = Name::from_string(&parts[0]);
-    if contract.is_none() { log("move_in desc <contract> invalid:"); log(&parts[0]); return None; }
+    if contract.is_err() { log("move_in desc <contract> invalid:"); log(&parts[0]); return None; }
 
     // process <asset> <address> part
     if parts.len() == 3 // NFT
@@ -95,7 +99,7 @@ fn process_move_in_desc(desc: &String) -> Option<(Name, Asset, Address, String)>
         let asset = Asset::from_string(&parts[1]);
         if asset.is_none() { log("move_in desc NFT <asset> invalid:"); log(&parts[1]); return None; }
         let address = Address::from_bech32m(&parts[2]);
-        if address.is_none() { log("move_in desc NFT <address> invalid:"); log(&parts[2]); return None; }
+        if address.is_err() { log("move_in desc NFT <address> invalid:"); log(&parts[2]); return None; }
         return Some((contract.unwrap(), asset.unwrap(), address.unwrap(), memo));
     }
     if parts.len() == 4 // FT
@@ -104,7 +108,7 @@ fn process_move_in_desc(desc: &String) -> Option<(Name, Asset, Address, String)>
         let asset = Asset::from_string(&asset_str);
         if asset.is_none() { log("move_in desc FT <asset> invalid:"); log(&asset_str); return None; }
         let address = Address::from_bech32m(&parts[3]);
-        if address.is_none() { log("move_in desc FT <address> invalid:"); log(&parts[3]); return None; }
+        if address.is_err() { log("move_in desc FT <address> invalid:"); log(&parts[3]); return None; }
 
         return Some((contract.unwrap(), asset.unwrap(), address.unwrap(), memo));
     }
@@ -126,13 +130,13 @@ fn move_asset_in(
 {
     if descs.is_empty() { log("descs is empty"); return None; }
     let protocol_contract_ = Name::from_string(&protocol_contract);
-    if protocol_contract_.is_none() { log("protocol_contract invalid:"); log(&protocol_contract); return None; }
+    if protocol_contract_.is_err() { log("protocol_contract invalid:"); log(&protocol_contract); return None; }
     let protocol_contract = protocol_contract_.unwrap();
     let alias_authority_ = Authorization::from_string(&alias_authority);
     if alias_authority_.is_none() { log("alias_authority invalid:"); log(&alias_authority); return None; }
     let alias_authority = alias_authority_.unwrap();
     let fee_token_contract_ = Name::from_string(&fee_token_contract);
-    if fee_token_contract_.is_none() { log("fee_token_contract invalid:"); log(&fee_token_contract); return None; }
+    if fee_token_contract_.is_err() { log("fee_token_contract invalid:"); log(&fee_token_contract); return None; }
     let fee_token_contract = fee_token_contract_.unwrap();
     let fee_token_symbol_ = Symbol::from_string(&fee_token_symbol);
     if fee_token_symbol_.is_none() { log("fee_token_symbol invalid:"); log(&fee_token_symbol); return None; }
@@ -188,12 +192,12 @@ fn move_asset_in(
             account: contract.clone(),
             name: Name::from_string(&"transfer".to_string()).unwrap(),
             authorization: vec![auth.clone()],
-            data: PlsFtTransfer{
+            data: serde_json::to_value(PlsFtTransfer{
                 from: auth.actor.clone(),
                 to: protocol_contract.clone(),
                 quantity: asset.clone(),
                 memo: "ZEOS MINT".to_string()
-            }.into()
+            }).unwrap()
         });
 
         // convert memo string to bytes
@@ -204,15 +208,17 @@ fn move_asset_in(
         let note = Note::from_parts(
             0,
             address.clone(),
+            auth.actor.clone(),
             asset.clone(),
             contract.clone(),
             Rseed::new(rng),
-            ExtractedNullifier(bls12_381::Scalar::one()),
+            //ExtractedNullifier(bls12_381::Scalar::one()),
             memo_bytes
         );
 
         // create proof
         let circuit_instance = Mint {
+            account: Some(note.account().raw()),
             value: Some(note.amount()),
             symbol: Some(note.symbol().raw()),
             code: Some(note.code().raw()),
@@ -244,12 +250,12 @@ fn move_asset_in(
             account: contract.clone(),
             name: Name::from_string(&"transfer".to_string()).unwrap(),
             authorization: vec![auth.clone()],
-            data: PlsNftTransfer{
+            data: serde_json::to_value(PlsNftTransfer{
                 from: auth.actor.clone(),
                 to: protocol_contract.clone(),
                 asset_ids: vec![asset.clone()],
                 memo: "ZEOS MINT".to_string()
-            }.into()
+            }).unwrap()
         });
 
         // convert memo string to bytes
@@ -260,15 +266,16 @@ fn move_asset_in(
         let note = Note::from_parts(
             0,
             address.clone(),
+            auth.actor.clone(),
             asset.clone(),
             contract.clone(),
             Rseed::new(rng),
-            ExtractedNullifier(bls12_381::Scalar::one()),
             memo_bytes
         );
 
         // create proof
         let circuit_instance = Mint {
+            account: Some(note.account().raw()),
             value: Some(note.amount()),
             symbol: Some(note.symbol().raw()),
             code: Some(note.code().raw()),
@@ -299,7 +306,7 @@ fn move_asset_in(
             account: fee_token_contract.clone(),
             name: Name::from_string(&"transfer".to_string()).unwrap(),
             authorization: vec![auth.clone()],
-            data: PlsFtTransfer{
+            data: serde_json::to_value(PlsFtTransfer{
                 from: auth.actor.clone(),
                 to: alias_authority.actor.clone(),
                 quantity: Asset::new(
@@ -307,7 +314,7 @@ fn move_asset_in(
                     fee_token_symbol.clone()
                 ).unwrap(),
                 memo: "tx fee".to_string()
-            }.into()
+            }).unwrap()
         });
     }
 
@@ -334,10 +341,10 @@ fn move_asset_in(
             account: alias_authority.actor.clone(),
             name: Name::from_string(&format!("mint")).unwrap(),
             authorization: vec![alias_authority.clone()],
-            data: PlsMintAction{
+            data: serde_json::to_value(PlsMintAction{
                 actions: pls_mint_vec,
                 note_ct: note_ct_mint
-            }.into()
+            }).unwrap()
         });
     }
 
@@ -542,8 +549,8 @@ pub unsafe extern "C" fn wallet_create(
         seed_str.as_bytes(),
         false,
         [0; 32],
-        Name::new(0),
-        Authorization { actor: Name::new(0), permission: Name::new(0) }
+        Name(0),
+        Authorization { actor: Name(0), permission: Name(0) }
     ).unwrap()))
 }
 
@@ -722,8 +729,8 @@ pub extern fn wallet_notes_json(
     };
 
     let c_string = CString::new(
-        if pretty { serde_json::to_string_pretty(&wallet.notes()).unwrap() }
-        else { serde_json::to_string(&wallet.notes()).unwrap() }
+        if pretty { serde_json::to_string_pretty(&wallet.unspent_notes(&Symbol(0), &Name(0))).unwrap() }
+        else { serde_json::to_string(&wallet.unspent_notes(&Symbol(0), &Name(0))).unwrap() }
     ).expect("CString::new failed");
     c_string.into_raw() // Move ownership to C
 }
@@ -869,7 +876,7 @@ pub unsafe extern fn wallet_process_block(
     };
 
     let block_str = CStr::from_ptr(block).to_str().expect("Bad encoding").to_owned();
-    wallet.process_block(&block_str)
+    wallet.digest_block(&block_str)
 }
 
 #[cfg(test)]

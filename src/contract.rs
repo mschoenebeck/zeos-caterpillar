@@ -1,11 +1,7 @@
 use bellman::groth16::{Proof, VerifyingKey};
-use bls12_381::Bls12;
-use pairing::{Engine, MillerLoopResult, MultiMillerLoop};
-use serde::{Serialize, Deserialize, Serializer, Deserializer, de::Visitor, de};
-use serde_json::Value;
+use bls12_381::{Bls12, G1Affine, G2Affine};
+use serde::{Serialize, Deserialize, Serializer, Deserializer, de::Visitor, de::SeqAccess, de};
 use crate::eosio::{Asset, Name, Symbol};
-//use core::ops::{Mul, MulAssign};
-use std::ops::{AddAssign, Neg};
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -64,6 +60,12 @@ impl<'de> Deserialize<'de> for ScalarBytes
 impl From<bls12_381::Scalar> for ScalarBytes {
     fn from(s: bls12_381::Scalar) -> Self {
         ScalarBytes(s.to_bytes())
+    }
+}
+
+impl From<ScalarBytes> for bls12_381::Scalar {
+    fn from(s: ScalarBytes) -> Self {
+        bls12_381::Scalar::from_bytes(&s.0).unwrap()
     }
 }
 
@@ -162,6 +164,13 @@ impl AffineProofBytesLE
     {
         hex::encode(self.0)
     }
+
+    pub fn from_string(str: &String) -> Option<Self>
+    {
+        let bytes= hex::decode(str);
+        if bytes.is_err() { return None; }
+        Some(AffineProofBytesLE(bytes.unwrap().try_into().unwrap()))
+    }
 }
 
 // serde_json traits
@@ -172,6 +181,30 @@ impl Serialize for AffineProofBytesLE
         S: Serializer,
     {
         serializer.serialize_str(&self.to_string())
+    }
+}
+struct AffineProofBytesVisitor;
+impl<'de> Visitor<'de> for AffineProofBytesVisitor {
+    type Value = AffineProofBytesLE;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a hex string with 64 characters")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(AffineProofBytesLE::from_string(&value.to_string()).unwrap())
+    }
+}
+impl<'de> Deserialize<'de> for AffineProofBytesLE
+{
+    fn deserialize<D>(deserializer: D) -> Result<AffineProofBytesLE, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_str(AffineProofBytesVisitor)
     }
 }
 
@@ -205,7 +238,7 @@ impl From<Proof<Bls12>> for AffineProofBytesLE
 
     fn from(p: Proof<Bls12>) -> Self
     {
-        // need to reverse endianess for all elements because 'to_uncompressed()' has big-endian byte encoding
+        // need to reverse endianess for all elements because 'to_uncompressed()' delivers big-endian byte encoding
         let mut a_bytes = p.a.to_uncompressed();
         a_bytes[ 0..48].reverse();      // a.x
         a_bytes[48..96].reverse();      // a.y
@@ -231,7 +264,39 @@ impl From<Proof<Bls12>> for AffineProofBytesLE
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+impl From<AffineProofBytesLE> for Proof<Bls12>
+{
+    fn from(p: AffineProofBytesLE) -> Self
+    {
+        // need to reverse endianess for all elements because 'from_uncompressed()' expects big-endian byte encoding
+        let mut a_bytes = [0; 96];
+        a_bytes[ 0.. 48].copy_from_slice(&p.0[ 0..48]);     // a.x
+        a_bytes[48.. 96].copy_from_slice(&p.0[48..96]);     // a.y
+        a_bytes[ 0..48].reverse();
+        a_bytes[48..96].reverse();
+        let mut b_bytes = [0; 192];
+        b_bytes[  0.. 48].copy_from_slice(&p.0[144..192]);  // b.x.c1
+        b_bytes[ 48.. 96].copy_from_slice(&p.0[ 96..144]);  // b.x.c0
+        b_bytes[ 96..144].copy_from_slice(&p.0[240..288]);  // b.y.c1
+        b_bytes[144..192].copy_from_slice(&p.0[192..240]);  // b.y.c0
+        b_bytes[  0.. 48].reverse();
+        b_bytes[ 48.. 96].reverse();
+        b_bytes[ 96..144].reverse();
+        b_bytes[144..192].reverse();
+        let mut c_bytes = [0; 96];
+        c_bytes[ 0..48].copy_from_slice(&p.0[288..336]);    // c.x
+        c_bytes[48..96].copy_from_slice(&p.0[336..384]);    // c.y
+        c_bytes[ 0..48].reverse();
+        c_bytes[48..96].reverse();
+        Proof::<Bls12>{
+            a: G1Affine::from_uncompressed(&a_bytes).unwrap(),
+            b: G2Affine::from_uncompressed(&b_bytes).unwrap(),
+            c: G1Affine::from_uncompressed(&c_bytes).unwrap()
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlsMint
 {
     pub cm: ScalarBytes,
@@ -241,25 +306,113 @@ pub struct PlsMint
     pub proof: AffineProofBytesLE
 }
 
-impl From<PlsMint> for Value {
-    fn from(s: PlsMint) -> Self {
-        serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlsMintAction
 {
     pub actions: Vec<PlsMint>,
     pub note_ct: Vec<String>,
 }
 
-impl From<PlsMintAction> for Value {
-    fn from(s: PlsMintAction) -> Self {
-        serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap()
-    }
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlsSpendSequence
+{
+    pub scm: ScalarBytes,
+    pub spend_output: Vec<PlsSpendOutput>,
+    pub spend: Vec<PlsSpend>,
+    pub output: Vec<PlsOutput>
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlsSpendOutput
+{
+    pub root: ScalarBytes,
+    pub nf: ScalarBytes,
+    pub cm_b: ScalarBytes,
+    pub cv_net_u: ScalarBytes,
+    pub cv_net_v: ScalarBytes,
+    pub value_c: u64,
+    pub symbol: Symbol,
+    pub code: Name,
+    pub cv_gt: bool,
+    pub cv_eq: bool,
+    pub proof: AffineProofBytesLE,
+    pub unshielded_outputs: Vec<PlsUnshieldedRecipient>
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlsUnshieldedRecipient
+{
+    pub amount: u64,
+    pub account: Name,
+    pub memo: String
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlsSpend
+{
+    pub root: ScalarBytes,
+    pub nf: ScalarBytes,
+    pub cv_u: ScalarBytes,
+    pub cv_v: ScalarBytes,
+    pub proof: AffineProofBytesLE
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlsOutput
+{
+    pub cm: ScalarBytes,
+    pub cv_u: ScalarBytes,
+    pub cv_v: ScalarBytes,
+    pub proof: AffineProofBytesLE
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlsSpendAction
+{
+    pub actions: Vec<PlsSpendSequence>,
+    pub note_ct: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlsAuthenticate
+{
+    pub cm: ScalarBytes,
+    pub code: Name,
+    pub data: Vec<u8>,
+    pub proof: AffineProofBytesLE
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlsAuthenticateAction
+{
+    pub action: PlsAuthenticate
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlsPublishNotesAction
+{
+    pub note_ct: Vec<String>
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlsWithdraw
+{
+    pub code: Name,
+    pub quantity: Asset,
+    pub memo: String,
+    pub to: Name
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlsWithdrawAction
+{
+    pub actions: Vec<PlsWithdraw>
+}
+
+
+
+
+/*
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PlsTransfer
 {
@@ -324,8 +477,9 @@ impl From<PlsBurnAction> for Value {
         serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap()
     }
 }
+*/
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlsFtTransfer
 {
     pub from: Name,
@@ -334,13 +488,13 @@ pub struct PlsFtTransfer
     pub memo: String
 }
 
-impl From<PlsFtTransfer> for Value {
-    fn from(s: PlsFtTransfer) -> Self {
-        serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap()
-    }
-}
+//impl From<PlsFtTransfer> for Value {
+//    fn from(s: PlsFtTransfer) -> Self {
+//        serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap()
+//    }
+//}
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlsNftTransfer
 {
     pub from: Name,
@@ -349,18 +503,254 @@ pub struct PlsNftTransfer
     pub memo: String
 }
 
-impl From<PlsNftTransfer> for Value {
-    fn from(s: PlsNftTransfer) -> Self {
-        serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap()
+//impl From<PlsNftTransfer> for Value {
+//    fn from(s: PlsNftTransfer) -> Self {
+//        serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap()
+//    }
+//}
+
+// converts a bls12-381 scalar to its raw byte representation (i.e. montgomery form instead of canonical)
+pub fn scalar_to_raw_bytes_le(s: &bls12_381::Scalar) -> [u8; 32]
+{
+    Scalar::from_bytes(&s.to_bytes()).unwrap().to_raw_bytes()
+}
+
+
+// Helper class 'Scalar' copied from bls crate because bytes are not accessible rawly (montgomery form) in
+// original version (i.e. without implicitly performing montgomery reduction)
+
+/// Compute a + b + carry, returning the result and the new carry over.
+#[inline(always)]
+pub const fn adc(a: u64, b: u64, carry: u64) -> (u64, u64) {
+    let ret = (a as u128) + (b as u128) + (carry as u128);
+    (ret as u64, (ret >> 64) as u64)
+}
+
+/// Compute a - (b + borrow), returning the result and the new borrow.
+#[inline(always)]
+pub const fn sbb(a: u64, b: u64, borrow: u64) -> (u64, u64) {
+    let ret = (a as u128).wrapping_sub((b as u128) + ((borrow >> 63) as u128));
+    (ret as u64, (ret >> 64) as u64)
+}
+
+/// Compute a + (b * c) + carry, returning the result and the new carry over.
+#[inline(always)]
+pub const fn mac(a: u64, b: u64, c: u64, carry: u64) -> (u64, u64) {
+    let ret = (a as u128) + ((b as u128) * (c as u128)) + (carry as u128);
+    (ret as u64, (ret >> 64) as u64)
+}
+
+#[derive(Clone, Copy)]
+pub struct Scalar(pub [u64; 4]);
+
+/// Constant representing the modulus
+/// q = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001
+const MODULUS: Scalar = Scalar([
+    0xffff_ffff_0000_0001,
+    0x53bd_a402_fffe_5bfe,
+    0x3339_d808_09a1_d805,
+    0x73ed_a753_299d_7d48,
+]);
+
+/// INV = -(q^{-1} mod 2^64) mod 2^64
+const INV: u64 = 0xffff_fffe_ffff_ffff;
+
+/// R^2 = 2^512 mod q
+const R2: Scalar = Scalar([
+    0xc999_e990_f3f2_9c6d,
+    0x2b6c_edcb_8792_5c23,
+    0x05d3_1496_7254_398f,
+    0x0748_d9d9_9f59_ff11,
+]);
+
+impl Scalar
+{
+    /// Attempts to convert a little-endian byte representation of
+    /// a scalar into a `Scalar`, failing if the input is not canonical.
+    pub fn from_bytes(bytes: &[u8; 32]) -> Option<Scalar> {
+        let mut tmp = Scalar([0, 0, 0, 0]);
+
+        tmp.0[0] = u64::from_le_bytes(<[u8; 8]>::try_from(&bytes[0..8]).unwrap());
+        tmp.0[1] = u64::from_le_bytes(<[u8; 8]>::try_from(&bytes[8..16]).unwrap());
+        tmp.0[2] = u64::from_le_bytes(<[u8; 8]>::try_from(&bytes[16..24]).unwrap());
+        tmp.0[3] = u64::from_le_bytes(<[u8; 8]>::try_from(&bytes[24..32]).unwrap());
+
+        // Try to subtract the modulus
+        let (_, borrow) = sbb(tmp.0[0], MODULUS.0[0], 0);
+        let (_, borrow) = sbb(tmp.0[1], MODULUS.0[1], borrow);
+        let (_, borrow) = sbb(tmp.0[2], MODULUS.0[2], borrow);
+        let (_, borrow) = sbb(tmp.0[3], MODULUS.0[3], borrow);
+
+        // If the element is smaller than MODULUS then the
+        // subtraction will underflow, producing a borrow value
+        // of 0xffff...ffff. Otherwise, it'll be zero.
+        let is_some = (borrow as u8) & 1;
+
+        // Convert to Montgomery form by computing
+        // (a.R^0 * R^2) / R = a.R
+        tmp = tmp.mul(&R2);
+
+        if is_some == 1
+        {
+            Some(tmp)
+        }
+        else
+        {
+            None
+        }
+    }
+
+    /// Attempts to convert a little-endian montgomery byte representation of
+    /// a scalar into a `Scalar`.
+    pub fn from_raw_bytes(bytes: &[u8; 32]) -> Scalar {
+        let mut tmp = Scalar([0, 0, 0, 0]);
+
+        tmp.0[0] = u64::from_le_bytes(<[u8; 8]>::try_from(&bytes[0..8]).unwrap());
+        tmp.0[1] = u64::from_le_bytes(<[u8; 8]>::try_from(&bytes[8..16]).unwrap());
+        tmp.0[2] = u64::from_le_bytes(<[u8; 8]>::try_from(&bytes[16..24]).unwrap());
+        tmp.0[3] = u64::from_le_bytes(<[u8; 8]>::try_from(&bytes[24..32]).unwrap());
+
+        tmp
+    }
+
+    /// Converts an element of `Scalar` into a byte representation in
+    /// little-endian byte order.
+    pub fn to_bytes(&self) -> [u8; 32] {
+        // Turn into canonical form by computing
+        // (a.R) / R = a
+        let tmp = Scalar::montgomery_reduce(self.0[0], self.0[1], self.0[2], self.0[3], 0, 0, 0, 0);
+
+        let mut res = [0; 32];
+        res[0..8].copy_from_slice(&tmp.0[0].to_le_bytes());
+        res[8..16].copy_from_slice(&tmp.0[1].to_le_bytes());
+        res[16..24].copy_from_slice(&tmp.0[2].to_le_bytes());
+        res[24..32].copy_from_slice(&tmp.0[3].to_le_bytes());
+
+        res
+    }
+
+    /// Converts an element of `Scalar` into its montgomery byte representation in
+    /// little-endian byte order.
+    pub fn to_raw_bytes(&self) -> [u8; 32] {
+        let mut res = [0; 32];
+        res[0..8].copy_from_slice(&self.0[0].to_le_bytes());
+        res[8..16].copy_from_slice(&self.0[1].to_le_bytes());
+        res[16..24].copy_from_slice(&self.0[2].to_le_bytes());
+        res[24..32].copy_from_slice(&self.0[3].to_le_bytes());
+
+        res
+    }
+
+    #[inline(always)]
+    const fn montgomery_reduce(
+        r0: u64,
+        r1: u64,
+        r2: u64,
+        r3: u64,
+        r4: u64,
+        r5: u64,
+        r6: u64,
+        r7: u64,
+    ) -> Self {
+        // The Montgomery reduction here is based on Algorithm 14.32 in
+        // Handbook of Applied Cryptography
+        // <http://cacr.uwaterloo.ca/hac/about/chap14.pdf>.
+
+        let k = r0.wrapping_mul(INV);
+        let (_, carry) = mac(r0, k, MODULUS.0[0], 0);
+        let (r1, carry) = mac(r1, k, MODULUS.0[1], carry);
+        let (r2, carry) = mac(r2, k, MODULUS.0[2], carry);
+        let (r3, carry) = mac(r3, k, MODULUS.0[3], carry);
+        let (r4, carry2) = adc(r4, 0, carry);
+
+        let k = r1.wrapping_mul(INV);
+        let (_, carry) = mac(r1, k, MODULUS.0[0], 0);
+        let (r2, carry) = mac(r2, k, MODULUS.0[1], carry);
+        let (r3, carry) = mac(r3, k, MODULUS.0[2], carry);
+        let (r4, carry) = mac(r4, k, MODULUS.0[3], carry);
+        let (r5, carry2) = adc(r5, carry2, carry);
+
+        let k = r2.wrapping_mul(INV);
+        let (_, carry) = mac(r2, k, MODULUS.0[0], 0);
+        let (r3, carry) = mac(r3, k, MODULUS.0[1], carry);
+        let (r4, carry) = mac(r4, k, MODULUS.0[2], carry);
+        let (r5, carry) = mac(r5, k, MODULUS.0[3], carry);
+        let (r6, carry2) = adc(r6, carry2, carry);
+
+        let k = r3.wrapping_mul(INV);
+        let (_, carry) = mac(r3, k, MODULUS.0[0], 0);
+        let (r4, carry) = mac(r4, k, MODULUS.0[1], carry);
+        let (r5, carry) = mac(r5, k, MODULUS.0[2], carry);
+        let (r6, carry) = mac(r6, k, MODULUS.0[3], carry);
+        let (r7, _) = adc(r7, carry2, carry);
+
+        // Result may be within MODULUS of the correct value
+        (&Scalar([r4, r5, r6, r7])).sub(&MODULUS)
+    }
+
+    /// Multiplies `rhs` by `self`, returning the result.
+    #[inline]
+    pub const fn mul(&self, rhs: &Self) -> Self {
+        // Schoolbook multiplication
+
+        let (r0, carry) = mac(0, self.0[0], rhs.0[0], 0);
+        let (r1, carry) = mac(0, self.0[0], rhs.0[1], carry);
+        let (r2, carry) = mac(0, self.0[0], rhs.0[2], carry);
+        let (r3, r4) = mac(0, self.0[0], rhs.0[3], carry);
+
+        let (r1, carry) = mac(r1, self.0[1], rhs.0[0], 0);
+        let (r2, carry) = mac(r2, self.0[1], rhs.0[1], carry);
+        let (r3, carry) = mac(r3, self.0[1], rhs.0[2], carry);
+        let (r4, r5) = mac(r4, self.0[1], rhs.0[3], carry);
+
+        let (r2, carry) = mac(r2, self.0[2], rhs.0[0], 0);
+        let (r3, carry) = mac(r3, self.0[2], rhs.0[1], carry);
+        let (r4, carry) = mac(r4, self.0[2], rhs.0[2], carry);
+        let (r5, r6) = mac(r5, self.0[2], rhs.0[3], carry);
+
+        let (r3, carry) = mac(r3, self.0[3], rhs.0[0], 0);
+        let (r4, carry) = mac(r4, self.0[3], rhs.0[1], carry);
+        let (r5, carry) = mac(r5, self.0[3], rhs.0[2], carry);
+        let (r6, r7) = mac(r6, self.0[3], rhs.0[3], carry);
+
+        Scalar::montgomery_reduce(r0, r1, r2, r3, r4, r5, r6, r7)
+    }
+
+    /// Subtracts `rhs` from `self`, returning the result.
+    #[inline]
+    pub const fn sub(&self, rhs: &Self) -> Self {
+        let (d0, borrow) = sbb(self.0[0], rhs.0[0], 0);
+        let (d1, borrow) = sbb(self.0[1], rhs.0[1], borrow);
+        let (d2, borrow) = sbb(self.0[2], rhs.0[2], borrow);
+        let (d3, borrow) = sbb(self.0[3], rhs.0[3], borrow);
+
+        // If underflow occurred on the final limb, borrow = 0xfff...fff, otherwise
+        // borrow = 0x000...000. Thus, we use it as a mask to conditionally add the modulus.
+        let (d0, carry) = adc(d0, MODULUS.0[0] & borrow, 0);
+        let (d1, carry) = adc(d1, MODULUS.0[1] & borrow, carry);
+        let (d2, carry) = adc(d2, MODULUS.0[2] & borrow, carry);
+        let (d3, _) = adc(d3, MODULUS.0[3] & borrow, carry);
+
+        Scalar([d0, d1, d2, d3])
+    }
+
+    /// Adds `rhs` to `self`, returning the result.
+    #[inline]
+    pub const fn add(&self, rhs: &Self) -> Self {
+        let (d0, carry) = adc(self.0[0], rhs.0[0], 0);
+        let (d1, carry) = adc(self.0[1], rhs.0[1], carry);
+        let (d2, carry) = adc(self.0[2], rhs.0[2], carry);
+        let (d3, _) = adc(self.0[3], rhs.0[3], carry);
+
+        // Attempt to subtract the modulus, to ensure the value
+        // is smaller than the modulus.
+        (&Scalar([d0, d1, d2, d3])).sub(&MODULUS)
     }
 }
 
 
-
-
-
-// Helper class 'Fp' copied from bls crate because bytes are not accessible rawly in
-// original version (i.e. without implicitly performing montgomery reduce)
+// Helper class 'Fp' copied from bls crate because bytes are not accessible rawly (montgomery form) in
+// original version (i.e. without implicitly performing montgomery reduction)
 /*
 #[derive(Copy, Clone)]
 pub struct Fp(pub [u64; 6]);
@@ -639,7 +1029,7 @@ mod tests
     use std::fs::File;
     use std::io::Read;
     use bellman::groth16::{verify_proof, prepare_verifying_key};
-    use bellman::gadgets::{blake2s, boolean, boolean::Boolean, multipack};
+    use bellman::gadgets::multipack;
     use bls12_381::Scalar;
     use bls12_381::Bls12;
     use crate::Mint;
@@ -648,7 +1038,6 @@ mod tests
     use crate::SpendingKey;
     use crate::FullViewingKey;
     use crate::Rseed;
-    use crate::ExtractedNullifier;
 
     #[test]
     fn test()
@@ -669,13 +1058,14 @@ mod tests
         let note = Note::from_parts(
             0,
             recipient,
+            Name(0),
             Asset::from_string(&"5000.0000 EOS".to_string()).unwrap(),
             Name::from_string(&"eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
-            ExtractedNullifier(Scalar::one()),
             [0; 512]
         );
         let circuit_instance = Mint {
+            account: Some(note.account().raw()),
             value: Some(note.amount()),
             symbol: Some(note.symbol().raw()),
             code: Some(note.code().raw()),
@@ -694,16 +1084,26 @@ mod tests
         };
         println!("{}", serde_json::to_string(&a).unwrap());
 
-        let mut asset_contents = [0; 24];
-        asset_contents[0..8].copy_from_slice(&note.amount().to_le_bytes());
-        asset_contents[8..16].copy_from_slice(&note.symbol().raw().to_le_bytes());
-        asset_contents[16..24].copy_from_slice(&note.code().raw().to_le_bytes());
-        let asset_contents = multipack::bytes_to_bits_le(&asset_contents);
-        let asset_contents: Vec<Scalar> = multipack::compute_multipacking(&asset_contents);
-        assert_eq!(asset_contents.len(), 1);
+        let mut inputs2_contents = [0; 24];
+        inputs2_contents[0..8].copy_from_slice(&note.amount().to_le_bytes());
+        inputs2_contents[8..16].copy_from_slice(&note.symbol().raw().to_le_bytes());
+        inputs2_contents[16..24].copy_from_slice(&note.code().raw().to_le_bytes());
+        let inputs2_contents = multipack::bytes_to_bits_le(&inputs2_contents);
+        let inputs2_contents: Vec<Scalar> = multipack::compute_multipacking(&inputs2_contents);
+        assert_eq!(inputs2_contents.len(), 1);
+        let mut inputs3_contents = [0; 8];
+        inputs3_contents[0..8].copy_from_slice(&note.account().raw().to_le_bytes());
+        let inputs3_contents = multipack::bytes_to_bits_le(&inputs3_contents);
+        let inputs3_contents: Vec<Scalar> = multipack::compute_multipacking(&inputs3_contents);
+        assert_eq!(inputs3_contents.len(), 1);
         let mut inputs = vec![];
         inputs.push(note.commitment().0);
-        inputs.extend(asset_contents.clone());
+        inputs.extend(inputs2_contents.clone());
+        inputs.extend(inputs3_contents.clone());
+
+        let proof_serde = AffineProofBytesLE::from(proof.clone());
+        let proof_serde = Proof::<Bls12>::from(proof_serde);
+        assert!(proof.eq(&proof_serde));
 
         assert!(verify_proof(&prepare_verifying_key(&mint_params.vk), &proof, &inputs).is_ok());
     }

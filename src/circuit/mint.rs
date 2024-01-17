@@ -1,6 +1,5 @@
 use bellman::{Circuit, ConstraintSystem, SynthesisError};
-use bellman::gadgets::{blake2s, boolean, boolean::Boolean, multipack};
-use bls12_381::Scalar;
+use bellman::gadgets::{blake2s, boolean, boolean::Boolean, multipack, num::Num};
 use ff::PrimeField;
 use crate::{address::Address, keys::ProofGenerationKey};
 use super::constants::{NOTE_COMMITMENT_RANDOMNESS_GENERATOR, PROOF_GENERATION_KEY_GENERATOR};
@@ -9,6 +8,8 @@ use super::{ecc, pedersen_hash, OrExt};
 /// This is an instance of the `Mint` circuit.
 pub struct Mint
 {
+    /// The EOSIO account this note is associated with (Mint: sender, Transfer: 0, Burn: receiver, Auth: == code)
+    pub account: Option<u64>,
     /// The amount (FT) or ID (NFT) of the note, 0 if AT
     pub value: Option<u64>,
     /// The symbl of the note, 0 if NFT/AT
@@ -33,31 +34,40 @@ impl Circuit<bls12_381::Scalar> for Mint
     ) -> Result<(), SynthesisError>
     {
         let mut note_preimage = vec![];
-        let mut asset_bits = vec![];
+        let mut inputs2_bits = vec![];
+        let mut inputs3_bits = vec![];
+
+        // note account to boolean bit vector
+        let account_bits = boolean::u64_into_boolean_vec_le(
+            cs.namespace(|| "account"),
+            self.account
+        )?;
+        inputs3_bits.extend(account_bits.clone());
 
         // note value to boolean bit vector
         let value_bits = boolean::u64_into_boolean_vec_le(
             cs.namespace(|| "value"),
             self.value
         )?;
-        asset_bits.extend(value_bits.clone());
+        inputs2_bits.extend(value_bits.clone());
 
         // note symbol to boolean bit vector
         let symbol_bits = boolean::u64_into_boolean_vec_le(
             cs.namespace(|| "symbol"),
             self.symbol
         )?;
-        asset_bits.extend(symbol_bits.clone());
+        inputs2_bits.extend(symbol_bits.clone());
 
         // note code to boolean bit vector
         let code_bits = boolean::u64_into_boolean_vec_le(
             cs.namespace(|| "code"),
             self.code
         )?;
-        asset_bits.extend(code_bits);
+        inputs2_bits.extend(code_bits.clone());
 
-        // append asset bit (value, symbol, code) to note preimage
-        note_preimage.extend(asset_bits.clone());
+        // append inputs bits (account, value, symbol, code) to note preimage
+        note_preimage.extend(inputs3_bits.clone());
+        note_preimage.extend(inputs2_bits.clone());
 
         // create AUTH bit: if value == 0 && symbol == 0 (i.e. if no bit in value_bits nor in symbol_bits is set) then AUTH = 1 else AUTH = 0
         let mut value_symbol_bits = vec![];
@@ -101,13 +111,6 @@ impl Circuit<bls12_381::Scalar> for Mint
         pk_d.assert_not_small_order(cs.namespace(|| "pk_d not small order"))?;
         // Place pk_d in the note
         note_preimage.extend(pk_d.repr(cs.namespace(|| "representation of pk_d"))?);
-
-        // rho is set to Scalar::one() when minting a new note
-        let rho_bits = boolean::field_into_boolean_vec_le(
-            cs.namespace(|| "rho"),
-            Some(Scalar::one())
-        )?;
-        note_preimage.extend(rho_bits);
 
         // derive pk_d from spending key: in case of auth token it must equal pk_d of address of this note
         // Prover witnesses ak (ensures that it's on the curve)
@@ -153,7 +156,6 @@ impl Circuit<bls12_381::Scalar> for Mint
         let pk_d_ = g_d.mul(cs.namespace(|| "compute pk_d_"), &ivk)?;
 
         // enforce: AUTH * (pk_d - pk_d_) = 0
-        // To prevent NFTs from being 'split', enforce: 0 = NFT * C
         cs.enforce(
             || "conditionally enforce 0 = AUTH * (pk_d - pk_d_)",
             |lc| lc + pk_d.get_v().get_variable() - pk_d_.get_v().get_variable(),
@@ -161,14 +163,38 @@ impl Circuit<bls12_381::Scalar> for Mint
             |lc| lc,
         );
 
+        // Compute accounts's value as a linear combination of the bits.
+        let mut account_num = Num::zero();
+        let mut coeff = bls12_381::Scalar::one();
+        for bit in &account_bits
+        {
+            account_num = account_num.add_bool_with_coeff(CS::one(), bit, coeff);
+            coeff = coeff.double();
+        }
+        // Compute code's value as a linear combination of the bits.
+        let mut code_num = Num::zero();
+        let mut coeff = bls12_381::Scalar::one();
+        for bit in &code_bits
+        {
+            code_num = code_num.add_bool_with_coeff(CS::one(), bit, coeff);
+            coeff = coeff.double();
+        }
+        // enforce: AUTH * (code - account) = 0
+        cs.enforce(
+            || "conditionally enforce 0 = AUTH * (code - account)",
+            |lc| lc + &account_num.lc(bls12_381::Scalar::one()) - &code_num.lc(bls12_381::Scalar::one()),
+            |lc| lc + &auth.lc(CS::one(), bls12_381::Scalar::one()),
+            |lc| lc,
+        );
+
         assert_eq!(
             note_preimage.len(),
+            64 +    // account
             64 +    // value
             64 +    // symbol
             64 +    // code
             256 +   // g_d
-            256 +   // pk_d
-            255     // rho
+            256     // pk_d
         );
 
         // Compute the hash of the note contents
@@ -201,9 +227,10 @@ impl Circuit<bls12_381::Scalar> for Mint
         // the u-coordinate is an injective encoding for
         // elements in the prime-order subgroup.
         cm.get_u().inputize(cs.namespace(|| "commitment"))?;
-
-        // expose asset contents (value, symbol and code) as one input vector
-        multipack::pack_into_inputs(cs.namespace(|| "pack asset contents"), &asset_bits)?;
+        // expose inputs2 contents (value, symbol and code) as one input vector
+        multipack::pack_into_inputs(cs.namespace(|| "pack inputs2 contents"), &inputs2_bits)?;
+        // expose inputs3 contents (account) as one input vector
+        multipack::pack_into_inputs(cs.namespace(|| "pack inputs3 contents"), &inputs3_bits)?;
 
         Ok(())
     }
@@ -212,9 +239,10 @@ impl Circuit<bls12_381::Scalar> for Mint
 #[cfg(test)]
 mod tests
 {
-    use crate::note::{Note, nullifier::ExtractedNullifier, Rseed};
+    use crate::note::{Note, Rseed};
     use crate::keys::{SpendingKey, FullViewingKey};
     use crate::eosio::{Asset, Name, Symbol};
+    use crate::contract::AffineVerifyingKeyBytesLE;
     use bls12_381::Scalar;
     use bls12_381::Bls12;
     use rand::rngs::OsRng;
@@ -226,6 +254,7 @@ mod tests
     use bellman::groth16::Parameters;
     use bellman::groth16::VerifyingKey;
     use ff::PrimeField;
+    use std::fs;
     use std::fs::File;
 
     #[test]
@@ -234,22 +263,27 @@ mod tests
         let mut rng = OsRng.clone();
         let (sk, _, n) = Note::dummy(
             &mut rng,
-            Some(ExtractedNullifier(Scalar::one().clone())),
             Asset::from_string(&"1234567890987654321".to_string()),
             None
         );
-        let (_sk_dummy, _, _) = Note::dummy(&mut rng, None, None, None);
-        let mut asset_contents = [0; 24];
-        asset_contents[0..8].copy_from_slice(&n.amount().to_le_bytes());
-        asset_contents[8..16].copy_from_slice(&n.symbol().raw().to_le_bytes());
-        asset_contents[16..24].copy_from_slice(&n.code().raw().to_le_bytes());
-        let asset_contents = multipack::bytes_to_bits_le(&asset_contents);
-        let asset_contents = multipack::compute_multipacking(&asset_contents);
-        assert_eq!(asset_contents.len(), 1);
+        let (_sk_dummy, _, _) = Note::dummy(&mut rng, None, None);
+        let mut inputs2_contents = [0; 24];
+        inputs2_contents[0..8].copy_from_slice(&n.amount().to_le_bytes());
+        inputs2_contents[8..16].copy_from_slice(&n.symbol().raw().to_le_bytes());
+        inputs2_contents[16..24].copy_from_slice(&n.code().raw().to_le_bytes());
+        let inputs2_contents = multipack::bytes_to_bits_le(&inputs2_contents);
+        let inputs2_contents = multipack::compute_multipacking(&inputs2_contents);
+        assert_eq!(inputs2_contents.len(), 1);
+        let mut inputs3_contents = [0; 8];
+        inputs3_contents[0..8].copy_from_slice(&n.account().raw().to_le_bytes());
+        let inputs3_contents = multipack::bytes_to_bits_le(&inputs3_contents);
+        let inputs3_contents = multipack::compute_multipacking(&inputs3_contents);
+        assert_eq!(inputs3_contents.len(), 1);
 
         let mut cs = TestConstraintSystem::new();
 
         let instance = Mint {
+            account: Some(n.account().raw()),
             value: Some(n.amount()),
             symbol: Some(n.symbol().raw()),
             code: Some(n.code().raw()),
@@ -261,24 +295,26 @@ mod tests
         instance.synthesize(&mut cs).unwrap();
 
         assert!(cs.is_satisfied());
-        assert_eq!(cs.num_constraints(), 31641); // 4681
-        assert_eq!(cs.hash(), "e14b7853dfe901e57af4e0bf09258057f61d6e2ba87deb534ff786ac7f7c0d3a");
+        println!("num constraints: {}", cs.num_constraints());
+        println!("cs hash: {}", cs.hash());
 
         assert_eq!(
             cs.get("randomization of note commitment/u3/num").to_repr(),
             n.commitment().to_bytes()
         );
 
-        assert_eq!(cs.num_inputs(), 3);
+        assert_eq!(cs.num_inputs(), 4);
         assert_eq!(cs.get_input(0, "ONE"), bls12_381::Scalar::one());
         assert_eq!(cs.get_input(1, "commitment/input variable").to_repr(), n.commitment().to_bytes());
-        assert_eq!(cs.get_input(2, "pack asset contents/input 0"), asset_contents[0]);
+        assert_eq!(cs.get_input(2, "pack inputs2 contents/input 0"), inputs2_contents[0]);
+        assert_eq!(cs.get_input(3, "pack inputs3 contents/input 0"), inputs3_contents[0]);
     }
 
     #[test]
     fn generate_and_write_params()
     {
         let instance = Mint {
+            account: None,
             value: None,
             symbol: None,
             code: None,
@@ -287,12 +323,13 @@ mod tests
             proof_generation_key: None,
         };
         let params = generate_random_parameters::<Bls12, _, _>(instance, &mut OsRng).unwrap();
-        
         let f = File::create("params_mint.bin").unwrap();
         params.write(f).unwrap();
-
         let f = File::create("vk_mint.bin").unwrap();
         params.vk.write(f).unwrap();
+        let vk_affine_bytes = AffineVerifyingKeyBytesLE::from(params.vk);
+        let res = fs::write("vk_mint.hex", hex::encode(vk_affine_bytes.0));
+        assert!(res.is_ok());
     }
 
     #[test]
@@ -302,11 +339,12 @@ mod tests
         let params = Parameters::<Bls12>::read(f, false).unwrap();
 
         let mut rng = OsRng.clone();
-        let (_sk, _, n) = Note::dummy(&mut rng, Some(ExtractedNullifier(Scalar::one().clone())), Asset::new(0, Symbol::new(12)), None);
-        let (sk_dummy, _, _) = Note::dummy(&mut rng, None, None, None);
+        let (_sk, _, n) = Note::dummy(&mut rng, Asset::new(0, Symbol(12)), None);
+        let (sk_dummy, _, _) = Note::dummy(&mut rng, None, None);
 
         println!("create proof");
         let instance = Mint {
+            account: Some(n.account().raw()),
             value: Some(n.amount()),
             symbol: Some(n.symbol().raw()),
             code: Some(n.code().raw()),
@@ -320,19 +358,26 @@ mod tests
         proof.write(f).unwrap();
 
         println!("pack inputs");
-        let mut asset_contents = [0; 24];
-        asset_contents[0..8].copy_from_slice(&n.amount().to_le_bytes());
-        asset_contents[8..16].copy_from_slice(&n.symbol().raw().to_le_bytes());
-        asset_contents[16..24].copy_from_slice(&n.code().raw().to_le_bytes());
-        let asset_contents = multipack::bytes_to_bits_le(&asset_contents);
-        let asset_contents: Vec<Scalar> = multipack::compute_multipacking(&asset_contents);
-        assert_eq!(asset_contents.len(), 1);
+        let mut inputs2_contents = [0; 24];
+        inputs2_contents[0..8].copy_from_slice(&n.amount().to_le_bytes());
+        inputs2_contents[8..16].copy_from_slice(&n.symbol().raw().to_le_bytes());
+        inputs2_contents[16..24].copy_from_slice(&n.code().raw().to_le_bytes());
+        let inputs2_contents = multipack::bytes_to_bits_le(&inputs2_contents);
+        let inputs2_contents: Vec<Scalar> = multipack::compute_multipacking(&inputs2_contents);
+        assert_eq!(inputs2_contents.len(), 1);
+        let mut inputs3_contents = [0; 8];
+        inputs3_contents[0..8].copy_from_slice(&n.account().raw().to_le_bytes());
+        let inputs3_contents = multipack::bytes_to_bits_le(&inputs3_contents);
+        let inputs3_contents: Vec<Scalar> = multipack::compute_multipacking(&inputs3_contents);
+        assert_eq!(inputs3_contents.len(), 1);
         let mut inputs = vec![];
         inputs.push(n.commitment().0);
-        inputs.extend(asset_contents.clone());
+        inputs.extend(inputs2_contents.clone());
+        inputs.extend(inputs3_contents.clone());
         // print public inputs
         println!("{}", hex::encode(n.commitment().0.to_bytes()));
-        println!("{}", hex::encode(asset_contents[0].to_bytes()));
+        println!("{}", hex::encode(inputs2_contents[0].to_bytes()));
+        println!("{}", hex::encode(inputs3_contents[0].to_bytes()));
 
         println!("verify proof");
         let f = File::open("vk_mint.bin").unwrap();
@@ -355,15 +400,16 @@ mod tests
         let note = Note::from_parts(
             0,
             recipient,
+            Name(0),
             Asset::from_string(&"5000.0000 EOS".to_string()).unwrap(),
             Name::from_string(&"eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
-            ExtractedNullifier(Scalar::one()),
             [0; 512]
         );
 
         println!("create proof");
         let instance = Mint {
+            account: Some(note.account().raw()),
             value: Some(note.amount()),
             symbol: Some(note.symbol().raw()),
             code: Some(note.code().raw()),
@@ -377,19 +423,26 @@ mod tests
         proof.write(f).unwrap();
 
         println!("pack inputs");
-        let mut asset_contents = [0; 24];
-        asset_contents[0..8].copy_from_slice(&note.amount().to_le_bytes());
-        asset_contents[8..16].copy_from_slice(&note.symbol().raw().to_le_bytes());
-        asset_contents[16..24].copy_from_slice(&note.code().raw().to_le_bytes());
-        let asset_contents = multipack::bytes_to_bits_le(&asset_contents);
-        let asset_contents: Vec<Scalar> = multipack::compute_multipacking(&asset_contents);
-        assert_eq!(asset_contents.len(), 1);
+        let mut inputs2_contents = [0; 24];
+        inputs2_contents[0..8].copy_from_slice(&note.amount().to_le_bytes());
+        inputs2_contents[8..16].copy_from_slice(&note.symbol().raw().to_le_bytes());
+        inputs2_contents[16..24].copy_from_slice(&note.code().raw().to_le_bytes());
+        let inputs2_contents = multipack::bytes_to_bits_le(&inputs2_contents);
+        let inputs2_contents: Vec<Scalar> = multipack::compute_multipacking(&inputs2_contents);
+        assert_eq!(inputs2_contents.len(), 1);
+        let mut inputs3_contents = [0; 8];
+        inputs3_contents[0..8].copy_from_slice(&note.account().raw().to_le_bytes());
+        let inputs3_contents = multipack::bytes_to_bits_le(&inputs3_contents);
+        let inputs3_contents: Vec<Scalar> = multipack::compute_multipacking(&inputs3_contents);
+        assert_eq!(inputs3_contents.len(), 1);
         let mut inputs = vec![];
         inputs.push(note.commitment().0);
-        inputs.extend(asset_contents.clone());
+        inputs.extend(inputs2_contents.clone());
+        inputs.extend(inputs3_contents.clone());
         // print public inputs
         println!("{}", hex::encode(note.commitment().0.to_bytes()));
-        println!("{}", hex::encode(asset_contents[0].to_bytes()));
+        println!("{}", hex::encode(inputs2_contents[0].to_bytes()));
+        println!("{}", hex::encode(inputs3_contents[0].to_bytes()));
 
         println!("verify proof");
         let f = File::open("vk_mint.bin").unwrap();

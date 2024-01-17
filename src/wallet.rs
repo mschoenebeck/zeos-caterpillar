@@ -14,7 +14,8 @@ use crate::{
     blake2s7r::Params as Blake2s7rParams,
     circuit::{burn::Burn, transfer::Transfer, mint::Mint},
     constants::MERKLE_TREE_DEPTH,
-    contract::{ScalarBytes, PlsFtTransfer, PlsNftTransfer, PlsMint, AffineProofBytesLE, PlsMintAction, PlsBurn, PlsBurnAction, PlsTransfer, PlsTransferAction},
+    //contract::{ScalarBytes, PlsFtTransfer, PlsNftTransfer, PlsMint, AffineProofBytesLE, PlsMintAction, PlsBurn, PlsBurnAction, PlsTransfer, PlsTransferAction},
+    contract::ScalarBytes,
     eosio::{Asset, Authorization, Name, SymbolCode, Transaction, Action, Symbol},
     keys::{IncomingViewingKey, SpendingKey, FullViewingKey, PreparedIncomingViewingKey},
     note::{Note, Rseed, nullifier::ExtractedNullifier},
@@ -90,9 +91,9 @@ impl NoteEx
         writer.write_u64::<LittleEndian>(self.block_ts)?;       // 8
         writer.write_u64::<LittleEndian>(self.wallet_ts)?;      // 8
         writer.write_u64::<LittleEndian>(self.leaf_idx_arr)?;   // 8
-        self.note.write(&mut writer)?;                          // 651
+        self.note.write(&mut writer)?;                          // 627
 
-        Ok(())
+        Ok(())                                                  // 655 bytes in total
     }
 
     pub fn read<R: Read>(mut reader: R) -> io::Result<Self>
@@ -109,6 +110,31 @@ impl NoteEx
     pub fn position(&self) -> u64
     {
         self.leaf_idx_arr % MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH) - MT_ARR_LEAF_ROW_OFFSET!(MERKLE_TREE_DEPTH)
+    }
+
+    pub fn block_ts(&self) -> u64
+    {
+        self.block_ts
+    }
+
+    pub fn wallet_ts(&self) -> u64
+    {
+        self.wallet_ts
+    }
+
+    pub fn leaf_idx_arr(&self) -> u64
+    {
+        self.leaf_idx_arr
+    }
+
+    pub fn block_num(&self) -> u32
+    {
+        self.block_num
+    }
+
+    pub fn note(&self) -> &Note
+    {
+        &self.note
     }
 }
 /*
@@ -303,10 +329,6 @@ struct SpendAction
     memo_c: String
 }
 
-
-
-// TODO: add_notes(note_ct: [String])
-
 impl Wallet
 {
     pub fn create(
@@ -335,7 +357,7 @@ impl Wallet
         };
 
         Some(Wallet{
-            seed: seed.to_vec(),
+            seed: if !is_ivk { seed.to_vec() } else { vec![] },
             ivk,
             diversifiers,
             chain_id,
@@ -419,10 +441,10 @@ impl Wallet
 
         let mut chain_id = [0; 32];
         reader.read_exact(&mut chain_id)?;
-        let protocol_contract = Name::new(reader.read_u64::<LittleEndian>()?);
+        let protocol_contract = Name(reader.read_u64::<LittleEndian>()?);
         let alias_authority = Authorization{
-            actor: Name::new(reader.read_u64::<LittleEndian>()?),
-            permission: Name::new(reader.read_u64::<LittleEndian>()?)
+            actor: Name(reader.read_u64::<LittleEndian>()?),
+            permission: Name(reader.read_u64::<LittleEndian>()?)
         };
         let block_num = reader.read_u32::<LittleEndian>()?;
         let leaf_count = reader.read_u64::<LittleEndian>()?;
@@ -505,11 +527,11 @@ impl Wallet
         8 +                                 // leaf count
         //self.settings.size() +
         4 +                                 // unspent_notes.len()
-        self.unspent_notes.len() * 679 +
+        self.unspent_notes.len() * 655 +
         4 +                                 // spent_notes.len()
-        self.spent_notes.len() * 679 +
+        self.spent_notes.len() * 655 +
         4 +                                 // outgoing_notes.len()
-        self.outgoing_notes.len() * 679 +
+        self.outgoing_notes.len() * 655 +
         self.leaf_count as usize * 32       // merkle tree leaves only
 
         // less verbose but much heavier alternative:
@@ -1009,7 +1031,7 @@ impl Wallet
         {
             // the note to be spent
             let note_a = &set[j];
-            let nf = note_a.note.nullifier(&fvk.nk, note_a.position()).into();
+            //let nf = note_a.note.nullifier(&fvk.nk, note_a.position()).into();
 
             // if the position bit of this note is set, it is being 'burned'
             if (tb_bit_pattern & (1 << j)) != 0
@@ -1020,8 +1042,8 @@ impl Wallet
                     if bp.is_empty()
                     {
                         (
-                            Note::dummy(rng, Some(nf), Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2,
-                            Name::new(0),
+                            Note::dummy(rng, Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2,
+                            Name(0),
                             "".to_string()
                         )
                     }
@@ -1045,12 +1067,13 @@ impl Wallet
 
                             (
                                 Note::from_parts(
-                                    1 << 63, // set burn flag
+                                    0,
                                     Address::dummy(rng),
+                                    account_b.clone(),
                                     note_a.note.asset().clone(),
                                     note_a.note.code().clone(),
                                     Rseed::new(rng),
-                                    nf,
+                                    //nf,
                                     memo_bytes
                                 ),
                                 account_b,
@@ -1068,12 +1091,13 @@ impl Wallet
 
                             (
                                 Note::from_parts(
-                                    1 << 63, // set burn flag
+                                    0,
                                     Address::dummy(rng),
+                                    account_b.clone(),
                                     asset_b,
                                     note_a.note.code().clone(),
                                     Rseed::new(rng),
-                                    nf,
+                                    //nf,
                                     memo_bytes
                                 ),
                                 account_b,
@@ -1090,8 +1114,8 @@ impl Wallet
                     if bp.is_empty() || 0 == (note_a.note.amount() - note_b.amount())
                     {
                         (
-                            Note::dummy(rng, Some(nf), Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2,
-                            Name::new(0),
+                            Note::dummy(rng, Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2,
+                            Name(0),
                             "".to_string()
                         )
                     }
@@ -1115,12 +1139,13 @@ impl Wallet
 
                             (
                                 Note::from_parts(
-                                    1 << 63, // set burn flag
+                                    0,
                                     Address::dummy(rng),
+                                    account_c.clone(),
                                     note_a.note.asset().sub(note_b.asset()),
                                     note_a.note.code().clone(),
                                     Rseed::new(rng),
-                                    nf,
+                                    //nf,
                                     memo_bytes
                                 ),
                                 account_c,
@@ -1138,12 +1163,13 @@ impl Wallet
 
                             (
                                 Note::from_parts(
-                                    1 << 63, // set burn flag
+                                    0,
                                     Address::dummy(rng),
+                                    account_c.clone(),
                                     asset_c,
                                     note_a.note.code().clone(),
                                     Rseed::new(rng),
-                                    nf,
+                                    //nf,
                                     memo_bytes
                                 ),
                                 account_c,
@@ -1165,17 +1191,18 @@ impl Wallet
                             Note::from_parts(
                                 0,
                                 note_a.note.address(),
+                                Name(0),
                                 note_a.note.asset().sub(&note_b.asset().add(&note_c.asset())),
                                 note_a.note.code().clone(),
                                 Rseed::new(rng),
-                                nf,
+                                //nf,
                                 [0; 512]
                             )
                         }
                         // leftover equals zero
                         else
                         {
-                            Note::dummy(rng, Some(nf), Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2
+                            Note::dummy(rng, Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2
                         }
                     }
                     else
@@ -1200,10 +1227,11 @@ impl Wallet
                             Note::from_parts(
                                 0,
                                 address_d,
+                                Name(0),
                                 note_a.note.asset().sub(&note_b.asset().add(&note_c.asset())),
                                 note_a.note.code().clone(),
                                 Rseed::new(rng),
-                                nf,
+                                //nf,
                                 memo_bytes
                             )
                         }
@@ -1213,10 +1241,11 @@ impl Wallet
                             Note::from_parts(
                                 0,
                                 note_a.note.address(),
+                                Name(0),
                                 note_a.note.asset().sub(&note_b.asset().add(&note_c.asset())),
                                 note_a.note.code().clone(),
                                 Rseed::new(rng),
-                                nf,
+                                //nf,
                                 [0; 512]
                             )
                         }
@@ -1243,7 +1272,7 @@ impl Wallet
                     // this case should actually only occur for invalid combinations
                     if tp.is_empty()
                     {
-                        Note::dummy(rng, Some(nf), Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2
+                        Note::dummy(rng, Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2
                     }
                     else
                     {
@@ -1266,10 +1295,11 @@ impl Wallet
                             Note::from_parts(
                                 0,
                                 address_b,
+                                Name(0),
                                 note_a.note.asset().clone(),
                                 note_a.note.code().clone(),
                                 Rseed::new(rng),
-                                nf,
+                                //nf,
                                 memo_bytes
                             )
                         }
@@ -1285,10 +1315,11 @@ impl Wallet
                             Note::from_parts(
                                 0,
                                 address_b,
+                                Name(0),
                                 asset_b,
                                 note_a.note.code().clone(),
                                 Rseed::new(rng),
-                                nf,
+                                //nf,
                                 memo_bytes
                             )
                         }
@@ -1307,17 +1338,18 @@ impl Wallet
                             Note::from_parts(
                                 0,
                                 note_a.note.address(),
+                                Name(0),
                                 note_a.note.asset().sub(&note_b.asset()),
                                 note_a.note.code().clone(),
                                 Rseed::new(rng),
-                                nf,
+                                //nf,
                                 [0; 512]
                             )
                         }
                         // leftover equals zero
                         else
                         {
-                            Note::dummy(rng, Some(nf), Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2
+                            Note::dummy(rng, Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2
                         }
                     }
                     else
@@ -1342,10 +1374,11 @@ impl Wallet
                             Note::from_parts(
                                 0,
                                 address_c,
+                                Name(0),
                                 note_a.note.asset().sub(&note_b.asset()),
                                 note_a.note.code().clone(),
                                 Rseed::new(rng),
-                                nf,
+                                //nf,
                                 memo_bytes
                             )
                         }
@@ -1355,10 +1388,11 @@ impl Wallet
                             Note::from_parts(
                                 0,
                                 note_a.note.address(),
+                                Name(0),
                                 note_a.note.asset().sub(&note_b.asset()),
                                 note_a.note.code().clone(),
                                 Rseed::new(rng),
-                                nf,
+                                //nf,
                                 [0; 512]
                             )
                         }
@@ -1370,9 +1404,9 @@ impl Wallet
                     note_a: note_a.clone(),
                     note_b,
                     note_c,
-                    note_d: Note::dummy(rng, Some(nf), Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2,
-                    account_b: Name::new(0),
-                    account_c: Name::new(0),
+                    note_d: Note::dummy(rng, Asset::new(0, note_a.note.symbol().clone()), Some(note_a.note.code().clone())).2,
+                    account_b: Name(0),
+                    account_c: Name(0),
                     memo_b: "".to_string(),
                     memo_c: "".to_string()
                 });
@@ -2020,6 +2054,11 @@ impl Wallet
         Some(transaction)
     }
 */
+    pub fn is_ivk(&self) -> bool
+    {
+        self.seed.len() == 0
+    }
+
     pub fn balances(&self) -> Vec<Asset>
     {
         let mut map = HashMap::new();
@@ -2042,25 +2081,52 @@ impl Wallet
         {
             v.push(Asset::new(
                 *map.get(k).unwrap() as i64,
-                Symbol::new(*k)
+                Symbol(*k)
             ).unwrap())
         }
         v
     }
 
-    pub fn notes(&self) -> Vec<Asset>
+    pub fn unspent_notes(&self, symbol: &Symbol, code: &Name) -> Vec<NoteEx>
     {
-        let mut v = vec![];
-        for note in &self.unspent_notes
+        if symbol.raw() == 0 && code.raw() == 0
         {
-            v.push(note.note.asset().clone());
+            return self.unspent_notes.clone();
         }
-        v
+        else
+        {
+            return self.unspent_notes.iter().map(|n| n.clone()).filter(|n| n.note.symbol().eq(&symbol) && n.note.code().eq(&code)).collect()
+        }
+    }
+
+    pub fn spending_key(&self) -> Option<SpendingKey>
+    {
+        if self.is_ivk()
+        {
+            None
+        }
+        else
+        {
+            Some(SpendingKey::from_seed(&self.seed))
+        }
+    }
+
+    pub fn default_address(&self) -> Option<Address>
+    {
+        if self.seed.len() == 0
+        {
+            return None;
+        }
+        Some(FullViewingKey::from_spending_key(&SpendingKey::from_seed(&self.seed)).default_address().1)
     }
 
     pub fn addresses(&self) -> Vec<Address>
     {
         let mut v = vec![];
+        if self.seed.len() == 0
+        {
+            return v;
+        }
         let sk = SpendingKey::from_seed(&self.seed);
         let fvk = FullViewingKey::from_spending_key(&sk);
         for d in &self.diversifiers
@@ -2072,6 +2138,7 @@ impl Wallet
 
     pub fn derive_next_address(&mut self) -> Address
     {
+        // TODO: what if IVK wallet?
         let sk = SpendingKey::from_seed(&self.seed);
         let fvk = FullViewingKey::from_spending_key(&sk);
         let mut latest_di = *self.diversifiers.last().unwrap();
@@ -2094,7 +2161,56 @@ impl Wallet
         }
     }
 
-    pub fn process_block(&mut self, block: &String) -> u64
+    pub fn add_notes(&mut self, notes: &Vec<String>)
+    {
+        let sk = SpendingKey::from_seed(&self.seed);
+        let fvk = FullViewingKey::from_spending_key(&sk);
+        let wallet_ts = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_millis() as u64;
+
+        for n in notes
+        {
+            let encrypted_note = TransmittedNoteCiphertext::from_base64(n);
+            if encrypted_note.is_none() { continue; }
+            let encrypted_note = encrypted_note.unwrap();
+
+            // test receiver decryption
+            match try_note_decryption(&PreparedIncomingViewingKey::new(&fvk.ivk()), &encrypted_note) {
+                Some(note) => {
+                    // Merkle tree must be up to date! We check if there's a leaf for this note and get it's array index in the merkle
+                    // tree. If there is no index (i.e. leaf), this note can't be valid and is discarded.
+                    let cm = note.commitment();
+                    let idx = self.merkle_tree.iter().find_map(|(key, val)| if val.0 == cm.to_bytes() { Some(key) } else { None });
+                    if idx.is_none() { continue; }
+                    let note_ex = NoteEx{
+                        block_num: 0,
+                        block_ts: 0,
+                        wallet_ts,
+                        leaf_idx_arr: *idx.unwrap(),
+                        note
+                    };
+                    self.unspent_notes.push(note_ex);
+                },
+                None => {},
+            }
+
+            // test sender decryption
+            match try_output_recovery_with_ovk(&fvk.ovk, &encrypted_note) {
+                Some(note) => {
+                    let note_ex = NoteEx{
+                        block_num: 0,
+                        block_ts: 0,
+                        wallet_ts,
+                        leaf_idx_arr: 0,
+                        note: note.clone()
+                    };
+                    self.outgoing_notes.push(note_ex);
+                },
+                None => {},
+            }
+        }
+    }
+
+    pub fn digest_block(&mut self, block: &String) -> u64
     {
         let sk = SpendingKey::from_seed(&self.seed);
         let fvk = FullViewingKey::from_spending_key(&sk);
@@ -2160,11 +2276,12 @@ impl Wallet
                                 };
                                 self.outgoing_notes.push(note_ex);
                                 // Look for parent note (by nullifier) and move it from 'unspent' to 'spent'
-                                let index = self.unspent_notes.iter().position(|n| n.note.nullifier(&fvk.nk, n.position()).extract() == *note.rho());
-                                if index.is_some()
-                                {
-                                    self.spent_notes.push(self.unspent_notes.remove(index.unwrap()));
-                                }
+                                // TODO: check for spent notes (i.e. the actual NF) in order to find spent note
+                                //let index = self.unspent_notes.iter().position(|n| n.note.nullifier(&fvk.nk, n.position()).extract() == *note.rho());
+                                //if index.is_some()
+                                //{
+                                //    self.spent_notes.push(self.unspent_notes.remove(index.unwrap()));
+                                //}
                             },
                             None => {},
                         }
@@ -2177,7 +2294,7 @@ impl Wallet
 
         notes_found
     }
-
+/*
     fn find_nft(&self, notes: &mut Vec<NoteEx>, asset: &Asset) -> Option<NoteEx>
     {
         if !asset.is_nft() || asset.amount() == 0
@@ -2201,7 +2318,7 @@ impl Wallet
         log(&asset.to_string());
         None
     }
-
+*/
     fn insert_into_merkle_tree(&mut self, leaf: &ScalarBytes) -> u64
     {
         // calculate array index of next free leaf in current tree
@@ -2255,7 +2372,7 @@ impl Wallet
         return tos;
     }
 
-    fn get_sister_path_and_root(&self, note: &NoteEx) -> Option<(Vec<Option<([u8; 32], bool)>>, ScalarBytes)>
+    pub fn get_sister_path_and_root(&self, note: &NoteEx) -> Option<(Vec<Option<([u8; 32], bool)>>, ScalarBytes)>
     {
         let mut idx = note.leaf_idx_arr % MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH);
         let tos = note.leaf_idx_arr / MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH) * MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH);
@@ -2316,7 +2433,7 @@ mod tests
         println!("Wallet size: {}", w.size());
 
         let mut rng = OsRng.clone();
-        w.unspent_notes.push(NoteEx{block_num: 1337, block_ts: 1234, leaf_idx_arr: 1234, wallet_ts: 0, note: Note::dummy(&mut rng, None, None, None).2});
+        w.unspent_notes.push(NoteEx{block_num: 1337, block_ts: 1234, leaf_idx_arr: 1234, wallet_ts: 0, note: Note::dummy(&mut rng, None, None).2});
 
         let mut v = vec![];
         assert!(w.write(&mut v).is_ok());
@@ -2336,19 +2453,19 @@ mod tests
         let tx = Transaction{
             actions: vec![
                 Action{
-                    account: Name::new(0),
-                    name: Name::new(0),
+                    account: Name(0),
+                    name: Name(0),
                     authorization: vec![Authorization{
-                        actor: Name::new(0),
-                        permission: Name::new(0)
+                        actor: Name(0),
+                        permission: Name(0)
                     }],
-                    data: PlsMint{
+                    data: serde_json::to_value(PlsMint{
                         cm: ScalarBytes([0; 32]),
                         value: 0,
-                        symbol: Symbol::new(0),
-                        code: Name::new(0),
+                        symbol: Symbol(0),
+                        code: Name(0),
                         proof: AffineProofBytesLE([0; 384])
-                    }.into()
+                    }).unwrap()
                 }
             ]
         };
@@ -2457,7 +2574,7 @@ mod tests
         w.add_leaves(leaves.as_slice());
         for b in blocks
         {
-            w.process_block(&b.to_string());
+            w.digest_block(&b.to_string());
         }
 
         //println!("{}", serde_json::to_string(&w.move_asset(&mut rng, "mschoenebeck@active".to_string(), vec!["- 1 EOS".to_string()]).unwrap()).unwrap());

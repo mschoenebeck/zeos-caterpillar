@@ -20,7 +20,7 @@ impl Nullifier
         nk: &NullifierDerivingKey,
         cm: NoteCommitment,
         position: u64,
-        rho: ExtractedNullifier
+        //rho: ExtractedNullifier
     ) -> Self
     {
         let rho_mix = mixing_pedersen_hash(cm.0, position);
@@ -28,8 +28,8 @@ impl Nullifier
             Personalization::Nullifier,
             iter::empty()
                 .chain(BitArray::<_, Lsb0>::new(nk.0.to_bytes()).iter().by_vals())
-                .chain(BitArray::<_, Lsb0>::new(rho_mix.to_bytes()).iter().by_vals())
-                .chain(BitArray::<_, Lsb0>::new(rho.to_bytes()).iter().by_vals())
+                .chain(BitArray::<_, Lsb0>::new(rho_mix.to_bytes()).iter().by_vals()),
+                //.chain(BitArray::<_, Lsb0>::new(rho.to_bytes()).iter().by_vals())
         ))
     }
 

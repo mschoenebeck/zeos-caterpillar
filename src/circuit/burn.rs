@@ -179,13 +179,13 @@ impl Circuit<bls12_381::Scalar> for Burn
         // Place pk_d_a in the preimage of note a
         note_a_preimage.extend(pk_d.repr(cs.namespace(|| "representation of pk_d a"))?);
         // Place rho_a in the preimage of note a
-        let rho_a_bits = boolean::field_into_boolean_vec_le(
-            cs.namespace(|| "rho a"),
-            self.note_a.as_ref().map(|a| {
-                a.rho().0
-            })
-        )?;
-        note_a_preimage.extend(rho_a_bits.clone());
+        //let rho_a_bits = boolean::field_into_boolean_vec_le(
+        //    cs.namespace(|| "rho a"),
+        //    self.note_a.as_ref().map(|a| {
+        //        a.rho().0
+        //    })
+        //)?;
+        //note_a_preimage.extend(rho_a_bits.clone());
 
         assert_eq!(
             note_a_preimage.len(),
@@ -193,8 +193,8 @@ impl Circuit<bls12_381::Scalar> for Burn
             64 +    // symbol
             64 +    // code
             256 +   // g_d
-            256 +   // pk_d
-            255     // rho
+            256     // pk_d
+            //255     // rho
         );
 
         // Compute the commitment of note a
@@ -294,11 +294,11 @@ impl Circuit<bls12_381::Scalar> for Burn
             rho_mix = rho_mix.add(cs.namespace(|| "faerie gold prevention"), &position)?;
         }
 
-        // Let's compute nf = pedersen_hash(nk | rho_mix | rho_a)
+        // Let's compute nf = pedersen_hash(nk | rho_mix)
         nf_preimage.extend(rho_mix.repr(cs.namespace(|| "representation of rho"))?);
-        nf_preimage.extend(rho_a_bits);
+        //nf_preimage.extend(rho_a_bits);
 
-        assert_eq!(nf_preimage.len(), 512 + 255);
+        assert_eq!(nf_preimage.len(), 512);
 
         // Compute nf
         let nf = pedersen_hash::pedersen_hash(
@@ -402,11 +402,11 @@ impl Circuit<bls12_381::Scalar> for Burn
         note_d_preimage.extend(pk_d_d.repr(cs.namespace(|| "representation of pk_d d"))?);
 
         // rho d is set to the nullifier of note a
-        let nf_bits = boolean::field_into_boolean_vec_le(
-            cs.namespace(|| "nf bits"),
-            nf.get_u().get_value()
-        )?;
-        note_d_preimage.extend(nf_bits);
+        //let nf_bits = boolean::field_into_boolean_vec_le(
+        //    cs.namespace(|| "nf bits"),
+        //    nf.get_u().get_value()
+        //)?;
+        //note_d_preimage.extend(nf_bits);
 
         // Compute the commitment of note d
         let mut cm_d = pedersen_hash::pedersen_hash(
@@ -493,7 +493,7 @@ mod tests
         let mut rng = OsRng.clone();
         let (sk_a, fvk_a, note_a) = Note::dummy(
             &mut rng,
-            Some(ExtractedNullifier(Scalar::one().clone())),
+            //Some(ExtractedNullifier(Scalar::one().clone())),
             Asset::from_string(&"1234567890987654321".to_string()),
             None
         );
@@ -544,7 +544,7 @@ mod tests
         let account_c = 9999u64;
         let (_, _, note_d) = Note::dummy(
             &mut rng,
-            Some(ExtractedNullifier::from(nf)),
+            //Some(ExtractedNullifier::from(nf)),
             Asset::from_string(&"0".to_string()),
             None
         );
@@ -634,7 +634,7 @@ mod tests
         let mut rng = OsRng.clone();
         let (sk_a, fvk_a, note_a) = Note::dummy(
             &mut rng,
-            Some(ExtractedNullifier(Scalar::one().clone())),
+            //Some(ExtractedNullifier(Scalar::one().clone())),
             Asset::from_string(&"1234567890987654321".to_string()),
             None
         );
@@ -685,7 +685,7 @@ mod tests
         let account_c = 9999u64;
         let (_, _, note_d) = Note::dummy(
             &mut rng,
-            Some(ExtractedNullifier::from(nf)),
+            //Some(ExtractedNullifier::from(nf)),
             Asset::from_string(&"0".to_string()),
             None
         );
@@ -765,10 +765,11 @@ mod tests
         let note_a = Note::from_parts(
             0,
             sender,
+            Name(0),
             Asset::from_string(&"5000.0000 EOS".to_string()).unwrap(),
             Name::from_string(&"eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
-            ExtractedNullifier(Scalar::one()),
+            //ExtractedNullifier(Scalar::one()),
             [0; 512]
         );
 
@@ -822,10 +823,11 @@ mod tests
         let note_d = Note::from_parts(
             0,
             sender,
+            Name(0),
             Asset::from_string(&"2000.0000 EOS".to_string()).unwrap(),
             Name::from_string(&"eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
-            ExtractedNullifier::from(nf),
+            //ExtractedNullifier::from(nf),
             [0; 512]
         );
 
