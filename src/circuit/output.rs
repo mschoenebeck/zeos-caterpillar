@@ -236,7 +236,7 @@ mod tests
     use bellman::gadgets::test::TestConstraintSystem;
     use bellman::Circuit;
     use bellman::groth16::generate_random_parameters;
-    use crate::Bls12;
+    use bls12_381::Bls12;
     use crate::address::Address;
     use crate::eosio::Asset;
     use crate::eosio::Name;

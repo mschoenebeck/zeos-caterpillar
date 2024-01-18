@@ -1,6 +1,6 @@
 use bellman::groth16::{Proof, VerifyingKey};
 use bls12_381::{Bls12, G1Affine, G2Affine};
-use serde::{Serialize, Deserialize, Serializer, Deserializer, de::Visitor, de::SeqAccess, de};
+use serde::{Serialize, Deserialize, Serializer, Deserializer, de::Visitor, de};
 use crate::eosio::{Asset, Name, Symbol};
 use std::fmt;
 
@@ -1024,20 +1024,18 @@ impl Fp
 mod tests
 {
     use super::*;
-    use crate::Parameters;
+    use bellman::groth16::Parameters;
     use crate::note::Note;
     use std::fs::File;
     use std::io::Read;
-    use bellman::groth16::{verify_proof, prepare_verifying_key};
+    use bellman::groth16::{verify_proof, prepare_verifying_key, create_random_proof};
     use bellman::gadgets::multipack;
     use bls12_381::Scalar;
     use bls12_381::Bls12;
-    use crate::Mint;
+    use crate::circuit::mint::Mint;
     use rand::rngs::OsRng;
-    use crate::create_random_proof;
-    use crate::SpendingKey;
-    use crate::FullViewingKey;
-    use crate::Rseed;
+    use crate::keys::{SpendingKey, FullViewingKey};
+    use crate::note::Rseed;
 
     #[test]
     fn test()

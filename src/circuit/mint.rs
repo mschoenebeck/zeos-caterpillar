@@ -333,6 +333,19 @@ mod tests
     }
 
     #[test]
+    fn write_b64_params()
+    {
+        use base64::{engine::general_purpose, Engine as _};
+        let file = std::fs::read("params_mint.bin").expect("Could not read file!");
+        // as hex
+        //let s = hex::encode(file.clone());
+        //fs::write("params_mint.hex", s).expect("Unable to write file");
+        // as base64
+        let s = general_purpose::STANDARD.encode(&file);
+        fs::write("params_mint.b64", s).expect("Unable to write file");
+    }
+
+    #[test]
     fn prove_and_verify()
     {
         let f = File::open("params_mint.bin").unwrap();

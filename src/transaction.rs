@@ -1680,6 +1680,14 @@ pub fn zsign_transfer_and_mint_transaction(
         })?
     });
 
+    // add end action
+    tx.actions.push(Action{
+        account: alias_authority.actor,
+        name: Name::from_string(&"end".to_string()).unwrap(),
+        authorization: vec![alias_authority.clone()],
+        data: json!({})
+    });
+
     Ok((tx, unpublished_notes))
 }
 

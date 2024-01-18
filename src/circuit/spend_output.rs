@@ -608,7 +608,7 @@ mod tests
     use bellman::gadgets::multipack;
     use bellman::Circuit;
     use bellman::groth16::generate_random_parameters;
-    use crate::Bls12;
+    use bls12_381::Bls12;
     use crate::contract::AffineVerifyingKeyBytesLE;
     use crate::eosio::Asset;
     use crate::eosio::Name;
@@ -621,7 +621,7 @@ mod tests
     use std::fs;
     use std::fs::File;
     use std::ops::Add;
-    use crate::{SpendingKey, FullViewingKey};
+    use crate::keys::{SpendingKey, FullViewingKey};
     use crate::spec::windowed_pedersen_commit;
     use crate::pedersen_hash::Personalization;
     use crate::spec::extract_p;

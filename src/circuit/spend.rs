@@ -370,7 +370,7 @@ mod tests
     use bellman::gadgets::multipack;
     use bellman::Circuit;
     use bellman::groth16::generate_random_parameters;
-    use crate::Bls12;
+    use bls12_381::Bls12;
     use crate::constants::MERKLE_TREE_DEPTH;
     use crate::eosio::Asset;
     use crate::eosio::Name;
@@ -382,7 +382,7 @@ mod tests
     use crate::value::{ValueCommitTrapdoor, ValueCommitment};
     use std::fs::File;
     use std::fs;
-    use crate::{SpendingKey, FullViewingKey};
+    use crate::keys::{SpendingKey, FullViewingKey};
     use crate::spec::windowed_pedersen_commit;
     use crate::pedersen_hash::Personalization;
     use crate::spec::extract_p;

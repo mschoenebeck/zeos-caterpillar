@@ -223,32 +223,6 @@ impl<'a> Sum<&'a ValueCommitment> for ValueCommitment {
     }
 }
 
-/// Generators for property testing.
-#[cfg(any(test, feature = "test-dependencies"))]
-#[cfg_attr(docsrs, doc(cfg(feature = "test-dependencies")))]
-pub mod testing {
-    use proptest::prelude::*;
-
-    use super::ValueCommitTrapdoor;
-
-    prop_compose! {
-        /// Generate an arbitrary Jubjub scalar.
-        fn arb_scalar()(bytes in prop::array::uniform32(0u8..)) -> jubjub::Scalar {
-            // Instead of rejecting out-of-range bytes, let's reduce them.
-            let mut buf = [0; 64];
-            buf[..32].copy_from_slice(&bytes);
-            jubjub::Scalar::from_bytes_wide(&buf)
-        }
-    }
-
-    prop_compose! {
-        /// Generate an arbitrary ValueCommitTrapdoor
-        pub fn arb_trapdoor()(rcv in arb_scalar()) -> ValueCommitTrapdoor {
-            ValueCommitTrapdoor(rcv)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{ValueCommitTrapdoor, ValueCommitment};
