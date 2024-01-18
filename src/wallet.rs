@@ -378,6 +378,16 @@ impl Wallet
         //v.len()
     }
 
+    pub fn protocol_contract(&self) -> Name
+    {
+        self.protocol_contract
+    }
+
+    pub fn alias_authority(&self) -> &Authorization
+    {
+        &self.alias_authority
+    }
+
     pub fn block_num(&self) -> u32
     {
         self.block_num

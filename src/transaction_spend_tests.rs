@@ -66,21 +66,21 @@ mod tests
             w.add_notes(&vec![encrypted_note.to_base64()]);
         }
 
+        let fee_token_contract = Name::from_string(&"thezeostoken".to_string()).unwrap();
+        let mut fees = HashMap::new();
+        fees.insert(Name::from_string(&"begin".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"mint".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"spendoutput".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"spend".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"output".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"authenticate".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"publishnotes".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"withdraw".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+
         let json = r#"{
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
             "protocol_contract": "zeos4privacy",
             "alias_authority": "thezeosalias@public",
-            "fee_token_contract": "thezeostoken",
-            "fees": {
-                "begin": "1.0000 ZEOS",
-                "mint": "0.3000 ZEOS",
-                "spendoutput": "0.7000 ZEOS",
-                "spend": "0.5000 ZEOS",
-                "output": "0.2000 ZEOS",
-                "authenticate": "1.0000 ZEOS",
-                "publishnotes": "0.1000 ZEOS",
-                "withdraw": "0.0100 ZEOS"
-            },
             "add_fee": true,
             "publish_fee_note": true,
             "zactions": [
@@ -135,7 +135,7 @@ mod tests
         }"#;
 
         let ztx: ZTransaction = serde_json::from_str(&json).unwrap();
-        let rztx = resolve_ztransaction(&w, &ztx);
+        let rztx = resolve_ztransaction(&w, &fee_token_contract, &fees, &ztx);
         let rztx = match rztx {
             Err(e) => panic!("Error: {:?}", e),
             Ok(x) => x
@@ -155,17 +155,6 @@ mod tests
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
             "protocol_contract": "zeos4privacy",
             "alias_authority": "thezeosalias@public",
-            "fee_token_contract": "thezeostoken",
-            "fees": {
-                "begin": "1.0000 ZEOS",
-                "mint": "0.3000 ZEOS",
-                "spendoutput": "0.7000 ZEOS",
-                "spend": "0.5000 ZEOS",
-                "output": "0.2000 ZEOS",
-                "authenticate": "1.0000 ZEOS",
-                "publishnotes": "0.1000 ZEOS",
-                "withdraw": "0.0100 ZEOS"
-            },
             "add_fee": true,
             "publish_fee_note": true,
             "zactions": [
@@ -226,7 +215,7 @@ mod tests
         }"#;
 
         let ztx: ZTransaction = serde_json::from_str(&json).unwrap();
-        let rztx = resolve_ztransaction(&w, &ztx);
+        let rztx = resolve_ztransaction(&w, &fee_token_contract, &fees, &ztx);
         let rztx = match rztx {
             Err(e) => panic!("Error: {:?}", e),
             Ok(x) => x
@@ -246,17 +235,6 @@ mod tests
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
             "protocol_contract": "zeos4privacy",
             "alias_authority": "thezeosalias@public",
-            "fee_token_contract": "thezeostoken",
-            "fees": {
-                "begin": "1.0000 ZEOS",
-                "mint": "0.3000 ZEOS",
-                "spendoutput": "0.7000 ZEOS",
-                "spend": "0.5000 ZEOS",
-                "output": "0.2000 ZEOS",
-                "authenticate": "1.0000 ZEOS",
-                "publishnotes": "0.1000 ZEOS",
-                "withdraw": "0.0100 ZEOS"
-            },
             "add_fee": true,
             "publish_fee_note": true,
             "zactions": [
@@ -281,7 +259,7 @@ mod tests
         }"#;
 
         let ztx: ZTransaction = serde_json::from_str(&json).unwrap();
-        let rztx = resolve_ztransaction(&w, &ztx);
+        let rztx = resolve_ztransaction(&w, &fee_token_contract, &fees, &ztx);
         let rztx = match rztx {
             Err(e) => panic!("Error: {:?}", e),
             Ok(x) => x
@@ -301,17 +279,6 @@ mod tests
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
             "protocol_contract": "zeos4privacy",
             "alias_authority": "thezeosalias@public",
-            "fee_token_contract": "thezeostoken",
-            "fees": {
-                "begin": "1.0000 ZEOS",
-                "mint": "0.3000 ZEOS",
-                "spendoutput": "0.7000 ZEOS",
-                "spend": "0.5000 ZEOS",
-                "output": "0.2000 ZEOS",
-                "authenticate": "1.0000 ZEOS",
-                "publishnotes": "0.1000 ZEOS",
-                "withdraw": "0.0100 ZEOS"
-            },
             "add_fee": true,
             "publish_fee_note": true,
             "zactions": [
@@ -354,7 +321,7 @@ mod tests
         }"#;
 
         let ztx: ZTransaction = serde_json::from_str(&json).unwrap();
-        let rztx = resolve_ztransaction(&w, &ztx);
+        let rztx = resolve_ztransaction(&w, &fee_token_contract, &fees, &ztx);
         let rztx = match rztx {
             Err(e) => panic!("Error: {:?}", e),
             Ok(x) => x

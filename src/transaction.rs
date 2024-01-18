@@ -42,7 +42,8 @@ pub enum TransactionError
     SpendOutputParams,
     SpendParams,
     OutputParams,
-    InvalidNote
+    InvalidNote,
+    InvalidProtocolContractOrAliasAuthority
 }
 impl Error for TransactionError {}
 impl fmt::Display for TransactionError
@@ -63,6 +64,7 @@ impl fmt::Display for TransactionError
             Self::SpendParams => write!(f, "invalid spend params"),
             Self::OutputParams => write!(f, "invalid output params"),
             Self::InvalidNote => write!(f, "note invalid"),
+            Self::InvalidProtocolContractOrAliasAuthority => write!(f, "protocol contract or alias authority invalid"),
         }
     }
 }
@@ -74,8 +76,6 @@ pub struct ZTransaction
     pub chain_id: String,
     pub protocol_contract: Name,
     pub alias_authority: String,
-    pub fee_token_contract: Name,
-    pub fees: HashMap<Name, Asset>,
     pub add_fee: bool,
     pub publish_fee_note: bool,
     pub zactions: Vec<ZAction>
@@ -175,9 +175,6 @@ fn select_nft_note(unspent_notes: &mut Vec<NoteEx>, asset: &Asset) -> Option<Not
             }
         }
     }
-
-    //log("nft not found");
-    //log(&asset.to_string());
     None
 }
 
@@ -207,9 +204,6 @@ fn select_ft_notes(unspent_notes: &mut Vec<NoteEx>, asset: &Asset, code: &Name) 
     }
     // Not enough notes! Move picked notes in 'res' back to 'notes' and return 'None'.
     unspent_notes.append(&mut res);
-
-    //clog("insufficient notes [select notes]:");
-    //log(&asset.to_string());
     None
 }
 
@@ -226,9 +220,6 @@ fn select_auth_note(unspent_notes: &mut Vec<NoteEx>, cm: &ExtractedNoteCommitmen
             }
         }
     }
-
-    //log("nft not found");
-    //log(&asset.to_string());
     None
 }
 
@@ -268,18 +259,20 @@ fn select_fee_notes(unspent_notes: &mut Vec<NoteEx>, fees: &HashMap<Name, Asset>
     }
     // Not enough notes! Move picked notes in 'res' back to 'notes' and return 'None'.
     unspent_notes.append(&mut res);
-
-    //clog("insufficient notes [select notes]:");
-    //log(&asset.to_string());
     None
 }
 
-pub fn resolve_ztransaction(wallet: &Wallet, ztx: &ZTransaction) -> Result<ResolvedZTransaction, Box<dyn Error>>
+pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &HashMap<Name, Asset>, ztx: &ZTransaction) -> Result<ResolvedZTransaction, Box<dyn Error>>
 {
     if wallet.is_ivk()
     {
         Err(TransactionError::IvkWallet)?
     }
+    if !wallet.protocol_contract().eq(&ztx.protocol_contract) || !wallet.alias_authority().eq(&Authorization::from_string(&ztx.alias_authority).unwrap())
+    {
+        Err(TransactionError::InvalidProtocolContractOrAliasAuthority)?
+    }
+
     let mut rng = OsRng.clone();
     let mut rztx = ResolvedZTransaction{
         chain_id: hex::decode(ztx.chain_id.clone())?.try_into().unwrap_or_else(|v: Vec<u8>| panic!("chain_id: expected a Vec of length {} but it was {}", 32, v.len())),
@@ -293,7 +286,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, ztx: &ZTransaction) -> Result<Resol
     // get all unspent notes of this wallet
     let mut unspent_notes = wallet.unspent_notes(&Symbol(0), &Name(0));
     // track the fee amount for this transaction
-    let mut fee = ztx.fees.get(&Name::from_string(&"begin".to_string()).unwrap()).unwrap().amount();
+    let mut fee = fees.get(&Name::from_string(&"begin".to_string()).unwrap()).unwrap().amount();
 
     for za in ztx.zactions.iter()
     {
@@ -329,7 +322,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, ztx: &ZTransaction) -> Result<Resol
                         }
 
                         // add fee
-                        fee += ztx.fees.get(&Name::from_string(&"mint".to_string()).unwrap()).unwrap().amount();
+                        fee += fees.get(&Name::from_string(&"mint".to_string()).unwrap()).unwrap().amount();
 
                         serde_json::to_value(ResolvedMintDesc{
                             note: n,
@@ -372,7 +365,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, ztx: &ZTransaction) -> Result<Resol
                                 );
 
                                 // add fee
-                                fee += ztx.fees.get(&Name::from_string(&"spendoutput".to_string()).unwrap()).unwrap().amount();
+                                fee += fees.get(&Name::from_string(&"spendoutput".to_string()).unwrap()).unwrap().amount();
 
                                 spend_output.push(ResolvedSpendOutputDesc{
                                     note_a: nft.clone(),
@@ -460,9 +453,9 @@ pub fn resolve_ztransaction(wallet: &Wallet, ztx: &ZTransaction) -> Result<Resol
                             assert!((num_spends == 0) || (num_outputs == 0), "either num_spends == 0 or num_outputs == 0 or both are zero");
 
                             // add fee
-                            fee += ztx.fees.get(&Name::from_string(&"spendoutput".to_string()).unwrap()).unwrap().amount() * num_spend_outputs as i64;
-                            fee += ztx.fees.get(&Name::from_string(&"spend".to_string()).unwrap()).unwrap().amount() * num_spends as i64;
-                            fee += ztx.fees.get(&Name::from_string(&"output".to_string()).unwrap()).unwrap().amount() * num_outputs as i64;
+                            fee += fees.get(&Name::from_string(&"spendoutput".to_string()).unwrap()).unwrap().amount() * num_spend_outputs as i64;
+                            fee += fees.get(&Name::from_string(&"spend".to_string()).unwrap()).unwrap().amount() * num_spends as i64;
+                            fee += fees.get(&Name::from_string(&"output".to_string()).unwrap()).unwrap().amount() * num_outputs as i64;
 
                             for i in 0..num_spend_outputs
                             {
@@ -521,7 +514,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, ztx: &ZTransaction) -> Result<Resol
                         };
 
                         // add fee
-                        fee += ztx.fees.get(&Name::from_string(&"authenticate".to_string()).unwrap()).unwrap().amount();
+                        fee += fees.get(&Name::from_string(&"authenticate".to_string()).unwrap()).unwrap().amount();
 
                         serde_json::to_value(ResolvedAuthenticateDesc{
                             auth_note: auth_token,
@@ -539,7 +532,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, ztx: &ZTransaction) -> Result<Resol
                         // TODO: perform check on all Strings reagrding correct length
 
                         // add fee
-                        fee += ztx.fees.get(&Name::from_string(&"publishnotes".to_string()).unwrap()).unwrap().amount();
+                        fee += fees.get(&Name::from_string(&"publishnotes".to_string()).unwrap()).unwrap().amount();
 
                         serde_json::to_value(ResolvedPublishNotesDesc{
                             notes: desc.notes
@@ -554,7 +547,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, ztx: &ZTransaction) -> Result<Resol
                         let desc: WithdrawDesc = serde_json::from_value(za.data.clone())?;
 
                         // add fee
-                        fee += ztx.fees.get(&Name::from_string(&"withdraw".to_string()).unwrap()).unwrap().amount();
+                        fee += fees.get(&Name::from_string(&"withdraw".to_string()).unwrap()).unwrap().amount();
 
                         serde_json::to_value(ResolvedWithdrawDesc{
                             code: desc.code,
@@ -581,8 +574,8 @@ pub fn resolve_ztransaction(wallet: &Wallet, ztx: &ZTransaction) -> Result<Resol
             {
                 let mut data: ResolvedSpendSequenceDesc = serde_json::from_value(rza.data.clone())?;
 
-                if data.spend_output[0].note_a.note().code().eq(&ztx.fee_token_contract) &&
-                    data.spend_output[0].note_a.note().symbol().eq(ztx.fees.values().next().unwrap().symbol())
+                if data.spend_output[0].note_a.note().code().eq(&fee_token_contract) &&
+                    data.spend_output[0].note_a.note().symbol().eq(fees.values().next().unwrap().symbol())
                 {
                     // This spend sequence has the fee token symbol => add the tx fee into it
                     found = true;
@@ -594,7 +587,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, ztx: &ZTransaction) -> Result<Resol
                         let idx = data.spend_output.len() - 1;
                         let mut note_b = data.spend_output[idx].note_b.clone();
 
-                        let notes_to_spend = select_fee_notes(&mut unspent_notes, &ztx.fees, &ztx.fee_token_contract, note_b.amount(), fee as u64, 0);
+                        let notes_to_spend = select_fee_notes(&mut unspent_notes, &fees, &fee_token_contract, note_b.amount(), fee as u64, 0);
                         if notes_to_spend.is_none() { Err(TransactionError::InsufficientFunds)? }
                         let (notes_to_spend, change, fee) = notes_to_spend.unwrap();
 
@@ -630,7 +623,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, ztx: &ZTransaction) -> Result<Resol
                         let idx = data.output.len() - 1;
                         let mut note_b = data.output[idx].note_b.clone();
 
-                        let notes_to_spend = select_fee_notes(&mut unspent_notes, &ztx.fees, &ztx.fee_token_contract, note_b.amount(), fee as u64, data.output.len());
+                        let notes_to_spend = select_fee_notes(&mut unspent_notes, &fees, &fee_token_contract, note_b.amount(), fee as u64, data.output.len());
                         if notes_to_spend.is_none() { Err(TransactionError::InsufficientFunds)? }
                         let (notes_to_spend, change, fee) = notes_to_spend.unwrap();
 
@@ -687,7 +680,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, ztx: &ZTransaction) -> Result<Resol
                 data: {
                     // maximal 1 spend_output (to pay tx fee and change) and potentially more spends
                     // set initial fee amount & number of outputs to exactly one 'output' so it will automatically be replaced with one 'spend_output' by the first 'spend' note
-                    let notes_to_spend = select_fee_notes(&mut unspent_notes, &ztx.fees, &ztx.fee_token_contract, 0, (fee + ztx.fees.get(&Name::from_string(&"output".to_string()).unwrap()).unwrap().amount()) as u64, 1);
+                    let notes_to_spend = select_fee_notes(&mut unspent_notes, &fees, &fee_token_contract, 0, (fee + fees.get(&Name::from_string(&"output".to_string()).unwrap()).unwrap().amount()) as u64, 1);
                     if notes_to_spend.is_none() { Err(TransactionError::InsufficientFunds)? }
                     let (mut notes_to_spend, change, fee) = notes_to_spend.unwrap();
 
@@ -698,8 +691,8 @@ pub fn resolve_ztransaction(wallet: &Wallet, ztx: &ZTransaction) -> Result<Resol
                             0,
                             wallet.default_address().unwrap(),
                             Name(0),
-                            Asset::new(change as i64, ztx.fees.values().next().unwrap().symbol().clone()).unwrap(),
-                            ztx.fee_token_contract,
+                            Asset::new(change as i64, fees.values().next().unwrap().symbol().clone()).unwrap(),
+                            fee_token_contract.clone(),
                             Rseed::new(&mut rng),
                             [0; 512]
                         ),
@@ -709,8 +702,8 @@ pub fn resolve_ztransaction(wallet: &Wallet, ztx: &ZTransaction) -> Result<Resol
                                 0,
                                 Address::dummy(&mut rng),
                                 rztx.alias_authority.actor,
-                                Asset::new(fee as i64, ztx.fees.values().next().unwrap().symbol().clone()).unwrap(),
-                                ztx.fee_token_contract,
+                                Asset::new(fee as i64, fees.values().next().unwrap().symbol().clone()).unwrap(),
+                                fee_token_contract.clone(),
                                 Rseed::new(&mut rng),
                                 [0; 512]
                             ),
@@ -1334,9 +1327,6 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
 
 pub fn zverify_spend_transaction(tx: Transaction, params: &HashMap<Name, Parameters::<Bls12>>) -> bool
 {
-    //let mint_params = params.get(&Name::from_string(&"mint".to_string()).unwrap());
-    //assert!(mint_params.is_some());
-    //let mint_params = mint_params.unwrap();
     let spend_output_params = params.get(&Name::from_string(&"spendoutput".to_string()).unwrap());
     assert!(spend_output_params.is_some());
     let spend_output_params = spend_output_params.unwrap();
@@ -1741,18 +1731,7 @@ mod tests
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
             "protocol_contract": "zeos4privacy",
             "alias_authority": "thezeosalias@public",
-            "fee_token_contract": "thezeostoken",
-            "fees": {
-                "begin": "1.0000 ZEOS",
-                "mint": "1.0000 ZEOS",
-                "spendoutput": "1.0000 ZEOS",
-                "spend": "1.0000 ZEOS",
-                "output": "1.0000 ZEOS",
-                "authenticate": "1.0000 ZEOS",
-                "publishnotes": "1.0000 ZEOS",
-                "withdraw": "1.0000 ZEOS"
-            },
-            "add_fee": true,
+            "add_fee": false,
             "publish_fee_note": true,
             "zactions": [
                 {
@@ -1816,8 +1795,19 @@ mod tests
             ]
         }"#;
 
+        let fee_token_contract = Name::from_string(&"thezeostoken".to_string()).unwrap();
+        let mut fees = HashMap::new();
+        fees.insert(Name::from_string(&"begin".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"mint".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"spendoutput".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"spend".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"output".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"authenticate".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"publishnotes".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"withdraw".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+
         let ztx: ZTransaction = serde_json::from_str(&json).unwrap();
-        let rztx = resolve_ztransaction(&w, &ztx);
+        let rztx = resolve_ztransaction(&w, &fee_token_contract, &fees, &ztx);
         let rztx = match rztx {
             Err(e) => panic!("Error: {:?}", e),
             Ok(x) => x
@@ -1873,17 +1863,6 @@ mod tests
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
             "protocol_contract": "zeos4privacy",
             "alias_authority": "thezeosalias@public",
-            "fee_token_contract": "thezeostoken",
-            "fees": {
-                "begin": "1.0000 ZEOS",
-                "mint": "1.0000 ZEOS",
-                "spendoutput": "1.0000 ZEOS",
-                "spend": "1.0000 ZEOS",
-                "output": "1.0000 ZEOS",
-                "authenticate": "1.0000 ZEOS",
-                "publishnotes": "1.0000 ZEOS",
-                "withdraw": "1.0000 ZEOS"
-            },
             "add_fee": true,
             "publish_fee_note": true,
             "zactions": [
@@ -1948,8 +1927,19 @@ mod tests
             ]
         }"#;
 
+        let fee_token_contract = Name::from_string(&"thezeostoken".to_string()).unwrap();
+        let mut fees = HashMap::new();
+        fees.insert(Name::from_string(&"begin".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"mint".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"spendoutput".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"spend".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"output".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"authenticate".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"publishnotes".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"withdraw".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+
         let ztx: ZTransaction = serde_json::from_str(&json).unwrap();
-        let rztx = resolve_ztransaction(&w, &ztx);
+        let rztx = resolve_ztransaction(&w, &fee_token_contract, &fees, &ztx);
         let rztx = match rztx {
             Err(e) => panic!("Error: {:?}", e),
             Ok(x) => x
