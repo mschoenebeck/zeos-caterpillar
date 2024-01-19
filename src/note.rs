@@ -9,6 +9,7 @@ use crate::{
     keys::{EphemeralSecretKey, NullifierDerivingKey, SpendingKey, FullViewingKey, prf_expand},
     note::nullifier::Nullifier, address::Address,
 };
+use crate::constants::MERKLE_TREE_DEPTH;
 
 mod commitment;
 pub use self::commitment::{ExtractedNoteCommitment, NoteCommitment};
@@ -439,6 +440,88 @@ impl<'de> Deserialize<'de> for Note {
 
         const FIELDS: &'static [&'static str] = &["header", "address", "account", "asset", "code", "rseed", "memo"];
         deserializer.deserialize_struct("Note", FIELDS, NoteVisitor)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NoteEx
+{
+    block_num: u32,
+    block_ts: u64,
+    wallet_ts: u64,
+    leaf_idx_arr: u64,
+    note: Note,
+}
+
+impl NoteEx
+{
+    pub fn from_parts(
+        block_num: u32,
+        block_ts: u64,
+        wallet_ts: u64,
+        leaf_idx_arr: u64,
+        note: Note
+    ) -> Self
+    {
+        NoteEx{
+            block_num,
+            block_ts,
+            wallet_ts,
+            leaf_idx_arr,
+            note
+        }
+    }
+
+    pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()>
+    {
+        writer.write_u32::<LittleEndian>(self.block_num)?;      // 4
+        writer.write_u64::<LittleEndian>(self.block_ts)?;       // 8
+        writer.write_u64::<LittleEndian>(self.wallet_ts)?;      // 8
+        writer.write_u64::<LittleEndian>(self.leaf_idx_arr)?;   // 8
+        self.note.write(&mut writer)?;                          // 627
+
+        Ok(())                                                  // 655 bytes in total
+    }
+
+    pub fn read<R: Read>(mut reader: R) -> io::Result<Self>
+    {
+        let block_num = reader.read_u32::<LittleEndian>()?;
+        let block_ts = reader.read_u64::<LittleEndian>()?;
+        let wallet_ts = reader.read_u64::<LittleEndian>()?;
+        let leaf_idx_arr = reader.read_u64::<LittleEndian>()?;
+        let note = Note::read(&mut reader)?;
+
+        Ok(NoteEx::from_parts(block_num, block_ts, wallet_ts, leaf_idx_arr, note))
+    }
+
+    pub fn position(&self) -> u64
+    {
+        self.leaf_idx_arr % MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH) - MT_ARR_LEAF_ROW_OFFSET!(MERKLE_TREE_DEPTH)
+    }
+
+    pub fn block_ts(&self) -> u64
+    {
+        self.block_ts
+    }
+
+    pub fn wallet_ts(&self) -> u64
+    {
+        self.wallet_ts
+    }
+
+    pub fn leaf_idx_arr(&self) -> u64
+    {
+        self.leaf_idx_arr
+    }
+
+    pub fn block_num(&self) -> u32
+    {
+        self.block_num
+    }
+
+    pub fn note(&self) -> &Note
+    {
+        &self.note
     }
 }
 

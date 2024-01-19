@@ -6,6 +6,7 @@ use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 use lazy_static::lazy_static;
 use serde::{Serialize, Deserialize};
 use serde_json::Value;
+use crate::contract::{PlsSpendSequence, PlsAuthenticate};
 use crate::{
     address::Address,
     blake2s7r::Params as Blake2s7rParams,
@@ -13,21 +14,11 @@ use crate::{
     contract::ScalarBytes,
     eosio::{Asset, Authorization, Name, Symbol},
     keys::{IncomingViewingKey, SpendingKey, FullViewingKey, PreparedIncomingViewingKey},
-    note::Note,
+    note::NoteEx,
     note_encryption::{try_note_decryption, try_output_recovery_with_ovk, TransmittedNoteCiphertext},
     log
 };
-
-// helper macros for merkle tree operations
-macro_rules! MT_ARR_LEAF_ROW_OFFSET {
-    ($d:expr) => ((1<<($d)) - 1)
-}
-macro_rules! MT_ARR_FULL_TREE_OFFSET {
-    ($d:expr) => ((1<<(($d) + 1)) - 1)
-}
-macro_rules! MT_NUM_LEAVES {
-    ($d:expr) => (1<<($d))
-}
+use bls12_381::Scalar;
 
 // empty merkle tree roots
 lazy_static! {
@@ -52,88 +43,6 @@ lazy_static! {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct NoteEx
-{
-    block_num: u32,
-    block_ts: u64,
-    wallet_ts: u64,
-    leaf_idx_arr: u64,
-    note: Note,
-}
-
-impl NoteEx
-{
-    pub fn from_parts(
-        block_num: u32,
-        block_ts: u64,
-        wallet_ts: u64,
-        leaf_idx_arr: u64,
-        note: Note
-    ) -> Self
-    {
-        NoteEx{
-            block_num,
-            block_ts,
-            wallet_ts,
-            leaf_idx_arr,
-            note
-        }
-    }
-
-    pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()>
-    {
-        writer.write_u32::<LittleEndian>(self.block_num)?;      // 4
-        writer.write_u64::<LittleEndian>(self.block_ts)?;       // 8
-        writer.write_u64::<LittleEndian>(self.wallet_ts)?;      // 8
-        writer.write_u64::<LittleEndian>(self.leaf_idx_arr)?;   // 8
-        self.note.write(&mut writer)?;                          // 627
-
-        Ok(())                                                  // 655 bytes in total
-    }
-
-    pub fn read<R: Read>(mut reader: R) -> io::Result<Self>
-    {
-        let block_num = reader.read_u32::<LittleEndian>()?;
-        let block_ts = reader.read_u64::<LittleEndian>()?;
-        let wallet_ts = reader.read_u64::<LittleEndian>()?;
-        let leaf_idx_arr = reader.read_u64::<LittleEndian>()?;
-        let note = Note::read(&mut reader)?;
-
-        Ok(NoteEx::from_parts(block_num, block_ts, wallet_ts, leaf_idx_arr, note))
-    }
-
-    pub fn position(&self) -> u64
-    {
-        self.leaf_idx_arr % MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH) - MT_ARR_LEAF_ROW_OFFSET!(MERKLE_TREE_DEPTH)
-    }
-
-    pub fn block_ts(&self) -> u64
-    {
-        self.block_ts
-    }
-
-    pub fn wallet_ts(&self) -> u64
-    {
-        self.wallet_ts
-    }
-
-    pub fn leaf_idx_arr(&self) -> u64
-    {
-        self.leaf_idx_arr
-    }
-
-    pub fn block_num(&self) -> u32
-    {
-        self.block_num
-    }
-
-    pub fn note(&self) -> &Note
-    {
-        &self.note
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Wallet
 {
     // keys & addresses
@@ -155,20 +64,9 @@ pub struct Wallet
 
     // merkle tree leaves
     merkle_tree: HashMap<u64, ScalarBytes>,
-}
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct SpendAction
-{
-    kind: char, // either 'T' (transfer) or 'B' (burn)
-    note_a: NoteEx,
-    note_b: Note,
-    note_c: Note,
-    note_d: Note,
-    account_b: Name,
-    account_c: Name,
-    memo_b: String,
-    memo_c: String
+    // storage of all unpublished notes
+    unpublished_notes: HashMap<u64, HashMap<String, Vec<String>>>
 }
 
 impl Wallet
@@ -210,7 +108,8 @@ impl Wallet
             unspent_notes: vec![],
             spent_notes: vec![],
             outgoing_notes: vec![],
-            merkle_tree: HashMap::new()
+            merkle_tree: HashMap::new(),
+            unpublished_notes: HashMap::new()
         })
     }
 
@@ -255,6 +154,9 @@ impl Wallet
             assert!(self.merkle_tree.contains_key(&idx));
             writer.write_all(self.merkle_tree.get(&idx).unwrap().0.as_ref())?;
         }
+        let unpublished_notes_str = serde_json::to_string(&self.unpublished_notes).unwrap();
+        writer.write_u32::<LittleEndian>(unpublished_notes_str.as_bytes().len() as u32)?;
+        writer.write_all(unpublished_notes_str.as_bytes())?;
 
         Ok(())
     }
@@ -328,7 +230,8 @@ impl Wallet
             unspent_notes,
             spent_notes,
             outgoing_notes,
-            merkle_tree
+            merkle_tree,
+            unpublished_notes: HashMap::new()
         };
 
         for _ in 0..leaf_count
@@ -337,6 +240,12 @@ impl Wallet
             reader.read_exact(&mut leaf)?;
             wallet.insert_into_merkle_tree(&ScalarBytes(leaf));
         }
+
+        let unpublished_notes_bytes_len = reader.read_u32::<LittleEndian>()? as usize;
+        let mut unpublished_notes_bytes = vec![];
+        unpublished_notes_bytes.resize(unpublished_notes_bytes_len, 0);
+        reader.read_exact(&mut unpublished_notes_bytes)?;
+        wallet.unpublished_notes = serde_json::from_str(&String::from_utf8(unpublished_notes_bytes).unwrap()).unwrap();
 
         Ok(wallet)
     }
@@ -370,7 +279,9 @@ impl Wallet
         self.spent_notes.len() * 655 +
         4 +                                 // outgoing_notes.len()
         self.outgoing_notes.len() * 655 +
-        self.leaf_count as usize * 32       // merkle tree leaves only
+        self.leaf_count as usize * 32 +     // merkle tree leaves only
+        4 +                                 // unpublished_notes.len()
+        serde_json::to_string(&self.unpublished_notes).unwrap().as_bytes().len()
 
         // less verbose but much heavier alternative:
         //let mut v = vec![];
@@ -408,15 +319,15 @@ impl Wallet
         let mut map = HashMap::new();
         for note in &self.unspent_notes
         {
-            if !note.note.asset().is_nft()
+            if !note.note().asset().is_nft()
             {
-                if !map.contains_key(&note.note.symbol().raw())
+                if !map.contains_key(&note.note().symbol().raw())
                 {
-                    map.insert(note.note.symbol().raw(), note.note.amount());
+                    map.insert(note.note().symbol().raw(), note.note().amount());
                 }
                 else
                 {
-                    *map.get_mut(&note.note.symbol().raw()).unwrap() += note.note.amount();
+                    *map.get_mut(&note.note().symbol().raw()).unwrap() += note.note().amount();
                 }
             }
         }
@@ -439,8 +350,13 @@ impl Wallet
         }
         else
         {
-            return self.unspent_notes.iter().map(|n| n.clone()).filter(|n| n.note.symbol().eq(&symbol) && n.note.code().eq(&code)).collect()
+            return self.unspent_notes.iter().map(|n| n.clone()).filter(|n| n.note().symbol().eq(&symbol) && n.note().code().eq(&code)).collect()
         }
+    }
+
+    pub fn unpublished_notes(&self) -> &HashMap<u64, HashMap<String, Vec<String>>>
+    {
+        &self.unpublished_notes
     }
 
     pub fn spending_key(&self) -> Option<SpendingKey>
@@ -505,6 +421,7 @@ impl Wallet
         }
     }
 
+    // Merkle Tree must be up-to-date before calling this function!
     pub fn add_notes(&mut self, notes: &Vec<String>)
     {
         let sk = SpendingKey::from_seed(&self.seed);
@@ -525,13 +442,13 @@ impl Wallet
                     let cm = note.commitment();
                     let idx = self.merkle_tree.iter().find_map(|(key, val)| if val.0 == cm.to_bytes() { Some(key) } else { None });
                     if idx.is_none() { continue; }
-                    let note_ex = NoteEx{
-                        block_num: 0,
-                        block_ts: 0,
+                    let note_ex = NoteEx::from_parts(
+                        0,
+                        0,
                         wallet_ts,
-                        leaf_idx_arr: *idx.unwrap(),
+                        *idx.unwrap(),
                         note
-                    };
+                    );
                     self.unspent_notes.push(note_ex);
                 },
                 None => {},
@@ -540,13 +457,13 @@ impl Wallet
             // test sender decryption
             match try_output_recovery_with_ovk(&fvk.ovk, &encrypted_note) {
                 Some(note) => {
-                    let note_ex = NoteEx{
-                        block_num: 0,
-                        block_ts: 0,
+                    let note_ex = NoteEx::from_parts(
+                        0,
+                        0,
                         wallet_ts,
-                        leaf_idx_arr: 0,
-                        note: note.clone()
-                    };
+                        0,
+                        note.clone()
+                    );
                     self.outgoing_notes.push(note_ex);
                 },
                 None => {},
@@ -554,6 +471,7 @@ impl Wallet
         }
     }
 
+    // Merkle Tree must be up-to-date before calling this function!
     pub fn digest_block(&mut self, block: &String) -> u64
     {
         let sk = SpendingKey::from_seed(&self.seed);
@@ -573,61 +491,92 @@ impl Wallet
         {
             for action in tx["trx"]["transaction"]["actions"].as_array().unwrap()
             {
-                if (action["account"].as_str().unwrap().eq(&self.protocol_contract.to_string()) || 
-                    action["account"].as_str().unwrap().eq(&self.alias_authority.actor.to_string())) && (
-                    action["name"].as_str().unwrap().eq("mint") ||
-                    action["name"].as_str().unwrap().eq("transfer") ||
-                    action["name"].as_str().unwrap().eq("burn") ||
-                    action["name"].as_str().unwrap().eq("publishct"))
+                if action["account"].as_str().unwrap().eq(&self.alias_authority.actor.to_string())
                 {
-                    for ct in action["data"]["note_ct"].as_array().unwrap()
+                    if  action["name"].as_str().unwrap().eq("mint") ||
+                        action["name"].as_str().unwrap().eq("spend") ||
+                        action["name"].as_str().unwrap().eq("publishnotes")
                     {
-                        let b64_str = ct.as_str().unwrap().to_string();
-                        let encrypted_note = TransmittedNoteCiphertext::from_base64(&b64_str);
-                        if encrypted_note.is_none() { continue; }
-                        let encrypted_note = encrypted_note.unwrap();
+                        for ct in action["data"]["note_ct"].as_array().unwrap()
+                        {
+                            let b64_str = ct.as_str().unwrap().to_string();
+                            let encrypted_note = TransmittedNoteCiphertext::from_base64(&b64_str);
+                            if encrypted_note.is_none() { continue; }
+                            let encrypted_note = encrypted_note.unwrap();
 
-                        // test receiver decryption
-                        match try_note_decryption(&PreparedIncomingViewingKey::new(&fvk.ivk()), &encrypted_note) {
-                            Some(note) => {
-                                // Merkle tree must be up to date! We check if there's a leaf for this note and get it's array index in the merkle
-                                // tree. If there is no index (i.e. leaf), this note can't be valid and is discarded.
-                                let cm = note.commitment();
-                                let idx = self.merkle_tree.iter().find_map(|(key, val)| if val.0 == cm.to_bytes() { Some(key) } else { None });
-                                if idx.is_none() { continue; }
-                                let note_ex = NoteEx{
-                                    block_num,
-                                    block_ts,
-                                    wallet_ts,
-                                    leaf_idx_arr: *idx.unwrap(),
-                                    note
-                                };
-                                self.unspent_notes.push(note_ex);
-                                notes_found += 1;
-                            },
-                            None => {},
+                            // test receiver decryption
+                            match try_note_decryption(&PreparedIncomingViewingKey::new(&fvk.ivk()), &encrypted_note) {
+                                Some(note) => {
+                                    // Merkle tree must be up to date! We check if there's a leaf for this note and get it's array index in the merkle
+                                    // tree. If there is no index (i.e. leaf), this note can't be valid and is discarded.
+                                    let cm = note.commitment();
+                                    let idx = self.merkle_tree.iter().find_map(|(key, val)| if val.0 == cm.to_bytes() { Some(key) } else { None });
+                                    if idx.is_none() { continue; }
+                                    let note_ex = NoteEx::from_parts(
+                                        block_num,
+                                        block_ts,
+                                        wallet_ts,
+                                        *idx.unwrap(),
+                                        note
+                                    );
+                                    self.unspent_notes.push(note_ex);
+                                    notes_found += 1;
+                                },
+                                None => {},
+                            }
+
+                            // test sender decryption
+                            match try_output_recovery_with_ovk(&fvk.ovk, &encrypted_note) {
+                                Some(note) => {
+                                    let note_ex = NoteEx::from_parts(
+                                        block_num,
+                                        block_ts,
+                                        wallet_ts,
+                                        0,
+                                        note.clone()
+                                    );
+                                    self.outgoing_notes.push(note_ex);
+                                },
+                                None => {},
+                            }
                         }
+                    }
+                    if action["name"].as_str().unwrap().eq("spend")
+                    {
+                        for seq in action["data"]["actions"].as_array().unwrap()
+                        {
+                            let seq: PlsSpendSequence = serde_json::from_value(seq.clone()).unwrap();
 
-                        // test sender decryption
-                        match try_output_recovery_with_ovk(&fvk.ovk, &encrypted_note) {
-                            Some(note) => {
-                                let note_ex = NoteEx{
-                                    block_num,
-                                    block_ts,
-                                    wallet_ts,
-                                    leaf_idx_arr: 0,
-                                    note: note.clone()
-                                };
-                                self.outgoing_notes.push(note_ex);
-                                // Look for parent note (by nullifier) and move it from 'unspent' to 'spent'
-                                // TODO: check for spent notes (i.e. the actual NF) in order to find spent note
-                                //let index = self.unspent_notes.iter().position(|n| n.note.nullifier(&fvk.nk, n.position()).extract() == *note.rho());
-                                //if index.is_some()
-                                //{
-                                //    self.spent_notes.push(self.unspent_notes.remove(index.unwrap()));
-                                //}
-                            },
-                            None => {},
+                            for so in seq.spend_output.iter()
+                            {
+                                // check if published nullifier belongs to one of our notes
+                                let index = self.unspent_notes.iter().position(|n| n.note().nullifier(&fvk.nk, n.position()).extract().0.eq(&Scalar::from(so.nf.clone())));
+                                if index.is_some()
+                                {
+                                    self.spent_notes.push(self.unspent_notes.remove(index.unwrap()));
+                                }
+                            }
+
+                            for s in seq.spend.iter()
+                            {
+                                // check if published nullifier belongs to one of our notes
+                                let index = self.unspent_notes.iter().position(|n| n.note().nullifier(&fvk.nk, n.position()).extract().0.eq(&Scalar::from(s.nf.clone())));
+                                if index.is_some()
+                                {
+                                    self.spent_notes.push(self.unspent_notes.remove(index.unwrap()));
+                                }
+                            }
+                        }
+                    }
+                    if action["name"].as_str().unwrap().eq("authenticate")
+                    {
+                        let a: PlsAuthenticate = serde_json::from_value(action["data"]["action"].clone()).unwrap();
+
+                        // check if published note commitment belongs to one of our auth notes
+                        let index = self.unspent_notes.iter().position(|n| n.note().commitment().0.eq(&Scalar::from(a.cm.clone())));
+                        if index.is_some()
+                        {
+                            self.spent_notes.push(self.unspent_notes.remove(index.unwrap()));
                         }
                     }
                 }
@@ -637,6 +586,12 @@ impl Wallet
         self.block_num = block_num;
 
         notes_found
+    }
+
+    pub fn add_unpublished_notes(&mut self, unpublished_notes: &HashMap<String, Vec<String>>)
+    {
+        let ts = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_millis() as u64;
+        self.unpublished_notes.insert(ts, unpublished_notes.clone());
     }
 
     fn insert_into_merkle_tree(&mut self, leaf: &ScalarBytes) -> u64
@@ -694,8 +649,8 @@ impl Wallet
 
     pub fn get_sister_path_and_root(&self, note: &NoteEx) -> Option<(Vec<Option<([u8; 32], bool)>>, ScalarBytes)>
     {
-        let mut idx = note.leaf_idx_arr % MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH);
-        let tos = note.leaf_idx_arr / MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH) * MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH);
+        let mut idx = note.leaf_idx_arr() % MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH);
+        let tos = note.leaf_idx_arr() / MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH) * MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH);
 
         let mut sis_path = vec![];
         for d in 0..MERKLE_TREE_DEPTH
@@ -718,13 +673,13 @@ impl Wallet
 mod tests
 {
     use crate::{
-        wallet::{Wallet, NoteEx},
+        wallet::Wallet,
+        note::{Note, NoteEx},
         eosio::{Authorization, Name, Transaction, Action, Symbol},
         contract::{PlsMint, ScalarBytes, AffineProofBytesLE}
     };
     use rand::rngs::OsRng;
     use super::EMPTY_ROOTS;
-    use crate::wallet::Note;
 
     #[test]
     fn test_serde()
@@ -751,7 +706,7 @@ mod tests
         println!("Wallet size: {}", w.size());
 
         let mut rng = OsRng.clone();
-        w.unspent_notes.push(NoteEx{block_num: 1337, block_ts: 1234, leaf_idx_arr: 1234, wallet_ts: 0, note: Note::dummy(&mut rng, None, None).2});
+        w.unspent_notes.push(NoteEx::from_parts(1337, 1234, 1234, 0, Note::dummy(&mut rng, None, None).2));
 
         let mut v = vec![];
         assert!(w.write(&mut v).is_ok());

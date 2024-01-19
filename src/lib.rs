@@ -1,4 +1,15 @@
 
+// helper macros for merkle tree operations
+macro_rules! MT_ARR_LEAF_ROW_OFFSET {
+    ($d:expr) => ((1<<($d)) - 1)
+}
+macro_rules! MT_ARR_FULL_TREE_OFFSET {
+    ($d:expr) => ((1<<(($d) + 1)) - 1)
+}
+macro_rules! MT_NUM_LEAVES {
+    ($d:expr) => (1<<($d))
+}
+
 mod address;
 pub mod value;
 pub mod circuit;
@@ -16,20 +27,18 @@ pub mod wallet;
 pub mod transaction;
 pub mod transaction_spend_tests;
 
+use wallet::Wallet;
 use eosio::{Name, Symbol, Authorization};
+#[cfg(target_os = "linux")]
+use transaction::{ZTransaction, resolve_ztransaction, zsign_transaction};
+use std::collections::HashMap;
+use bellman::groth16::Parameters;
+use bls12_381::Bls12;
 #[cfg(target_arch = "wasm32")]
 use crate::{
     eosio::Asset,
     transaction::{MintDesc, zsign_transfer_and_mint_transaction},
 };
-#[cfg(target_arch = "wasm32")]
-use std::collections::HashMap;
-#[cfg(target_arch = "wasm32")]
-use bellman::groth16::Parameters;
-#[cfg(target_arch = "wasm32")]
-use bls12_381::Bls12;
-
-use wallet::Wallet;
 #[cfg(target_os = "linux")]
 use std::slice;
 #[cfg(target_os = "linux")]
@@ -114,23 +123,47 @@ pub fn js_zsign_transfer_and_mint_transaction(
 #[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn wallet_create(
-    seed: *const libc::c_char
+    seed: *const libc::c_char,
+    chain_id: *const libc::c_char,
+    protocol_contract: *const libc::c_char,
+    alias_authority: *const libc::c_char
 ) -> *mut Wallet
 {
     let seed_str: &str = match std::ffi::CStr::from_ptr(seed).to_str() {
         Ok(s) => s,
         Err(_e) => {
-            println!("FFI seed string conversion failed");
-            "FFI seed string conversion failed"
+            println!("FFI seed string conversion failed (seed)");
+            "FFI seed string conversion failed (seed)"
+        }
+    };
+    let chain_id_str: &str = match std::ffi::CStr::from_ptr(chain_id).to_str() {
+        Ok(s) => s,
+        Err(_e) => {
+            println!("FFI seed string conversion failed (chain_id)");
+            "FFI seed string conversion failed (chain_id)"
+        }
+    };
+    let protocol_contract_str: &str = match std::ffi::CStr::from_ptr(protocol_contract).to_str() {
+        Ok(s) => s,
+        Err(_e) => {
+            println!("FFI seed string conversion failed (protocol_contract)");
+            "FFI seed string conversion failed (protocol_contract)"
+        }
+    };
+    let alias_authority_str: &str = match std::ffi::CStr::from_ptr(alias_authority).to_str() {
+        Ok(s) => s,
+        Err(_e) => {
+            println!("FFI seed string conversion failed (alias_authority)");
+            "FFI seed string conversion failed (alias_authority)"
         }
     };
 
     Box::into_raw(Box::new(Wallet::create(
         seed_str.as_bytes(),
         false,
-        [0; 32],
-        Name(0),
-        Authorization { actor: Name(0), permission: Name(0) }
+        hex::decode(chain_id_str).unwrap().try_into().unwrap(),
+        Name::from_string(&protocol_contract_str.to_string()).unwrap(),
+        Authorization::from_string(&alias_authority_str.to_string()).unwrap()
     ).unwrap()))
 }
 
@@ -275,7 +308,26 @@ pub extern fn wallet_notes_json(
 
 #[cfg(target_os = "linux")]
 #[no_mangle]
-pub extern fn wallet_addresses_bech32m(
+pub extern fn wallet_unpublished_notes_json(
+    p_wallet: *mut Wallet,
+    pretty: bool
+) -> *const libc::c_char
+{
+    let wallet = unsafe {
+        assert!(!p_wallet.is_null());
+        &mut *p_wallet
+    };
+
+    let c_string = CString::new(
+        if pretty { serde_json::to_string_pretty(wallet.unpublished_notes()).unwrap() }
+        else { serde_json::to_string(wallet.unpublished_notes()).unwrap() }
+    ).expect("CString::new failed");
+    c_string.into_raw() // Move ownership to C
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub extern fn wallet_addresses_json(
     p_wallet: *mut Wallet,
     pretty: bool
 ) -> *const libc::c_char
@@ -339,7 +391,128 @@ pub unsafe extern fn wallet_add_leaves(
 
 #[cfg(target_os = "linux")]
 #[no_mangle]
-pub unsafe extern fn wallet_process_block(
+pub unsafe extern fn wallet_add_notes(
+    p_wallet: *mut Wallet,
+    notes: *const libc::c_char,
+)
+{
+    let wallet = unsafe {
+        assert!(!p_wallet.is_null());
+        &mut *p_wallet
+    };
+    let notes_str: &str = match std::ffi::CStr::from_ptr(notes).to_str() {
+        Ok(s) => s,
+        Err(_e) => {
+            println!("FFI seed string conversion failed (notes)");
+            "FFI seed string conversion failed (notes)"
+        }
+    };
+
+    let notes_vec: Vec<String> = serde_json::from_str(notes_str).unwrap();
+    wallet.add_notes(&notes_vec);
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern fn wallet_add_unpublished_notes(
+    p_wallet: *mut Wallet,
+    unpublished_notes: *const libc::c_char,
+)
+{
+    let wallet = unsafe {
+        assert!(!p_wallet.is_null());
+        &mut *p_wallet
+    };
+    let unpublished_notes_str: &str = match std::ffi::CStr::from_ptr(unpublished_notes).to_str() {
+        Ok(s) => s,
+        Err(_e) => {
+            println!("FFI seed string conversion failed (unpublished_notes)");
+            "FFI seed string conversion failed (unpublished_notes)"
+        }
+    };
+
+    let unpublished_notes_map: HashMap<String, Vec<String>> = serde_json::from_str(unpublished_notes_str).unwrap();
+    wallet.add_unpublished_notes(&unpublished_notes_map);
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern fn wallet_transact(
+    p_wallet: *mut Wallet,
+    ztx_json: *const libc::c_char,
+    fee_token_contract_json: *const libc::c_char,
+    fees_json: *const libc::c_char,
+    p_mint_params_bytes: *const u8,
+    mint_params_bytes_len: libc::size_t,
+    p_spendoutput_params_bytes: *const u8,
+    spendoutput_params_bytes_len: libc::size_t,
+    p_spend_params_bytes: *const u8,
+    spend_params_bytes_len: libc::size_t,
+    p_output_params_bytes: *const u8,
+    output_params_bytes_len: libc::size_t
+) -> *const libc::c_char
+{
+    let wallet = unsafe {
+        assert!(!p_wallet.is_null());
+        &mut *p_wallet
+    };
+    let ztx_json_str: &str = match std::ffi::CStr::from_ptr(ztx_json).to_str() {
+        Ok(s) => s,
+        Err(_e) => {
+            println!("FFI seed string conversion failed (ztx_json)");
+            "FFI seed string conversion failed (ztx_json)"
+        }
+    };
+    let fee_token_contract_json_str: &str = match std::ffi::CStr::from_ptr(fee_token_contract_json).to_str() {
+        Ok(s) => s,
+        Err(_e) => {
+            println!("FFI seed string conversion failed (fee_token_contract_json)");
+            "FFI seed string conversion failed (fee_token_contract_json)"
+        }
+    };
+    let fees_json_str: &str = match std::ffi::CStr::from_ptr(fees_json).to_str() {
+        Ok(s) => s,
+        Err(_e) => {
+            println!("FFI seed string conversion failed (fees_json)");
+            "FFI seed string conversion failed (fees_json)"
+        }
+    };
+    let mint_params_bytes = unsafe {
+        assert!(!p_mint_params_bytes.is_null());
+        slice::from_raw_parts(p_mint_params_bytes, mint_params_bytes_len as usize)
+    };
+    let spendoutput_params_bytes = unsafe {
+        assert!(!p_spendoutput_params_bytes.is_null());
+        slice::from_raw_parts(p_spendoutput_params_bytes, spendoutput_params_bytes_len as usize)
+    };
+    let spend_params_bytes = unsafe {
+        assert!(!p_spend_params_bytes.is_null());
+        slice::from_raw_parts(p_spend_params_bytes, spend_params_bytes_len as usize)
+    };
+    let output_params_bytes = unsafe {
+        assert!(!p_output_params_bytes.is_null());
+        slice::from_raw_parts(p_output_params_bytes, output_params_bytes_len as usize)
+    };
+
+    let fee_token_contract = Name::from_string(&fee_token_contract_json_str.to_string()).unwrap();
+    let fees = serde_json::from_str(fees_json_str).unwrap();
+    let mut params = HashMap::new();
+    params.insert(Name::from_string(&"mint".to_string()).unwrap(), Parameters::<Bls12>::read(mint_params_bytes, false).unwrap());
+    params.insert(Name::from_string(&"spendoutput".to_string()).unwrap(), Parameters::<Bls12>::read(spendoutput_params_bytes, false).unwrap());
+    params.insert(Name::from_string(&"spend".to_string()).unwrap(), Parameters::<Bls12>::read(spend_params_bytes, false).unwrap());
+    params.insert(Name::from_string(&"output".to_string()).unwrap(), Parameters::<Bls12>::read(output_params_bytes, false).unwrap());
+
+    let ztx: ZTransaction = serde_json::from_str(ztx_json_str).unwrap();
+    let rztx = resolve_ztransaction(wallet, &fee_token_contract, &fees, &ztx).unwrap();
+    let tx = zsign_transaction(wallet, &rztx, &params).unwrap();
+
+    let c_string = CString::new(serde_json::to_string(&tx).unwrap()).expect("CString::new failed");
+    c_string.into_raw() // Move ownership to C
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern fn wallet_digest_block(
     p_wallet: *mut Wallet,
     block: *const libc::c_char
 ) -> u64
