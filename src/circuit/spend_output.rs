@@ -128,10 +128,10 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
         let pk_d = g_d.mul(cs.namespace(|| "compute pk_d"), &ivk)?;
 
         // Compute note preimage:
-        // (account | value | symbol | code | g_d | pk_d | rho)
+        // (account | value | symbol | contract | g_d | pk_d | rho)
         let mut note_a_preimage = vec![];
         // Compute symbol preimage:
-        // (symbol | code)
+        // (symbol | contract)
         let mut symbol_preimage = vec![];
 
         // note a account to boolean bit vector
@@ -168,15 +168,15 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
         )?;
         note_a_preimage.extend(symbol_bits.clone());
         symbol_preimage.extend(symbol_bits.clone());
-        // notes' code to boolean bit vector
-        let code_bits = boolean::u64_into_boolean_vec_le(
-            cs.namespace(|| "code"),
+        // notes' contract to boolean bit vector
+        let contract_bits = boolean::u64_into_boolean_vec_le(
+            cs.namespace(|| "contract"),
             self.note_a.as_ref().map(|a| {
-                a.code().raw()
+                a.contract().raw()
             })
         )?;
-        note_a_preimage.extend(code_bits.clone());
-        symbol_preimage.extend(code_bits.clone());
+        note_a_preimage.extend(contract_bits.clone());
+        symbol_preimage.extend(contract_bits.clone());
         // Place g_d_a in the preimage of note a
         note_a_preimage.extend(g_d.repr(cs.namespace(|| "representation of g_d a"))?);
         // Place pk_d_a in the preimage of note a
@@ -187,14 +187,14 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
             64 +    // account
             64 +    // value
             64 +    // symbol
-            64 +    // code
+            64 +    // contract
             256 +   // g_d
             256     // pk_d
         );
         assert_eq!(
             symbol_preimage.len(),
             64 +    // symbol
-            64      // code
+            64      // contract
         );
 
         // Compute the commitment of note a
@@ -376,12 +376,12 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
         }
 
         // Compute note b preimage:
-        // (account | value | symbol | code | g_d | pk_d | rho)
+        // (account | value | symbol | contract | g_d | pk_d | rho)
         let mut note_b_preimage = vec![];
         note_b_preimage.extend(account_b_bits);
         note_b_preimage.extend(value_b_bits);
         note_b_preimage.extend(symbol_bits.clone());
-        note_b_preimage.extend(code_bits.clone());
+        note_b_preimage.extend(contract_bits.clone());
         // Witness g_d b, checking that it's on the curve.
         let g_d_b = {
             ecc::EdwardsPoint::witness(
@@ -413,7 +413,7 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
             64 +    // account
             64 +    // value
             64 +    // symbol
-            64 +    // code
+            64 +    // contract
             256 +   // g_d
             256     // pk_d
         );
@@ -455,7 +455,7 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
         let is_equal;
         let is_greater;
         let net_value;
-        let expose_symbol_code;
+        let expose_symbol_contract;
         match self.note_a.as_ref() {
             Some(note_a) => {
                 match self.note_b.as_ref() {
@@ -468,14 +468,14 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
                                 is_equal = Some(note_a.amount() == amount_spent);
                                 is_greater = Some(note_a.amount() > amount_spent);
                                 net_value = Some(if note_a.amount() > amount_spent { note_a.amount() - amount_spent } else { amount_spent - note_a.amount() });
-                                expose_symbol_code = Some(*value_c > 0);
+                                expose_symbol_contract = Some(*value_c > 0);
                             },
                             None => {
                                 is_nft = None;
                                 is_equal = None;
                                 is_greater = None;
                                 net_value = None;
-                                expose_symbol_code = None;
+                                expose_symbol_contract = None;
                             }
                         }
                     },
@@ -484,7 +484,7 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
                         is_equal = None;
                         is_greater = None;
                         net_value = None;
-                        expose_symbol_code = None;
+                        expose_symbol_contract = None;
                     }
                 }
             },
@@ -493,7 +493,7 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
                 is_equal = None;
                 is_greater = None;
                 net_value = None;
-                expose_symbol_code = None;
+                expose_symbol_contract = None;
             }
         };
 
@@ -536,7 +536,7 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
         let is_nft_num = num::Num::zero().add_bool_with_coeff(CS::one(), &Boolean::from(is_nft_bit.clone()), bls12_381::Scalar::one());
         let is_equal_bit = AllocatedBit::alloc(cs.namespace(|| "is_equal bit"), is_equal)?;
         let is_greater_bit = AllocatedBit::alloc(cs.namespace(|| "is_greater bit"), is_greater)?;
-        let expose_symbol_code_bit = AllocatedBit::alloc(cs.namespace(|| "expose_symbol_code bit"), expose_symbol_code)?;
+        let expose_symbol_contract_bit = AllocatedBit::alloc(cs.namespace(|| "expose_symbol_contract bit"), expose_symbol_contract)?;
 
         // To prevent NFTs from being 'split', make sure that in case of NFT either B or C is zero
         // create helper signals for A, B and C with is_nft_bit acting as chip-enable signal
@@ -556,31 +556,31 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
             |lc| lc + b_mul_nft.get_variable() + c_mul_nft.get_variable() - a_mul_nft.get_variable(),
         );
 
-        // pack (value_c | symbol | code | vcm_gt | vcm_eq) as public inputs
-        // expose symbol & code only if value_c or value_b are greater zero
-        let mut symbol_code_bits = vec![];
-        symbol_code_bits.extend(symbol_bits);
-        symbol_code_bits.extend(code_bits);
+        // pack (value_c | symbol | contract | vcm_gt | vcm_eq) as public inputs
+        // expose symbol & contract only if value_c or value_b are greater zero
+        let mut symbol_contract_bits = vec![];
+        symbol_contract_bits.extend(symbol_bits);
+        symbol_contract_bits.extend(contract_bits);
         let symbol_bits_zero = boolean::u64_into_boolean_vec_le(
             cs.namespace(|| "symbol zero"),
             Some(0)
         )?;
-        let code_bits_zero = boolean::u64_into_boolean_vec_le(
-            cs.namespace(|| "code zero"),
+        let contract_bits_zero = boolean::u64_into_boolean_vec_le(
+            cs.namespace(|| "contract zero"),
             Some(0)
         )?;
-        let mut symbol_code_bits_zero = vec![];
-        symbol_code_bits_zero.extend(symbol_bits_zero);
-        symbol_code_bits_zero.extend(code_bits_zero);
-        let (symbol_code_bits, _) = conditionally_swap_u128(
-            cs.namespace(|| "conditional swap of symbol_code_bits"),
-            &symbol_code_bits_zero,
-            &symbol_code_bits,
-            &expose_symbol_code_bit,
+        let mut symbol_contract_bits_zero = vec![];
+        symbol_contract_bits_zero.extend(symbol_bits_zero);
+        symbol_contract_bits_zero.extend(contract_bits_zero);
+        let (symbol_contract_bits, _) = conditionally_swap_u128(
+            cs.namespace(|| "conditional swap of symbol_contract_bits"),
+            &symbol_contract_bits_zero,
+            &symbol_contract_bits,
+            &expose_symbol_contract_bit,
         )?;
         let mut inputs7_bits = vec![];
         inputs7_bits.extend(value_c_bits);
-        inputs7_bits.extend(symbol_code_bits);
+        inputs7_bits.extend(symbol_contract_bits);
         inputs7_bits.extend(vec![Boolean::from(is_greater_bit)]);
         inputs7_bits.extend(vec![Boolean::from(is_equal_bit)]);
         multipack::pack_into_inputs(cs.namespace(|| "pack inputs7 contents"), &inputs7_bits)?;
@@ -610,7 +610,7 @@ mod tests
     use bellman::groth16::generate_random_parameters;
     use bls12_381::Bls12;
     use crate::contract::AffineVerifyingKeyBytesLE;
-    use crate::eosio::Asset;
+    use crate::eosio::ExtendedAsset;
     use crate::eosio::Name;
     use crate::note::Note;
     use crate::note::Rseed;
@@ -626,6 +626,7 @@ mod tests
     use crate::pedersen_hash::Personalization;
     use crate::spec::extract_p;
     use crate::blake2s7r::Params as Blake2s7rParams;
+    use bellman::groth16::Parameters;
     use ff::PrimeField;
     use core::iter;
     use bitvec::{array::BitArray, order::Lsb0};
@@ -645,8 +646,7 @@ mod tests
             0,
             sender,
             Name(0),
-            Asset::from_string(&"10.0000 EOS".to_string()).unwrap(),
-            Name::from_string(&"eosio.token".to_string()).unwrap(),
+            ExtendedAsset::from_string(&"10.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
             [0; 512]
         );
@@ -700,8 +700,7 @@ mod tests
             0,
             sender,
             Name(0),
-            Asset::from_string(&"11.0000 EOS".to_string()).unwrap(),
-            Name::from_string(&"eosio.token".to_string()).unwrap(),
+            ExtendedAsset::from_string(&"11.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
             [0; 512]
         );
@@ -711,7 +710,7 @@ mod tests
             Personalization::SymbolCommitment,
             iter::empty()
                 .chain(BitArray::<_, Lsb0>::new(note_a.symbol().raw().to_le_bytes()).iter().by_vals())
-                .chain(BitArray::<_, Lsb0>::new(note_a.code().raw().to_le_bytes()).iter().by_vals()),
+                .chain(BitArray::<_, Lsb0>::new(note_a.contract().raw().to_le_bytes()).iter().by_vals()),
                 rscm.rcm().0
         );
         let scm = extract_p(&scm);
@@ -736,16 +735,16 @@ mod tests
             unshielded_outputs_hash: Some(unshielded_outputs_hash)
         };
 
-        let mut symbol_code = [0; 16];
+        let mut symbol_contract = [0; 16];
         if value_c > 0
         {
-            symbol_code[0..8].copy_from_slice(&note_a.symbol().raw().to_le_bytes());
-            symbol_code[8..16].copy_from_slice(&note_a.code().raw().to_le_bytes());
+            symbol_contract[0..8].copy_from_slice(&note_a.symbol().raw().to_le_bytes());
+            symbol_contract[8..16].copy_from_slice(&note_a.contract().raw().to_le_bytes());
         }
 
         let mut inputs7 = [0; 25];
         inputs7[0..8].copy_from_slice(&value_c.to_le_bytes());
-        inputs7[8..24].copy_from_slice(&symbol_code);
+        inputs7[8..24].copy_from_slice(&symbol_contract);
         inputs7[24] = if cv_gt {1} else {0} | (if cv_eq {1} else {0} << 1);
         println!("{}", hex::encode(inputs7));
         let inputs7 = multipack::bytes_to_bits_le(&inputs7);
@@ -780,6 +779,21 @@ mod tests
         assert_eq!(cs.get_input(6, "cv_net/v/input variable"), cv_net.as_inner().to_affine().get_v());
         assert_eq!(cs.get_input(7, "pack inputs7 contents/input 0"), inputs7[0]);
         assert_eq!(cs.get_input(8, "pack inputs8 contents/input 0"), inputs8[0]);
+    }
+
+    #[test]
+    fn read_params()
+    {
+        let f = File::open("params_spendoutput.bin").unwrap();
+        let params = Parameters::<Bls12>::read(f, false).unwrap();
+        let vk_affine_bytes = AffineVerifyingKeyBytesLE::from(params.vk);
+        println!("{}", hex::encode(vk_affine_bytes.0));
+        // as hex
+        //let s = hex::encode(file.clone());
+        //fs::write("params_mint.hex", s).expect("Unable to write file");
+        // as base64
+        //let s = general_purpose::STANDARD.encode(&file);
+        //fs::write("params_mint.b64", s).expect("Unable to write file");
     }
 
     #[test]

@@ -138,7 +138,7 @@ impl Circuit<bls12_381::Scalar> for Transfer
         let pk_d = g_d.mul(cs.namespace(|| "compute pk_d"), &ivk)?;
 
         // Compute note preimage:
-        // (value | symbol | code | g_d | pk_d | rho)
+        // (value | symbol | contract | g_d | pk_d | rho)
         let mut note_a_preimage = vec![];
 
         // note a value to boolean bit vector
@@ -177,14 +177,14 @@ impl Circuit<bls12_381::Scalar> for Transfer
             ).unwrap()
         ).not();
 
-        // notes' code to boolean bit vector
-        let code_bits = boolean::u64_into_boolean_vec_le(
-            cs.namespace(|| "code"),
+        // notes' contract to boolean bit vector
+        let contract_bits = boolean::u64_into_boolean_vec_le(
+            cs.namespace(|| "contract"),
             self.note_a.as_ref().map(|a| {
-                a.code().raw()
+                a.contract().raw()
             })
         )?;
-        note_a_preimage.extend(code_bits.clone());
+        note_a_preimage.extend(contract_bits.clone());
 
         // Place g_d_a in the preimage of note a
         note_a_preimage.extend(g_d.repr(cs.namespace(|| "representation of g_d a"))?);
@@ -203,7 +203,7 @@ impl Circuit<bls12_381::Scalar> for Transfer
             note_a_preimage.len(),
             64 +    // value
             64 +    // symbol
-            64 +    // code
+            64 +    // contract
             256 +   // g_d
             256     // pk_d
             //255     // rho
@@ -366,11 +366,11 @@ impl Circuit<bls12_381::Scalar> for Transfer
         );
 
         // Compute note b preimage:
-        // (value | symbol | code | g_d | pk_d | rho)
+        // (value | symbol | contract | g_d | pk_d | rho)
         let mut note_b_preimage = vec![];
         note_b_preimage.extend(value_b_bits);
         note_b_preimage.extend(symbol_bits.clone());
-        note_b_preimage.extend(code_bits.clone());
+        note_b_preimage.extend(contract_bits.clone());
 
         // Witness g_d b, checking that it's on the curve.
         let g_d_b = {
@@ -434,11 +434,11 @@ impl Circuit<bls12_381::Scalar> for Transfer
         cm_b.get_u().inputize(cs.namespace(|| "commitment b"))?;
 
         // Compute note c preimage:
-        // (value | symbol | code | g_d | pk_d | rho)
+        // (value | symbol | contract | g_d | pk_d | rho)
         let mut note_c_preimage = vec![];
         note_c_preimage.extend(value_c_bits);
         note_c_preimage.extend(symbol_bits);
-        note_c_preimage.extend(code_bits);
+        note_c_preimage.extend(contract_bits);
 
         // Witness g_d c, checking that it's on the curve.
         let g_d_c = {
@@ -506,7 +506,7 @@ mod tests
 {
     use crate::note::{Note, nullifier::ExtractedNullifier, Rseed};
     use crate::keys::{SpendingKey, FullViewingKey};
-    use crate::eosio::{Asset, Name};
+    use crate::eosio::{Name, ExtendedAsset};
     use crate::constants::MERKLE_TREE_DEPTH;
     use bls12_381::Bls12;
     use rand::rngs::OsRng;
@@ -530,9 +530,7 @@ mod tests
         let mut rng = OsRng.clone();
         let (sk_a, fvk_a, note_a) = Note::dummy(
             &mut rng,
-            //Some(ExtractedNullifier(Scalar::one().clone())),
-            Asset::from_string(&"1234567890987654321".to_string()),
-            None
+            ExtendedAsset::from_string(&"1234567890987654321@atomicassets".to_string())
         );
 
         let mut bytes = [0; 32];
@@ -577,15 +575,11 @@ mod tests
 
         let (_, _, note_b) = Note::dummy(
             &mut rng,
-            //Some(ExtractedNullifier::from(nf)),
-            Asset::from_string(&"1234567890987654321".to_string()),
-            None
+            ExtendedAsset::from_string(&"1234567890987654321@atomicassets".to_string())
         );
         let (_, _, note_c) = Note::dummy(
             &mut rng,
-            //Some(ExtractedNullifier::from(nf)),
-            Asset::from_string(&"0".to_string()),
-            None
+            ExtendedAsset::from_string(&"0@atomicassets".to_string())
         );
 
         let mut cs = TestConstraintSystem::new();
@@ -653,9 +647,7 @@ mod tests
         let mut rng = OsRng.clone();
         let (sk_a, fvk_a, note_a) = Note::dummy(
             &mut rng,
-            //Some(ExtractedNullifier(Scalar::one().clone())),
-            Asset::from_string(&"1234567890987654321".to_string()),
-            None
+            ExtendedAsset::from_string(&"1234567890987654321@atomicassets".to_string())
         );
 
         let mut bytes = [0; 32];
@@ -700,15 +692,11 @@ mod tests
 
         let (_, _, note_b) = Note::dummy(
             &mut rng,
-            //Some(ExtractedNullifier::from(nf)),
-            Asset::from_string(&"1234567890987654321".to_string()),
-            None
+            ExtendedAsset::from_string(&"1234567890987654321@atomiassets".to_string())
         );
         let (_, _, note_c) = Note::dummy(
             &mut rng,
-            //Some(ExtractedNullifier::from(nf)),
-            Asset::from_string(&"0".to_string()),
-            None
+            ExtendedAsset::from_string(&"0@atomiassets".to_string())
         );
 
         println!("create proof");
@@ -767,10 +755,8 @@ mod tests
             0,
             sender,
             Name(0),
-            Asset::from_string(&"5000.0000 EOS".to_string()).unwrap(),
-            Name::from_string(&"eosio.token".to_string()).unwrap(),
+            ExtendedAsset::from_string(&"5000.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
-            //ExtractedNullifier(Scalar::one()),
             [0; 512]
         );
 
@@ -820,20 +806,16 @@ mod tests
             0,
             recipient,
             Name(0),
-            Asset::from_string(&"3000.0000 EOS".to_string()).unwrap(),
-            Name::from_string(&"eosio.token".to_string()).unwrap(),
+            ExtendedAsset::from_string(&"3000.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
-            //ExtractedNullifier::from(nf),
             [0; 512]
         );
         let note_c = Note::from_parts(
             0,
             sender,
             Name(0),
-            Asset::from_string(&"2000.0000 EOS".to_string()).unwrap(),
-            Name::from_string(&"eosio.token".to_string()).unwrap(),
+            ExtendedAsset::from_string(&"2000.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
-            //ExtractedNullifier::from(nf),
             [0; 512]
         );
 

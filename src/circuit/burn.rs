@@ -126,7 +126,7 @@ impl Circuit<bls12_381::Scalar> for Burn
         let pk_d = g_d.mul(cs.namespace(|| "compute pk_d"), &ivk)?;
 
         // Compute note preimage:
-        // (value | symbol | code | g_d | pk_d | rho)
+        // (value | symbol | contract | g_d | pk_d | rho)
         let mut note_a_preimage = vec![];
 
         // note a value to boolean bit vector
@@ -165,14 +165,14 @@ impl Circuit<bls12_381::Scalar> for Burn
             ).unwrap()
         ).not();
 
-        // notes' code to boolean bit vector
-        let code_bits = boolean::u64_into_boolean_vec_le(
-            cs.namespace(|| "code"),
+        // notes' contract to boolean bit vector
+        let contract_bits = boolean::u64_into_boolean_vec_le(
+            cs.namespace(|| "contract"),
             self.note_a.as_ref().map(|a| {
-                a.code().raw()
+                a.contract().raw()
             })
         )?;
-        note_a_preimage.extend(code_bits.clone());
+        note_a_preimage.extend(contract_bits.clone());
 
         // Place g_d_a in the preimage of note a
         note_a_preimage.extend(g_d.repr(cs.namespace(|| "representation of g_d a"))?);
@@ -191,10 +191,9 @@ impl Circuit<bls12_381::Scalar> for Burn
             note_a_preimage.len(),
             64 +    // value
             64 +    // symbol
-            64 +    // code
+            64 +    // contract
             256 +   // g_d
             256     // pk_d
-            //255     // rho
         );
 
         // Compute the commitment of note a
@@ -368,11 +367,11 @@ impl Circuit<bls12_381::Scalar> for Burn
         );
 
         // Compute note d preimage:
-        // (value | symbol | code | g_d | pk_d | rho)
+        // (value | symbol | contract | g_d | pk_d | rho)
         let mut note_d_preimage = vec![];
         note_d_preimage.extend(value_d_bits);
         note_d_preimage.extend(symbol_bits.clone());
-        note_d_preimage.extend(code_bits.clone());
+        note_d_preimage.extend(contract_bits.clone());
 
         // Witness g_d d, checking that it's on the curve.
         let g_d_d = {
@@ -435,7 +434,7 @@ impl Circuit<bls12_381::Scalar> for Burn
         // Expose note commit d as input
         cm_d.get_u().inputize(cs.namespace(|| "commitment d"))?;
 
-        // Expose (value_b | symbol | code | account_b | value_c | account_c) as public inputs
+        // Expose (value_b | symbol | contract | account_b | value_c | account_c) as public inputs
         let account_b_bits = boolean::u64_into_boolean_vec_le(
             cs.namespace(|| "account b"),
             self.account_b
@@ -445,11 +444,11 @@ impl Circuit<bls12_381::Scalar> for Burn
             self.account_c
         )?;
 
-        // pack asset contents: value_b | symbol | code
+        // pack asset contents: value_b | symbol | contract
         let mut asset_content_bits = vec![];
         asset_content_bits.extend(value_b_bits);
         asset_content_bits.extend(symbol_bits);
-        asset_content_bits.extend(code_bits);
+        asset_content_bits.extend(contract_bits);
 
         // pack account contents: account_b | value_c | account_c
         let mut account_content_bits = vec![];
@@ -470,7 +469,7 @@ mod tests
 {
     use crate::note::{Note, nullifier::ExtractedNullifier, Rseed};
     use crate::keys::{SpendingKey, FullViewingKey};
-    use crate::eosio::{Asset, Name, Symbol};
+    use crate::eosio::{ExtendedAsset, Name, Symbol};
     use crate::constants::MERKLE_TREE_DEPTH;
     use bls12_381::Scalar;
     use bls12_381::Bls12;
@@ -493,9 +492,7 @@ mod tests
         let mut rng = OsRng.clone();
         let (sk_a, fvk_a, note_a) = Note::dummy(
             &mut rng,
-            //Some(ExtractedNullifier(Scalar::one().clone())),
-            Asset::from_string(&"1234567890987654321".to_string()),
-            None
+            ExtendedAsset::from_string(&"1234567890987654321@atomicassets".to_string())
         );
 
         let mut bytes = [0; 32];
@@ -544,16 +541,14 @@ mod tests
         let account_c = 9999u64;
         let (_, _, note_d) = Note::dummy(
             &mut rng,
-            //Some(ExtractedNullifier::from(nf)),
-            Asset::from_string(&"0".to_string()),
-            None
+            ExtendedAsset::from_string(&"0@atomicassets".to_string())
         );
 
-        // Expose asset contents (value_b | symbol | code) as public inputs
+        // Expose asset contents (value_b | symbol | contract) as public inputs
         let mut asset_contents = [0; 24];
         asset_contents[0..8].copy_from_slice(&value_b.to_le_bytes());
         asset_contents[8..16].copy_from_slice(&note_a.symbol().raw().to_le_bytes());
-        asset_contents[16..24].copy_from_slice(&note_a.code().raw().to_le_bytes());
+        asset_contents[16..24].copy_from_slice(&note_a.contract().raw().to_le_bytes());
         let asset_contents = multipack::bytes_to_bits_le(&asset_contents);
         let asset_contents = multipack::compute_multipacking(&asset_contents);
         assert_eq!(asset_contents.len(), 1);
@@ -634,9 +629,7 @@ mod tests
         let mut rng = OsRng.clone();
         let (sk_a, fvk_a, note_a) = Note::dummy(
             &mut rng,
-            //Some(ExtractedNullifier(Scalar::one().clone())),
-            Asset::from_string(&"1234567890987654321".to_string()),
-            None
+            ExtendedAsset::from_string(&"1234567890987654321@atomicassets".to_string())
         );
 
         let mut bytes = [0; 32];
@@ -685,9 +678,7 @@ mod tests
         let account_c = 9999u64;
         let (_, _, note_d) = Note::dummy(
             &mut rng,
-            //Some(ExtractedNullifier::from(nf)),
-            Asset::from_string(&"0".to_string()),
-            None
+            ExtendedAsset::from_string(&"0@atomicassets".to_string())
         );
 
         println!("create proof");
@@ -709,11 +700,11 @@ mod tests
         proof.write(f).unwrap();
 
         
-        // Expose asset contents (value_b | symbol | code) as public inputs
+        // Expose asset contents (value_b | symbol | contract) as public inputs
         let mut asset_contents = [0; 24];
         asset_contents[0..8].copy_from_slice(&value_b.to_le_bytes());
         asset_contents[8..16].copy_from_slice(&note_a.symbol().raw().to_le_bytes());
-        asset_contents[16..24].copy_from_slice(&note_a.code().raw().to_le_bytes());
+        asset_contents[16..24].copy_from_slice(&note_a.contract().raw().to_le_bytes());
         let asset_contents = multipack::bytes_to_bits_le(&asset_contents);
         let asset_contents: Vec<Scalar> = multipack::compute_multipacking(&asset_contents);
         assert_eq!(asset_contents.len(), 1);
@@ -766,10 +757,8 @@ mod tests
             0,
             sender,
             Name(0),
-            Asset::from_string(&"5000.0000 EOS".to_string()).unwrap(),
-            Name::from_string(&"eosio.token".to_string()).unwrap(),
+            ExtendedAsset::from_string(&"5000.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
-            //ExtractedNullifier(Scalar::one()),
             [0; 512]
         );
 
@@ -824,10 +813,8 @@ mod tests
             0,
             sender,
             Name(0),
-            Asset::from_string(&"2000.0000 EOS".to_string()).unwrap(),
-            Name::from_string(&"eosio.token".to_string()).unwrap(),
+            ExtendedAsset::from_string(&"2000.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
-            //ExtractedNullifier::from(nf),
             [0; 512]
         );
 
@@ -850,11 +837,11 @@ mod tests
         proof.write(f).unwrap();
 
         
-        // Expose asset contents (value_b | symbol | code) as public inputs
+        // Expose asset contents (value_b | symbol | contract) as public inputs
         let mut asset_contents = [0; 24];
         asset_contents[0..8].copy_from_slice(&value_b.to_le_bytes());
         asset_contents[8..16].copy_from_slice(&note_a.symbol().raw().to_le_bytes());
-        asset_contents[16..24].copy_from_slice(&note_a.code().raw().to_le_bytes());
+        asset_contents[16..24].copy_from_slice(&note_a.contract().raw().to_le_bytes());
         let asset_contents = multipack::bytes_to_bits_le(&asset_contents);
         let asset_contents: Vec<Scalar> = multipack::compute_multipacking(&asset_contents);
         assert_eq!(asset_contents.len(), 1);

@@ -8,6 +8,7 @@ use std::io::{self, Read, Write};
 use rand_core::RngCore;
 use serde::{Serialize, Serializer, Deserialize, ser::SerializeStruct, Deserializer, de::Visitor, de::SeqAccess, de::MapAccess, de};
 use std::fmt;
+use std::error::Error;
 use crate::{
     address::Address,
     constants::{PROOF_GENERATION_KEY_GENERATOR, SPENDING_KEY_GENERATOR},
@@ -18,7 +19,7 @@ use crate::{
         PreparedBaseSubgroup, PreparedScalar,
     },
 };
-
+use bech32::{FromBase32, ToBase32, Variant};
 use aes::Aes256;
 use blake2b_simd::{Hash as Blake2bHash, Params as Blake2bParams};
 use ff::PrimeField;
@@ -55,6 +56,19 @@ pub enum DecodingError {
     InvalidAsk,
     /// Could not decode the `nsk` bytes to a jubjub field element.
     InvalidNsk,
+}
+impl Error for DecodingError {}
+impl fmt::Display for DecodingError
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result
+    {
+        match self
+        {
+            Self::LengthInvalid{expected, actual} => write!(f, "invalid bech32m ivk string length (must be {} but is {})", expected, actual),
+            Self::InvalidAsk => write!(f, "InvalidAsk"),
+            Self::InvalidNsk => write!(f, "InvalidNsk")
+        }
+    }
 }
 
 /// An outgoing viewing key
@@ -348,6 +362,23 @@ impl IncomingViewingKey {
                 ivk
             }, 1.into())
         })
+    }
+
+    /// Encodes this Incoming Viewing Key as Bech32m
+    pub fn to_bech32m(&self) -> Result<String, bech32::Error>
+    {
+        bech32::encode("ivk", self.to_bytes().to_base32(), Variant::Bech32m)
+    }
+
+    /// Parse a Bech32m encoded Incoming Viewing Key
+    pub fn from_bech32m(str: &String) -> Result<Self, Box<dyn Error>>
+    {
+        if str.len() < 113 { Err(DecodingError::LengthInvalid { expected: 113, actual: str.len() })? }
+        let (hrp, data, variant) = bech32::decode(&str).unwrap();
+        let bytes: [u8; 64] = Vec::<u8>::from_base32(&data)?[0..64].try_into().expect("from_bech32m: incorrect length");
+        assert_eq!(hrp, "ivk");
+        assert_eq!(variant, Variant::Bech32m);
+        Ok(Self::from_bytes(&bytes).unwrap())
     }
 
     /// Returns the payment address for this key corresponding to the given diversifier.
@@ -878,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ivk_json_serde()
+    fn test_ivk_serde()
     {
         let sk = SpendingKey::from_seed(b"This is Alice seed string! Usually this is just a listing of words. Here we just use sentences.");
         let fvk = FullViewingKey::from_spending_key(&sk);
@@ -887,6 +918,11 @@ mod tests {
         let encoded = serde_json::to_string(&ivk).unwrap();
         println!("{}", encoded);
         let decoded: IncomingViewingKey = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(ivk.to_bytes(), decoded.to_bytes());
+
+        let encoded = ivk.to_bech32m().unwrap();
+        println!("{}", encoded);
+        let decoded = IncomingViewingKey::from_bech32m(&encoded).unwrap();
         assert_eq!(ivk.to_bytes(), decoded.to_bytes());
     }
 }

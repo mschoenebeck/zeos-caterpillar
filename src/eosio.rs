@@ -691,6 +691,89 @@ impl<'de> Deserialize<'de> for Asset
     }
 }
 
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExtendedAsset
+{
+    quantity: Asset,
+    contract: Name
+}
+
+impl ExtendedAsset
+{
+    pub fn new(quantity: Asset, contract: Name) -> Self
+    {
+        ExtendedAsset{quantity, contract}
+    }
+
+    pub fn quantity(&self) -> &Asset
+    {
+        &self.quantity
+    }
+
+    pub fn contract(&self) -> &Name
+    {
+        &self.contract
+    }
+
+    pub fn from_string(str: &String) -> Option<Self>
+    {
+        let parts: Vec<String> = str.split("@").map(|s| s.to_string()).collect();
+        if parts.len() == 2
+        {
+            let quantity = Asset::from_string(&parts[0]);
+            if quantity.is_none() { return None; }
+            let contract = Name::from_string(&parts[1]);
+            if contract.is_err() { return None; }
+            return Some(ExtendedAsset{
+                quantity: quantity.unwrap(),
+                contract: contract.unwrap()
+            });
+        }
+        None
+    }
+
+    pub fn to_string(&self) -> String
+    {
+        self.quantity.to_string() + "@" + &self.contract.to_string()
+    }
+}
+
+// serde_json traits
+impl Serialize for ExtendedAsset
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+struct ExtendedAssetVisitor;
+impl<'de> Visitor<'de> for ExtendedAssetVisitor {
+    type Value = ExtendedAsset;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a string of the format: '10.0000 EOS@eosio.token'")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(ExtendedAsset::from_string(&value.to_string()).unwrap())
+    }
+}
+impl<'de> Deserialize<'de> for ExtendedAsset
+{
+    fn deserialize<D>(deserializer: D) -> Result<ExtendedAsset, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_str(ExtendedAssetVisitor)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Authorization
 {
@@ -714,6 +797,11 @@ impl Authorization
             actor: actor.unwrap(),
             permission: permission.unwrap()
         })
+    }
+
+    pub fn to_string(&self) -> String
+    {
+        self.actor.to_string() + "@" + &self.permission.to_string()
     }
 }
 
@@ -859,6 +947,12 @@ mod tests
         let a = Asset { amount: 100000, symbol: Symbol::from_string(&"0,".to_string()).unwrap() };
         println!("asset: {}", a.to_string());
         assert_eq!(Symbol::from_string(&"0,".to_string()).unwrap().raw(), 0);
+
+        let s = "thezeosalias@public".to_string();
+        let auth = Authorization::from_string(&s).unwrap();
+        let auth_de = auth.to_string();
+        println!("{}", auth_de);
+        assert_eq!(s, auth_de);
     }
 
     #[test]

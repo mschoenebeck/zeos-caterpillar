@@ -302,7 +302,7 @@ pub struct PlsMint
     pub cm: ScalarBytes,
     pub value: u64,
     pub symbol: Symbol,
-    pub code: Name,
+    pub contract: Name,
     pub proof: AffineProofBytesLE
 }
 
@@ -332,9 +332,8 @@ pub struct PlsSpendOutput
     pub cv_net_v: ScalarBytes,
     pub value_c: u64,
     pub symbol: Symbol,
-    pub code: Name,
-    pub cv_gt: bool,
-    pub cv_eq: bool,
+    pub contract: Name,
+    pub cv_eq_gt: u8,
     pub proof: AffineProofBytesLE,
     pub unshielded_outputs: Vec<PlsUnshieldedRecipient>
 }
@@ -377,7 +376,7 @@ pub struct PlsSpendAction
 pub struct PlsAuthenticate
 {
     pub cm: ScalarBytes,
-    pub code: Name,
+    pub contract: Name,
     pub data: Vec<u8>,
     pub proof: AffineProofBytesLE
 }
@@ -397,7 +396,7 @@ pub struct PlsPublishNotesAction
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlsWithdraw
 {
-    pub code: Name,
+    pub contract: Name,
     pub quantity: Asset,
     pub memo: String,
     pub to: Name
@@ -409,76 +408,6 @@ pub struct PlsWithdrawAction
     pub actions: Vec<PlsWithdraw>
 }
 
-
-
-
-/*
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct PlsTransfer
-{
-    pub root: ScalarBytes,
-    pub nf: ScalarBytes,
-    pub cm_b: ScalarBytes,
-    pub cm_c: ScalarBytes,
-    pub proof: AffineProofBytesLE
-}
-
-impl From<PlsTransfer> for Value {
-    fn from(s: PlsTransfer) -> Self {
-        serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct PlsTransferAction
-{
-    pub actions: Vec<PlsTransfer>,
-    pub note_ct: Vec<String>,
-}
-
-impl From<PlsTransferAction> for Value {
-    fn from(s: PlsTransferAction) -> Self {
-        serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct PlsBurn
-{
-    pub root: ScalarBytes,
-    pub nf: ScalarBytes,
-    pub cm_d: ScalarBytes,
-    pub value_b: u64,
-    pub symbol: Symbol,
-    pub code: Name,
-    pub account_b: Name,
-    pub memo_b: String,
-    pub amount_c: u64,
-    pub account_c: Name,
-    pub memo_c: String,
-    pub proof: AffineProofBytesLE
-}
-
-impl From<PlsBurn> for Value {
-    fn from(s: PlsBurn) -> Self {
-        serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct PlsBurnAction
-{
-    pub actions: Vec<PlsBurn>,
-    pub note_ct: Vec<String>,
-}
-
-impl From<PlsBurnAction> for Value {
-    fn from(s: PlsBurnAction) -> Self {
-        serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap()
-    }
-}
-*/
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlsFtTransfer
 {
@@ -487,12 +416,6 @@ pub struct PlsFtTransfer
     pub quantity: Asset,
     pub memo: String
 }
-
-//impl From<PlsFtTransfer> for Value {
-//    fn from(s: PlsFtTransfer) -> Self {
-//        serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap()
-//    }
-//}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlsNftTransfer
@@ -503,17 +426,14 @@ pub struct PlsNftTransfer
     pub memo: String
 }
 
-//impl From<PlsNftTransfer> for Value {
-//    fn from(s: PlsNftTransfer) -> Self {
-//        serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap()
-//    }
-//}
-
 // converts a bls12-381 scalar to its raw byte representation (i.e. montgomery form instead of canonical)
 pub fn scalar_to_raw_bytes_le(s: &bls12_381::Scalar) -> [u8; 32]
 {
     Scalar::from_bytes(&s.to_bytes()).unwrap().to_raw_bytes()
 }
+
+
+
 
 
 // Helper class 'Scalar' copied from bls crate because bytes are not accessible rawly (montgomery form) in
@@ -1036,6 +956,7 @@ mod tests
     use rand::rngs::OsRng;
     use crate::keys::{SpendingKey, FullViewingKey};
     use crate::note::Rseed;
+    use crate::eosio::ExtendedAsset;
 
     #[test]
     fn test()
@@ -1057,8 +978,7 @@ mod tests
             0,
             recipient,
             Name(0),
-            Asset::from_string(&"5000.0000 EOS".to_string()).unwrap(),
-            Name::from_string(&"eosio.token".to_string()).unwrap(),
+            ExtendedAsset::from_string(&"5000.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
             [0; 512]
         );
@@ -1066,7 +986,7 @@ mod tests
             account: Some(note.account().raw()),
             value: Some(note.amount()),
             symbol: Some(note.symbol().raw()),
-            code: Some(note.code().raw()),
+            contract: Some(note.contract().raw()),
             address: Some(note.address()),
             rcm: Some(note.rcm()),
             proof_generation_key: Some(sk.proof_generation_key()),
@@ -1077,7 +997,7 @@ mod tests
             cm: ScalarBytes(note.commitment().to_bytes()),
             value: note.amount(),
             symbol: note.symbol().clone(),
-            code: note.code().clone(),
+            contract: note.contract().clone(),
             proof: AffineProofBytesLE::from(proof.clone())
         };
         println!("{}", serde_json::to_string(&a).unwrap());
@@ -1085,7 +1005,7 @@ mod tests
         let mut inputs2_contents = [0; 24];
         inputs2_contents[0..8].copy_from_slice(&note.amount().to_le_bytes());
         inputs2_contents[8..16].copy_from_slice(&note.symbol().raw().to_le_bytes());
-        inputs2_contents[16..24].copy_from_slice(&note.code().raw().to_le_bytes());
+        inputs2_contents[16..24].copy_from_slice(&note.contract().raw().to_le_bytes());
         let inputs2_contents = multipack::bytes_to_bits_le(&inputs2_contents);
         let inputs2_contents: Vec<Scalar> = multipack::compute_multipacking(&inputs2_contents);
         assert_eq!(inputs2_contents.len(), 1);

@@ -54,7 +54,7 @@ impl Circuit<bls12_381::Scalar> for Output
         );
 
         // Compute symbol preimage:
-        // (symbol | code)
+        // (symbol | contract)
         let mut symbol_preimage = vec![];
         // notes' symbol to boolean bit vector
         let symbol_bits = boolean::u64_into_boolean_vec_le(
@@ -64,18 +64,18 @@ impl Circuit<bls12_381::Scalar> for Output
             })
         )?;
         symbol_preimage.extend(symbol_bits.clone());
-        // notes' code to boolean bit vector
-        let code_bits = boolean::u64_into_boolean_vec_le(
-            cs.namespace(|| "code"),
+        // notes' contract to boolean bit vector
+        let contract_bits = boolean::u64_into_boolean_vec_le(
+            cs.namespace(|| "contract"),
             self.note_b.as_ref().map(|b| {
-                b.code().raw()
+                b.contract().raw()
             })
         )?;
-        symbol_preimage.extend(code_bits.clone());
+        symbol_preimage.extend(contract_bits.clone());
         assert_eq!(
             symbol_preimage.len(),
             64 +    // symbol
-            64      // code
+            64      // contract
         );
 
         // Compute the symbol commitment
@@ -119,12 +119,12 @@ impl Circuit<bls12_381::Scalar> for Output
         }
 
         // Compute note b preimage:
-        // (account | value | symbol | code | g_d | pk_d)
+        // (account | value | symbol | contract | g_d | pk_d)
         let mut note_b_preimage = vec![];
         note_b_preimage.extend(account_b_bits);
         note_b_preimage.extend(value_b_bits.clone());
         note_b_preimage.extend(symbol_bits.clone());
-        note_b_preimage.extend(code_bits.clone());
+        note_b_preimage.extend(contract_bits.clone());
         // Witness g_d b, checking that it's on the curve.
         let g_d_b = {
             ecc::EdwardsPoint::witness(
@@ -238,7 +238,7 @@ mod tests
     use bellman::groth16::generate_random_parameters;
     use bls12_381::Bls12;
     use crate::address::Address;
-    use crate::eosio::Asset;
+    use crate::eosio::ExtendedAsset;
     use crate::eosio::Name;
     use crate::note::Note;
     use crate::note::Rseed;
@@ -264,8 +264,7 @@ mod tests
             0,
             Address::dummy(&mut rng),
             Name(0),
-            Asset::from_string(&"11.0000 EOS".to_string()).unwrap(),
-            Name::from_string(&"eosio.token".to_string()).unwrap(),
+            ExtendedAsset::from_string(&"11.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
             [0; 512]
         );
@@ -275,7 +274,7 @@ mod tests
             Personalization::SymbolCommitment,
             iter::empty()
                 .chain(BitArray::<_, Lsb0>::new(note_b.symbol().raw().to_le_bytes()).iter().by_vals())
-                .chain(BitArray::<_, Lsb0>::new(note_b.code().raw().to_le_bytes()).iter().by_vals()),
+                .chain(BitArray::<_, Lsb0>::new(note_b.contract().raw().to_le_bytes()).iter().by_vals()),
                 srcm.rcm().0
         );
         let scm = extract_p(&scm);

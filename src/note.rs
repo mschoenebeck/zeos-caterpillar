@@ -4,8 +4,9 @@ use rand_core::RngCore;
 use serde::{Serialize, Serializer, Deserialize, ser::SerializeStruct, Deserializer, de::Visitor, de::SeqAccess, de::MapAccess, de};
 use std::fmt;
 use std::io::{self, Read, Write};
+use crate::eosio::Asset;
 use crate::{
-    eosio::{Asset, Name, Symbol},
+    eosio::{ExtendedAsset, Name, Symbol},
     keys::{EphemeralSecretKey, NullifierDerivingKey, SpendingKey, FullViewingKey, prf_expand},
     note::nullifier::Nullifier, address::Address,
 };
@@ -57,11 +58,10 @@ pub struct Note
     /// The actual asset this note represents:
     /// amount: The amount/uid of this note.
     /// symbol: The symbol of this note, 0 if NFT/AT
-    asset: Asset,
-    /// The EOSIO smart contract this code is associated with:
+    /// contract: The EOSIO smart contract this code is associated with:
     /// FT/NFT: The token contract
     /// Auth: The contract this Auth token was issued for
-    code: Name,
+    asset: ExtendedAsset,
     /// The seed randomness for various note components.
     rseed: Rseed,
     /// The 512 bytes wide memo field
@@ -94,8 +94,7 @@ impl Note {
         header: u64,
         recipient: Address,
         account: Name,
-        asset: Asset,
-        code: Name,
+        asset: ExtendedAsset,
         rseed: Rseed,
         memo: [u8; 512]
     ) -> Self
@@ -105,7 +104,6 @@ impl Note {
             address: recipient,
             account,
             asset,
-            code,
             rseed,
             memo
         }
@@ -114,8 +112,7 @@ impl Note {
     /// Generates a dummy spent note.
     pub fn dummy(
         rng: &mut impl RngCore,
-        asset: Option<Asset>,
-        code: Option<Name>,
+        asset: Option<ExtendedAsset>,
     ) -> (SpendingKey, FullViewingKey, Self) {
         let sk = SpendingKey::random(rng);
         let fvk = FullViewingKey::from_spending_key(&sk);
@@ -127,8 +124,7 @@ impl Note {
             0,
             recipient,
             Name(0),
-            asset.unwrap_or_else(|| Asset::new(0, Symbol(0)).unwrap()),
-            code.unwrap_or_else(|| Name(0)),
+            asset.unwrap_or_else(|| ExtendedAsset::new(Asset::new(0, Symbol(0)).unwrap(), Name(0))),
             Rseed(bytes),
             [0; 512]
         );
@@ -141,9 +137,9 @@ impl Note {
         writer.write_u64::<LittleEndian>(self.header)?;                 // 8
         writer.write_all(self.address.to_bytes().as_ref())?;            // 43
         writer.write_u64::<LittleEndian>(self.account().raw())?;        // 8
-        writer.write_u64::<LittleEndian>(self.asset.amount() as u64)?;  // 8
-        writer.write_u64::<LittleEndian>(self.asset.symbol().raw())?;   // 8
-        writer.write_u64::<LittleEndian>(self.code.raw())?;             // 8
+        writer.write_u64::<LittleEndian>(self.asset.quantity().amount() as u64)?;  // 8
+        writer.write_u64::<LittleEndian>(self.asset.quantity().symbol().raw())?;   // 8
+        writer.write_u64::<LittleEndian>(self.asset.contract().raw())?;             // 8
         writer.write_all(self.rseed.0.as_ref())?;                       // 32
         writer.write_all(self.memo.as_ref())?;                          // 512
 
@@ -160,16 +156,17 @@ impl Note {
         let account = Name(account);
         let amount = reader.read_u64::<LittleEndian>()? as i64;
         let symbol = reader.read_u64::<LittleEndian>()?;
-        let asset = Asset::new(amount, Symbol(symbol)).unwrap();
-        let code = reader.read_u64::<LittleEndian>()?;
-        let code = Name(code);
+        let quantity = Asset::new(amount, Symbol(symbol)).unwrap();
+        let contract = reader.read_u64::<LittleEndian>()?;
+        let contract = Name(contract);
+        let asset = ExtendedAsset::new(quantity, contract);
         let mut rseed = [0; 32];
         reader.read_exact(&mut rseed)?;
         let rseed = Rseed(rseed);
         let mut memo = [0; 512];
         reader.read_exact(&mut memo)?;
 
-        Ok(Note::from_parts(header, recipient, account, asset, code, rseed, memo))
+        Ok(Note::from_parts(header, recipient, account, asset, rseed, memo))
     }
 
     /// Returns the recipient of this note.
@@ -187,24 +184,29 @@ impl Note {
         self.account
     }
 
+    /// Returns the quantity of this note.
+    pub fn quantity(&self) -> &Asset {
+        &self.asset.quantity()
+    }
+
     /// Returns the amount of this note.
     pub fn amount(&self) -> u64 {
-        self.asset.amount() as u64
+        self.asset.quantity().amount() as u64
     }
 
     /// Returns the symbol of this note.
     pub fn symbol(&self) -> &Symbol {
-        self.asset.symbol()
+        self.asset.quantity().symbol()
     }
 
     /// Returns the symbol of this note.
-    pub fn asset(&self) -> &Asset {
+    pub fn asset(&self) -> &ExtendedAsset {
         &self.asset
     }
 
-    /// Returns the code of this note.
-    pub fn code(&self) -> &Name {
-        &self.code
+    /// Returns the asset's contract of this note.
+    pub fn contract(&self) -> &Name {
+        &self.asset().contract()
     }
 
     /// Returns the rseed value of this note.
@@ -217,9 +219,9 @@ impl Note {
         &self.memo
     }
 
-    /// Returns the amount of this note.
+    /// Sets the amount of this note.
     pub fn set_amount(&mut self, amount: u64) {
-        self.asset.set_amount(amount as i64)
+        self.asset = ExtendedAsset::new(Asset::new(amount as i64, self.symbol().clone()).unwrap(), self.contract().clone())
     }
 
     /// Computes the note commitment, returning the full point.
@@ -228,9 +230,9 @@ impl Note {
             self.address.g_d().to_bytes(),
             self.address.pk_d().to_bytes(),
             self.account.raw(),
-            self.asset.amount() as u64,
-            self.asset.symbol().raw(),
-            self.code.raw(),
+            self.asset.quantity().amount() as u64,
+            self.asset.quantity().symbol().raw(),
+            self.asset.contract().raw(),
             self.rseed.rcm(),
         )
     }
@@ -273,7 +275,6 @@ impl Serialize for Note
         state.serialize_field("address", &self.address.to_bech32m().unwrap())?;
         state.serialize_field("account", &self.account.to_string())?;
         state.serialize_field("asset", &self.asset)?;
-        state.serialize_field("code", &self.code)?;
         state.serialize_field("rseed", &hex::encode(self.rseed.0))?;
         state.serialize_field("memo", &hex::encode(self.memo))?;
         state.end()
@@ -285,7 +286,7 @@ impl<'de> Deserialize<'de> for Note {
     where
         D: Deserializer<'de>,
     {
-        enum Field { Header, Address, Account, Asset, Code, RSeed, /*Rho, */Memo }
+        enum Field { Header, Address, Account, Asset, RSeed, Memo }
 
         impl<'de> Deserialize<'de> for Field {
             fn deserialize<D>(deserializer: D) -> Result<Field, D::Error>
@@ -298,7 +299,7 @@ impl<'de> Deserialize<'de> for Note {
                     type Value = Field;
 
                     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                        formatter.write_str("`header` or `address` or `account` or `asset` or `code` or `rseed` or `memo`")
+                        formatter.write_str("`header` or `address` or `account` or `asset` or `rseed` or `memo`")
                     }
 
                     fn visit_str<E>(self, value: &str) -> Result<Field, E>
@@ -310,7 +311,6 @@ impl<'de> Deserialize<'de> for Note {
                             "address" => Ok(Field::Address),
                             "account" => Ok(Field::Account),
                             "asset" => Ok(Field::Asset),
-                            "code" => Ok(Field::Code),
                             "rseed" => Ok(Field::RSeed),
                             "memo" => Ok(Field::Memo),
                             _ => Err(de::Error::unknown_field(value, FIELDS)),
@@ -343,8 +343,6 @@ impl<'de> Deserialize<'de> for Note {
                     .ok_or_else(|| de::Error::invalid_length(2, &self))?;
                 let asset = seq.next_element()?
                     .ok_or_else(|| de::Error::invalid_length(3, &self))?;
-                let code = seq.next_element()?
-                    .ok_or_else(|| de::Error::invalid_length(4, &self))?;
                 let rseed: String = seq.next_element()?
                     .ok_or_else(|| de::Error::invalid_length(5, &self))?;
                 let memo: String = seq.next_element()?
@@ -356,7 +354,6 @@ impl<'de> Deserialize<'de> for Note {
                     address: Address::from_bech32m(&address).unwrap(),
                     account: Name::from_string(&account).unwrap(),
                     asset,
-                    code,
                     rseed,
                     memo
                 })
@@ -370,7 +367,6 @@ impl<'de> Deserialize<'de> for Note {
                 let mut address = None;
                 let mut account = None;
                 let mut asset = None;
-                let mut code = None;
                 let mut rseed = None;
                 let mut memo = None;
                 while let Some(key) = map.next_key()? {
@@ -399,12 +395,6 @@ impl<'de> Deserialize<'de> for Note {
                             }
                             asset = Some(map.next_value()?);
                         }
-                        Field::Code => {
-                            if code.is_some() {
-                                return Err(de::Error::duplicate_field("code"));
-                            }
-                            code = Some(map.next_value()?);
-                        }
                         Field::RSeed => {
                             if rseed.is_some() {
                                 return Err(de::Error::duplicate_field("rseed"));
@@ -423,7 +413,6 @@ impl<'de> Deserialize<'de> for Note {
                 let address: String = address.ok_or_else(|| de::Error::missing_field("address"))?;
                 let account: String = account.ok_or_else(|| de::Error::missing_field("account"))?;
                 let asset = asset.ok_or_else(|| de::Error::missing_field("asset"))?;
-                let code = code.ok_or_else(|| de::Error::missing_field("code"))?;
                 let rseed: String = rseed.ok_or_else(|| de::Error::missing_field("rseed"))?;
                 let memo: String = memo.ok_or_else(|| de::Error::missing_field("memo"))?;
                 Ok(Note{
@@ -431,14 +420,13 @@ impl<'de> Deserialize<'de> for Note {
                     address: Address::from_bech32m(&address).unwrap(),
                     account: Name::from_string(&account).unwrap(),
                     asset,
-                    code,
                     rseed: Rseed(hex::decode(rseed).unwrap()[0..32].try_into().unwrap()),
                     memo: hex::decode(memo).unwrap()[0..512].try_into().unwrap()
                 })
             }
         }
 
-        const FIELDS: &'static [&'static str] = &["header", "address", "account", "asset", "code", "rseed", "memo"];
+        const FIELDS: &'static [&'static str] = &["header", "address", "account", "asset", "rseed", "memo"];
         deserializer.deserialize_struct("Note", FIELDS, NoteVisitor)
     }
 }
@@ -530,19 +518,19 @@ mod tests
 {
     use super::Note;
     use rand::rngs::OsRng;
-    use crate::eosio::{Asset, Name};
+    use crate::eosio::ExtendedAsset;
 
     #[test]
     fn test_serde()
     {
         let mut rng = OsRng.clone();
-        let a = Asset::from_string(&"5000.0000 EOS".to_string()).unwrap();
-        let (_, _, n) = Note::dummy(&mut rng, Some(a), Some(Name::from_string(&"eosio.token".to_string()).unwrap()));
+        let a = ExtendedAsset::from_string(&"5000.0000 EOS@eosio.token".to_string()).unwrap();
+        let (_, _, n) = Note::dummy(&mut rng, Some(a));
 
         let mut v = vec![];
 
         n.write(&mut v).unwrap();
-        assert_eq!(v.len(), 651);
+        assert_eq!(v.len(), 627);
 
         let de_n = Note::read(&v[..]).unwrap();
         assert!(n == de_n);

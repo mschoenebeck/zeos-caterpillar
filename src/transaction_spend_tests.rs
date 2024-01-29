@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests
 {
-    use crate::{transaction::{ZTransaction, resolve_ztransaction, zsign_transaction, zverify_spend_transaction}, note::{Note, Rseed}, eosio::{Name, Asset, Authorization}, wallet::Wallet, keys::{SpendingKey, FullViewingKey}, note_encryption::{NoteEncryption, derive_esk, ka_derive_public, TransmittedNoteCiphertext}};
+    use crate::{transaction::{ZTransaction, resolve_ztransaction, zsign_transaction, zverify_spend_transaction}, note::{Note, Rseed}, eosio::{Name, ExtendedAsset, Asset, Authorization}, wallet::Wallet, keys::{SpendingKey, FullViewingKey}, note_encryption::{NoteEncryption, derive_esk, ka_derive_public, TransmittedNoteCiphertext}};
     use rand::rngs::OsRng;
     use bellman::groth16::Parameters;
     use bls12_381::Bls12;
@@ -34,22 +34,22 @@ mod tests
         ).unwrap();
 
         let notes = vec![
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), Asset::from_string(&"7.0000 ZEOS".to_string()).unwrap(), Name::from_string(&"thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), Asset::from_string(&"17.0000 ZEOS".to_string()).unwrap(), Name::from_string(&"thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), Asset::from_string(&"10.0000 EOS".to_string()).unwrap(), Name::from_string(&"eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), Asset::from_string(&"5.0000 EOS".to_string()).unwrap(), Name::from_string(&"eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), Asset::from_string(&"4.0000 EOS".to_string()).unwrap(), Name::from_string(&"eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), Asset::from_string(&"4.0000 EOS".to_string()).unwrap(), Name::from_string(&"eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), Asset::from_string(&"3.0000 EOS".to_string()).unwrap(), Name::from_string(&"eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), Asset::from_string(&"3.0000 EOS".to_string()).unwrap(), Name::from_string(&"eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), Asset::from_string(&"20.0000 EOS".to_string()).unwrap(), Name::from_string(&"eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), Asset::from_string(&"2.0000 EOS".to_string()).unwrap(), Name::from_string(&"eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), Asset::from_string(&"2.0000 EOS".to_string()).unwrap(), Name::from_string(&"eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), Asset::from_string(&"2.0000 EOS".to_string()).unwrap(), Name::from_string(&"eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), Asset::from_string(&"12345678987654321".to_string()).unwrap(), Name::from_string(&"atomicassets".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), Asset::from_string(&"99999999998765431".to_string()).unwrap(), Name::from_string(&"atomicassets".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), Asset::from_string(&"88888888887654321".to_string()).unwrap(), Name::from_string(&"atomicassets".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), Asset::from_string(&"12345677777777321".to_string()).unwrap(), Name::from_string(&"atomicassets".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512])
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"7.0000 ZEOS@thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"17.0000 ZEOS@thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"10.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"5.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"4.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"4.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"3.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"3.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"20.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"2.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"2.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"2.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"12345678987654321@atomicassets".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"99999999998765431@atomicassets".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"88888888887654321@atomicassets".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"12345677777777321@atomicassets".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512])
         ];
 
         for n in notes.iter()
@@ -63,7 +63,7 @@ mod tests
                 out_ciphertext: ne.encrypt_outgoing_plaintext(&mut rng),
             };
             w.add_leaves(&n.commitment().to_bytes());
-            w.add_notes(&vec![encrypted_note.to_base64()]);
+            w.add_notes(&vec![encrypted_note.to_base64()], 0, 0);
         }
 
         let fee_token_contract = Name::from_string(&"thezeostoken".to_string()).unwrap();
@@ -87,7 +87,7 @@ mod tests
                 {
                     "name": "spend",
                     "data": {
-                        "code": "eosio.token",
+                        "contract": "eosio.token",
                         "symbol": "4,EOS",
                         "change_to": "$SELF",
                         "publish_change_note": true,
@@ -149,7 +149,7 @@ mod tests
         };
         println!("{}", serde_json::to_string_pretty(&tx).unwrap());
         println!("zverify...");
-        assert!(zverify_spend_transaction(tx.0, &params));
+        assert!(zverify_spend_transaction(&tx.0, &params));
 
         let json = r#"{
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
@@ -161,7 +161,7 @@ mod tests
                 {
                     "name": "spend",
                     "data": {
-                        "code": "eosio.token",
+                        "contract": "eosio.token",
                         "symbol": "4,EOS",
                         "change_to": "$SELF",
                         "publish_change_note": true,
@@ -229,7 +229,7 @@ mod tests
         };
         println!("{}", serde_json::to_string_pretty(&tx).unwrap());
         println!("zverify...");
-        assert!(zverify_spend_transaction(tx.0, &params));
+        assert!(zverify_spend_transaction(&tx.0, &params));
 
         let json = r#"{
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
@@ -241,7 +241,7 @@ mod tests
                 {
                     "name": "spend",
                     "data": {
-                        "code": "eosio.token",
+                        "contract": "eosio.token",
                         "symbol": "4,EOS",
                         "change_to": "$SELF",
                         "publish_change_note": true,
@@ -273,7 +273,7 @@ mod tests
         };
         println!("{}", serde_json::to_string_pretty(&tx).unwrap());
         println!("zverify...");
-        assert!(zverify_spend_transaction(tx.0, &params));
+        assert!(zverify_spend_transaction(&tx.0, &params));
 
         let json = r#"{
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
@@ -285,7 +285,7 @@ mod tests
                 {
                     "name": "spend",
                     "data": {
-                        "code": "atomicassets",
+                        "contract": "atomicassets",
                         "symbol": "0,",
                         "change_to": "$SELF",
                         "publish_change_note": true,
@@ -335,6 +335,6 @@ mod tests
         };
         println!("{}", serde_json::to_string_pretty(&tx).unwrap());
         println!("zverify...");
-        assert!(zverify_spend_transaction(tx.0, &params));
+        assert!(zverify_spend_transaction(&tx.0, &params));
     }
 }

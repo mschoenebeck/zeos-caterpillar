@@ -118,10 +118,10 @@ impl Circuit<bls12_381::Scalar> for Spend
         let pk_d = g_d.mul(cs.namespace(|| "compute pk_d"), &ivk)?;
 
         // Compute note a preimage:
-        // (account | value | symbol | code | g_d | pk_d | rho)
+        // (account | value | symbol | contract | g_d | pk_d | rho)
         let mut note_a_preimage = vec![];
         // Compute symbol preimage:
-        // (symbol | code)
+        // (symbol | contract)
         let mut symbol_preimage = vec![];
 
         // note a account to boolean bit vector
@@ -158,15 +158,15 @@ impl Circuit<bls12_381::Scalar> for Spend
         )?;
         note_a_preimage.extend(symbol_bits.clone());
         symbol_preimage.extend(symbol_bits.clone());
-        // notes' code to boolean bit vector
-        let code_bits = boolean::u64_into_boolean_vec_le(
-            cs.namespace(|| "code"),
+        // notes' contract to boolean bit vector
+        let contract_bits = boolean::u64_into_boolean_vec_le(
+            cs.namespace(|| "contract"),
             self.note_a.as_ref().map(|a| {
-                a.code().raw()
+                a.contract().raw()
             })
         )?;
-        note_a_preimage.extend(code_bits.clone());
-        symbol_preimage.extend(code_bits.clone());
+        note_a_preimage.extend(contract_bits.clone());
+        symbol_preimage.extend(contract_bits.clone());
         // Place g_d_a in the preimage of note a
         note_a_preimage.extend(g_d.repr(cs.namespace(|| "representation of g_d a"))?);
         // Place pk_d_a in the preimage of note a
@@ -177,14 +177,14 @@ impl Circuit<bls12_381::Scalar> for Spend
             64 +    // account
             64 +    // value
             64 +    // symbol
-            64 +    // code
+            64 +    // contract
             256 +   // g_d
             256     // pk_d
         );
         assert_eq!(
             symbol_preimage.len(),
             64 +    // symbol
-            64      // code
+            64      // contract
         );
 
         // Compute the commitment of note a
@@ -372,7 +372,7 @@ mod tests
     use bellman::groth16::generate_random_parameters;
     use bls12_381::Bls12;
     use crate::constants::MERKLE_TREE_DEPTH;
-    use crate::eosio::Asset;
+    use crate::eosio::ExtendedAsset;
     use crate::eosio::Name;
     use crate::note::Note;
     use crate::note::Rseed;
@@ -406,8 +406,7 @@ mod tests
             0,
             sender,
             Name(0),
-            Asset::from_string(&"10.0000 EOS".to_string()).unwrap(),
-            Name::from_string(&"eosio.token".to_string()).unwrap(),
+            ExtendedAsset::from_string(&"10.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
             [0; 512]
         );
@@ -459,7 +458,7 @@ mod tests
             Personalization::SymbolCommitment,
             iter::empty()
                 .chain(BitArray::<_, Lsb0>::new(note_a.symbol().raw().to_le_bytes()).iter().by_vals())
-                .chain(BitArray::<_, Lsb0>::new(note_a.code().raw().to_le_bytes()).iter().by_vals()),
+                .chain(BitArray::<_, Lsb0>::new(note_a.contract().raw().to_le_bytes()).iter().by_vals()),
                 srcm.rcm().0
         );
         let scm = extract_p(&scm);

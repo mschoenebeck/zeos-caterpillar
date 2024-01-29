@@ -29,7 +29,7 @@ use std::io::{self, Read, Write};
 use base64::{engine::general_purpose, Engine as _};
 use crate::{
     note::Note,
-    eosio::Symbol
+    eosio::{Symbol, ExtendedAsset}
 };
 use rand_core::RngCore;
 use subtle::{Choice, ConstantTimeEq};
@@ -516,9 +516,9 @@ where
     let account = Name(account);
     let amount = u64::from_le_bytes(plaintext[27..35].try_into().unwrap()) as i64;
     let symbol = u64::from_le_bytes(plaintext[35..43].try_into().unwrap());
-    let asset = Asset::new(amount, Symbol(symbol)).unwrap();
-    let code = u64::from_le_bytes(plaintext[43..51].try_into().unwrap());
-    let code = Name(code);
+    let contract = u64::from_le_bytes(plaintext[43..51].try_into().unwrap());
+    let contract = Name(contract);
+    let asset = ExtendedAsset::new(Asset::new(amount, Symbol(symbol)).unwrap(), contract);
     let r: [u8; 32] = plaintext[51..83].try_into().unwrap();
     let rseed = Rseed(r);
     //let r: [u8; 32] = plaintext[75..107].try_into().unwrap();
@@ -527,7 +527,7 @@ where
 
     let pk_d = get_validated_pk_d(&diversifier)?;
     let recipient = Address::from_parts(diversifier, pk_d)?;
-    Some(Note::from_parts(header, recipient, account, asset, code, rseed, /*rho, */memo))
+    Some(Note::from_parts(header, recipient, account, asset, rseed, memo))
 }
 
 /// Derives the `EphemeralSecretKey` corresponding to this note.
@@ -601,9 +601,8 @@ fn note_plaintext_bytes(
     np[19..27].copy_from_slice(&note.account().raw().to_le_bytes());
     np[27..35].copy_from_slice(&note.amount().to_le_bytes());
     np[35..43].copy_from_slice(&note.symbol().raw().to_le_bytes());
-    np[43..51].copy_from_slice(&note.code().raw().to_le_bytes());
+    np[43..51].copy_from_slice(&note.contract().raw().to_le_bytes());
     np[51..83].copy_from_slice(&note.rseed().0);
-    //np[75..107].copy_from_slice(&note.rho().to_bytes());
     np[83..NOTE_PLAINTEXT_SIZE].copy_from_slice(note.memo());
     NotePlaintextBytes(np)
 }
@@ -725,7 +724,7 @@ mod tests {
     use crate::{
         keys::{PreparedIncomingViewingKey, SpendingKey, FullViewingKey},
         note::{Note, Rseed},
-        eosio::{Asset, Name}
+        eosio::{ExtendedAsset, Name}
     };
 
     #[test]
@@ -747,10 +746,8 @@ mod tests {
             0,
             recipient,
             Name(0),
-            Asset::from_string(&"10.0000 ZEOS".to_string()).unwrap(),
-            Name::from_string(&"thezeostoken".to_string()).unwrap(),
+            ExtendedAsset::from_string(&"10.0000 ZEOS@thezeostoken".to_string()).unwrap(),
             Rseed([42; 32]),
-            //ExtractedNullifier(Scalar::one()),
             [0; 512]
         );
 
@@ -781,6 +778,24 @@ mod tests {
             Some(decrypted_note) => assert_eq!(decrypted_note, note),
             None => panic!("Output recovery failed"),
         }
+    }
 
+    #[test]
+    fn test_decryption()
+    {
+        let sk = SpendingKey::from_seed(b"army add gossip wrist squeeze chronic simple gold like island wheel north cave praise buddy shine monitor damp into another expose tortoise educate army");
+        let fvk = FullViewingKey::from_spending_key(&sk);
+        println!("{}", fvk.default_address().1.to_bech32m().unwrap());
+
+        let note_ct = vec![
+            "xcxVNdFTYJ/aiqBrbucv+i5zxeDkPqKuEidGWdBfl237UVOgs1lhCfLoi4FS5K1ZEOUpnxEtkL+nlQ9vNmMEqkzOd42QvPugF6UTvpdsASykUWRWEhuAQbooh8HCq2IPL5z/+e0eVLOtCjO26aOMj0jug5Ms8FHMLQNo/VbdxPeQnGebXDRwwZegd6hFj2mhzQ/GbnyJT3Va7UHhgYC0aVpkOlnxoZ5L2rTzfSlmIfkooEJB+Gs2nyIxYFJk7SpjAP8UJuWfl6w0bE/LstpEREDdvsNV4kPiVKWh5MDUGjJk6AO8r26hwHjsZf+g2zWaw/wZzLBddZ/wwC0jRMfa4A3CeSTOcIeLLFdssV7ZUDiJ70Bn3CYQ2YvjKC5rr74o87lQxkX8nZL1PTCUiBE0lrNDMNJMGZcDFVXUYMIzakiRML+8iqrM1LF4a2yVKYy237lOQ/3eax3X0/IpCgDQdRcQDSH/5/r6tSeuqy4R7yxIVDdbboeAlh4UZEcA1XogoIR3TS86BLy2ok0WvTh35Cs3vDTGK4/t93XqINbi2Oygftq2PQB+ZtmAub0VH9sZ3u7H5MA37d7AgoSgRoga54jE6i1VYRcUHj4ME+UMamp6mSEIPapvgrT9dcM00Rps+B8OOqqcelUUZU1QN9BZlchbxF7XoHLjTAiMgXA+7XU59oYTDPdvk3IBystSQtCa+t2lXBFuSPUBm0VPSy1oo7nbMDGWLocENE2R85Xis8cKsG64dLJzcbBG6d2wAdba4OWFuT7rTHc3YdCpj01CQmFp51iGYzqKXhXnvN1gosgFGR7yn9ulIOtbMWc6/kIj3u4zRSDrmmTFlaYau92NEwJu8vxI6Dq6mBlyKrTWqpYZuTMqPpSaNOp7ltSlj+BwfB2u/VWbRPM3UTAvbFglZV0embmqSlKOuQwZqoEV4J/KKMLIKknAXV7tTeITH520C7Rh".to_string()
+        ];
+        let encrypted_note = TransmittedNoteCiphertext::from_base64(&note_ct[0]).unwrap();
+        
+        // test receiver decryption
+        match try_note_decryption(&PreparedIncomingViewingKey::new(&fvk.ivk()), &encrypted_note) {
+            Some(decrypted_note) => println!("{}", serde_json::to_string(&decrypted_note).unwrap()),
+            None => panic!("Note decryption failed"),
+        }
     }
 }

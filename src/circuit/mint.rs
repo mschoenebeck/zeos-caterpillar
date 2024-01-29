@@ -8,14 +8,14 @@ use super::{ecc, pedersen_hash, OrExt};
 /// This is an instance of the `Mint` circuit.
 pub struct Mint
 {
-    /// The EOSIO account this note is associated with (Mint: sender, Transfer: 0, Burn: receiver, Auth: == code)
+    /// The EOSIO account this note is associated with (Mint: sender, Transfer: 0, Burn: receiver, Auth: == contract)
     pub account: Option<u64>,
     /// The amount (FT) or ID (NFT) of the note, 0 if AT
     pub value: Option<u64>,
     /// The symbl of the note, 0 if NFT/AT
     pub symbol: Option<u64>,
-    /// The code of issuing smart contract of the note
-    pub code: Option<u64>,
+    /// The issuing smart contract of the note
+    pub contract: Option<u64>,
 
     /// The payment address associated with the note
     pub address: Option<Address>,
@@ -58,14 +58,14 @@ impl Circuit<bls12_381::Scalar> for Mint
         )?;
         inputs2_bits.extend(symbol_bits.clone());
 
-        // note code to boolean bit vector
-        let code_bits = boolean::u64_into_boolean_vec_le(
-            cs.namespace(|| "code"),
-            self.code
+        // note contract to boolean bit vector
+        let contract_bits = boolean::u64_into_boolean_vec_le(
+            cs.namespace(|| "contract"),
+            self.contract
         )?;
-        inputs2_bits.extend(code_bits.clone());
+        inputs2_bits.extend(contract_bits.clone());
 
-        // append inputs bits (account, value, symbol, code) to note preimage
+        // append inputs bits (account, value, symbol, contract) to note preimage
         note_preimage.extend(inputs3_bits.clone());
         note_preimage.extend(inputs2_bits.clone());
 
@@ -171,18 +171,18 @@ impl Circuit<bls12_381::Scalar> for Mint
             account_num = account_num.add_bool_with_coeff(CS::one(), bit, coeff);
             coeff = coeff.double();
         }
-        // Compute code's value as a linear combination of the bits.
-        let mut code_num = Num::zero();
+        // Compute contract's value as a linear combination of the bits.
+        let mut contract_num = Num::zero();
         let mut coeff = bls12_381::Scalar::one();
-        for bit in &code_bits
+        for bit in &contract_bits
         {
-            code_num = code_num.add_bool_with_coeff(CS::one(), bit, coeff);
+            contract_num = contract_num.add_bool_with_coeff(CS::one(), bit, coeff);
             coeff = coeff.double();
         }
-        // enforce: AUTH * (code - account) = 0
+        // enforce: AUTH * (contract - account) = 0
         cs.enforce(
-            || "conditionally enforce 0 = AUTH * (code - account)",
-            |lc| lc + &account_num.lc(bls12_381::Scalar::one()) - &code_num.lc(bls12_381::Scalar::one()),
+            || "conditionally enforce 0 = AUTH * (contract - account)",
+            |lc| lc + &account_num.lc(bls12_381::Scalar::one()) - &contract_num.lc(bls12_381::Scalar::one()),
             |lc| lc + &auth.lc(CS::one(), bls12_381::Scalar::one()),
             |lc| lc,
         );
@@ -192,7 +192,7 @@ impl Circuit<bls12_381::Scalar> for Mint
             64 +    // account
             64 +    // value
             64 +    // symbol
-            64 +    // code
+            64 +    // contract
             256 +   // g_d
             256     // pk_d
         );
@@ -227,7 +227,7 @@ impl Circuit<bls12_381::Scalar> for Mint
         // the u-coordinate is an injective encoding for
         // elements in the prime-order subgroup.
         cm.get_u().inputize(cs.namespace(|| "commitment"))?;
-        // expose inputs2 contents (value, symbol and code) as one input vector
+        // expose inputs2 contents (value, symbol and contract) as one input vector
         multipack::pack_into_inputs(cs.namespace(|| "pack inputs2 contents"), &inputs2_bits)?;
         // expose inputs3 contents (account) as one input vector
         multipack::pack_into_inputs(cs.namespace(|| "pack inputs3 contents"), &inputs3_bits)?;
@@ -241,7 +241,7 @@ mod tests
 {
     use crate::note::{Note, Rseed};
     use crate::keys::{SpendingKey, FullViewingKey};
-    use crate::eosio::{Asset, Name, Symbol};
+    use crate::eosio::{Asset, Name, Symbol, ExtendedAsset};
     use crate::contract::AffineVerifyingKeyBytesLE;
     use bls12_381::Scalar;
     use bls12_381::Bls12;
@@ -263,14 +263,13 @@ mod tests
         let mut rng = OsRng.clone();
         let (sk, _, n) = Note::dummy(
             &mut rng,
-            Asset::from_string(&"1234567890987654321".to_string()),
-            None
+            ExtendedAsset::from_string(&"1234567890987654321@atomicassets".to_string())
         );
-        let (_sk_dummy, _, _) = Note::dummy(&mut rng, None, None);
+        let (_sk_dummy, _, _) = Note::dummy(&mut rng, None);
         let mut inputs2_contents = [0; 24];
         inputs2_contents[0..8].copy_from_slice(&n.amount().to_le_bytes());
         inputs2_contents[8..16].copy_from_slice(&n.symbol().raw().to_le_bytes());
-        inputs2_contents[16..24].copy_from_slice(&n.code().raw().to_le_bytes());
+        inputs2_contents[16..24].copy_from_slice(&n.contract().raw().to_le_bytes());
         let inputs2_contents = multipack::bytes_to_bits_le(&inputs2_contents);
         let inputs2_contents = multipack::compute_multipacking(&inputs2_contents);
         assert_eq!(inputs2_contents.len(), 1);
@@ -286,7 +285,7 @@ mod tests
             account: Some(n.account().raw()),
             value: Some(n.amount()),
             symbol: Some(n.symbol().raw()),
-            code: Some(n.code().raw()),
+            contract: Some(n.contract().raw()),
             address: Some(n.address()),
             rcm: Some(n.rcm()),
             proof_generation_key: Some(sk.proof_generation_key())
@@ -317,7 +316,7 @@ mod tests
             account: None,
             value: None,
             symbol: None,
-            code: None,
+            contract: None,
             address: None,
             rcm: None,
             proof_generation_key: None,
@@ -352,15 +351,15 @@ mod tests
         let params = Parameters::<Bls12>::read(f, false).unwrap();
 
         let mut rng = OsRng.clone();
-        let (_sk, _, n) = Note::dummy(&mut rng, Asset::new(0, Symbol(12)), None);
-        let (sk_dummy, _, _) = Note::dummy(&mut rng, None, None);
+        let (_sk, _, n) = Note::dummy(&mut rng, Some(ExtendedAsset::new(Asset::new(0, Symbol(12)).unwrap(), Name(0))));
+        let (sk_dummy, _, _) = Note::dummy(&mut rng, None);
 
         println!("create proof");
         let instance = Mint {
             account: Some(n.account().raw()),
             value: Some(n.amount()),
             symbol: Some(n.symbol().raw()),
-            code: Some(n.code().raw()),
+            contract: Some(n.contract().raw()),
             address: Some(n.address()),
             rcm: Some(n.rcm()),
             proof_generation_key: Some(sk_dummy.proof_generation_key()),
@@ -374,7 +373,7 @@ mod tests
         let mut inputs2_contents = [0; 24];
         inputs2_contents[0..8].copy_from_slice(&n.amount().to_le_bytes());
         inputs2_contents[8..16].copy_from_slice(&n.symbol().raw().to_le_bytes());
-        inputs2_contents[16..24].copy_from_slice(&n.code().raw().to_le_bytes());
+        inputs2_contents[16..24].copy_from_slice(&n.contract().raw().to_le_bytes());
         let inputs2_contents = multipack::bytes_to_bits_le(&inputs2_contents);
         let inputs2_contents: Vec<Scalar> = multipack::compute_multipacking(&inputs2_contents);
         assert_eq!(inputs2_contents.len(), 1);
@@ -414,8 +413,7 @@ mod tests
             0,
             recipient,
             Name(0),
-            Asset::from_string(&"5000.0000 EOS".to_string()).unwrap(),
-            Name::from_string(&"eosio.token".to_string()).unwrap(),
+            ExtendedAsset::from_string(&"5000.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
             [0; 512]
         );
@@ -425,7 +423,7 @@ mod tests
             account: Some(note.account().raw()),
             value: Some(note.amount()),
             symbol: Some(note.symbol().raw()),
-            code: Some(note.code().raw()),
+            contract: Some(note.contract().raw()),
             address: Some(note.address()),
             rcm: Some(note.rcm()),
             proof_generation_key: Some(sk_alice.proof_generation_key()),
@@ -439,7 +437,7 @@ mod tests
         let mut inputs2_contents = [0; 24];
         inputs2_contents[0..8].copy_from_slice(&note.amount().to_le_bytes());
         inputs2_contents[8..16].copy_from_slice(&note.symbol().raw().to_le_bytes());
-        inputs2_contents[16..24].copy_from_slice(&note.code().raw().to_le_bytes());
+        inputs2_contents[16..24].copy_from_slice(&note.contract().raw().to_le_bytes());
         let inputs2_contents = multipack::bytes_to_bits_le(&inputs2_contents);
         let inputs2_contents: Vec<Scalar> = multipack::compute_multipacking(&inputs2_contents);
         assert_eq!(inputs2_contents.len(), 1);

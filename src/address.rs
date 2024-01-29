@@ -106,7 +106,7 @@ impl Address {
         let bytes: [u8; 43] = Vec::<u8>::from_base32(&data)?[0..43].try_into().expect("from_bech32m: incorrect length");
         assert_eq!(hrp, "za");
         assert_eq!(variant, Variant::Bech32m);
-        Ok(Address::from_bytes(&bytes)?)
+        Ok(Self::from_bytes(&bytes)?)
     }
 
     /// creates a dummy address
