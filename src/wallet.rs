@@ -1,7 +1,7 @@
-use chrono::DateTime;
+use chrono::{DateTime, Local};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 use lazy_static::lazy_static;
 use serde::{Serialize, Deserialize};
@@ -68,6 +68,15 @@ pub struct Wallet
 
     // storage of all unpublished notes
     unpublished_notes: HashMap<u64, HashMap<String, Vec<String>>>
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HistoryTransaction
+{
+    pub tx_type: String,
+    pub date_time: String,
+    pub tx_fee: String,
+    pub account_asset_memo: Vec<(String, String, String)>  // asset, receiver, memo
 }
 
 impl Wallet
@@ -559,6 +568,103 @@ impl Wallet
         }
 
         (ats_received << 16) | (nfts_received << 8) | fts_received
+    }
+
+    pub fn transaction_history(&self) -> Vec<HistoryTransaction>
+    {
+        let mut history = vec![];
+        let mut received = self.unspent_notes.clone();
+        received.append(&mut self.spent_notes.clone());
+        received.sort_by(|a, b| b.wallet_ts().cmp(&a.wallet_ts()));
+        let mut sent = self.outgoing_notes.clone();
+        sent.sort_by(|a, b| b.wallet_ts().cmp(&a.wallet_ts()));
+        while !received.is_empty() || !sent.is_empty()
+        {
+            let mut htx = HistoryTransaction{
+                tx_type: "".to_string(),
+                date_time: "".to_string(),
+                tx_fee: "".to_string(),
+                account_asset_memo: vec![]
+            };
+            let mut tx = vec![];
+
+            if !received.is_empty() && !sent.is_empty()
+            {
+                if sent[0].wallet_ts() <= received[0].wallet_ts()
+                {
+                    tx.push(sent.remove(0));
+                    while !sent.is_empty() && sent[0].wallet_ts() == tx[0].wallet_ts()
+                    {
+                        tx.push(sent.remove(0));
+                    }
+                    htx.tx_type = "Sent".to_string();
+                    htx.date_time = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].wallet_ts())).format("%Y-%m-%d %H:%M:%S").to_string();
+                }
+                else
+                {
+                    tx.push(received.remove(0));
+                    while !received.is_empty() && received[0].wallet_ts() == tx[0].wallet_ts()
+                    {
+                        tx.push(received.remove(0));
+                    }
+                    htx.tx_type = "Received".to_string();
+                    htx.date_time = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].wallet_ts())).format("%Y-%m-%d %H:%M:%S").to_string();
+                }
+
+            }
+            else if !received.is_empty() && sent.is_empty()
+            {
+                tx.push(received.remove(0));
+                while !received.is_empty() && received[0].wallet_ts() == tx[0].wallet_ts()
+                {
+                    tx.push(received.remove(0));
+                }
+                htx.tx_type = "Received".to_string();
+                htx.date_time = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].wallet_ts())).format("%Y-%m-%d %H:%M:%S").to_string();
+            }
+            else if received.is_empty() && !sent.is_empty()
+            {
+                tx.push(sent.remove(0));
+                while !sent.is_empty() && sent[0].wallet_ts() == tx[0].wallet_ts()
+                {
+                    tx.push(sent.remove(0));
+                }
+                htx.tx_type = "Sent".to_string();
+                htx.date_time = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].wallet_ts())).format("%Y-%m-%d %H:%M:%S").to_string();
+            }
+
+            for n in tx.iter()
+            {
+                if !n.note().memo().eq(&MEMO_CHANGE_NOTE)
+                {
+                    if n.note().account().eq(&self.alias_authority.actor)
+                    {
+                        htx.tx_fee = n.note().asset().quantity().to_string();
+                    }
+                    else if n.note().account().raw() != 0
+                    {
+                        htx.account_asset_memo.push((
+                            n.note().account().to_string(),
+                            n.note().asset().to_string() + &if htx.tx_type.eq("Received") { " (@".to_owned() + &n.note().address().to_bech32m().unwrap() + ")" } else { "".to_string() },
+                            String::from_utf8(n.note().memo()[0..{let len = n.note().memo().iter().position(|&c| c == 0); if len.is_none() {512} else {len.unwrap()}}].to_vec()).unwrap()
+                        ));
+                    }
+                    else
+                    {
+                        htx.account_asset_memo.push((
+                            if htx.tx_type.eq("Sent") { n.note().address().to_bech32m().unwrap() } else { "".to_string() },
+                            n.note().asset().to_string() + &if htx.tx_type.eq("Received") { " (@".to_owned() + &n.note().address().to_bech32m().unwrap() + ")" } else { "".to_string() },
+                            String::from_utf8(n.note().memo()[0..{let len = n.note().memo().iter().position(|&c| c == 0); if len.is_none() {512} else {len.unwrap()}}].to_vec()).unwrap()
+                        ));
+                    }
+                }
+            }
+            if !htx.account_asset_memo.is_empty()
+            {
+                history.push(htx);
+            }
+        }
+        history
     }
 
     // Merkle Tree must be up-to-date before calling this function!

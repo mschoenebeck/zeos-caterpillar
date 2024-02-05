@@ -481,6 +481,25 @@ pub extern fn wallet_unpublished_notes_json(
 
 #[cfg(target_os = "linux")]
 #[no_mangle]
+pub extern fn wallet_transaction_history_json(
+    p_wallet: *mut Wallet,
+    pretty: bool
+) -> *const libc::c_char
+{
+    let wallet = unsafe {
+        assert!(!p_wallet.is_null());
+        &mut *p_wallet
+    };
+
+    let c_string = CString::new(
+        if pretty { serde_json::to_string_pretty(&wallet.transaction_history()).unwrap() }
+        else { serde_json::to_string(&wallet.transaction_history()).unwrap() }
+    ).expect("CString::new failed");
+    c_string.into_raw() // Move ownership to C
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
 pub extern fn wallet_addresses_json(
     p_wallet: *mut Wallet,
     pretty: bool
