@@ -322,6 +322,9 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
 
         // expose the symbol commitment
         scm.get_u().inputize(cs.namespace(|| "symbol commitment"))?;
+        //let mut scm_bits = scm.get_u().to_bits_le(cs.namespace(|| "scm into bits"))?.clone();
+        //assert_eq!(scm_bits.len(), 255);
+        //scm_bits.truncate(len)
 
         // note b account to boolean bit vector
         let account_b_bits = boolean::u64_into_boolean_vec_le(

@@ -921,7 +921,52 @@ pub struct Action
     pub account: Name,
     pub name: Name,
     pub authorization: Vec<Authorization>,
-    pub data: Value,
+    pub data: Value
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct PackedAction
+{
+    pub account: Name,
+    pub name: Name,
+    pub authorization: Vec<Authorization>,
+    #[serde(with = "hex::serde")]
+    pub data: Vec<u8>
+}
+
+// equivalent of: eosiolib/core/eosio/varint.hpp: 204
+pub fn pack_vec_len(l: usize) -> Vec<u8>
+{
+    let mut v = vec![];
+    let mut val = l as u64;
+    loop {
+        let mut b = (val & 0x7f) as u8;
+        val >>= 7;
+        b |= ((val > 0) as u8) << 7;
+        v.push(b);
+        if val == 0 { break; }
+    }
+    v
+}
+// equivalent of: eosio::pack(vector<eosio::action>)
+pub fn pack(actions: Vec<PackedAction>) -> Vec<u8>
+{
+    let mut v = vec![];
+    v.extend(pack_vec_len(actions.len()));
+    for pa in actions.iter()
+    {
+        v.extend(pa.account.raw().to_le_bytes());
+        v.extend(pa.name.raw().to_le_bytes());
+        v.extend(pack_vec_len(pa.authorization.len()));
+        for auth in pa.authorization.iter()
+        {
+            v.extend(auth.actor.raw().to_le_bytes());
+            v.extend(auth.permission.raw().to_le_bytes());
+        }
+        v.extend(pack_vec_len(pa.data.len()));
+        v.extend(pa.data.iter());
+    }
+    v
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1057,5 +1102,34 @@ mod tests
         let act: Action = serde_json::from_str(&act_str).unwrap();
         let pls: PlsFtTransfer = serde_json::from_value(act.data).unwrap();
         println!("{:?}", pls);
+    }
+
+    #[test]
+    fn pack_packed_actions()
+    {
+        {
+            let mut actions = vec![];
+            actions.push(PackedAction{
+                account: Name::from_string(&"eosio.token".to_string()).unwrap(),
+                name: Name::from_string(&"transfer".to_string()).unwrap(),
+                authorization: vec![Authorization{actor: Name::from_string(&"zeosexchange".to_string()).unwrap(), permission: Name::from_string(&"active".to_string()).unwrap()}],
+                data: hex::decode("a0d8340d7585a9fae091d9ee5682a9faa08601000000000004454f53000000000474657374").unwrap()
+            });
+            let bytes = pack(actions);
+            assert_eq!("0100a6823403ea3055000000572d3ccdcd01a0d8340d7585a9fa00000000a8ed323225a0d8340d7585a9fae091d9ee5682a9faa08601000000000004454f53000000000474657374", hex::encode(bytes));
+            //println!("{}", hex::encode(bytes));
+        }
+        {
+            let mut actions = vec![];
+            actions.push(PackedAction{
+                account: Name::from_string(&"eosio.token".to_string()).unwrap(),
+                name: Name::from_string(&"transfer".to_string()).unwrap(),
+                authorization: vec![Authorization{actor: Name::from_string(&"zeosexchange".to_string()).unwrap(), permission: Name::from_string(&"active".to_string()).unwrap()}],
+                data: hex::decode("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap()
+            });
+            let bytes = pack(actions);
+            assert_eq!("0100a6823403ea3055000000572d3ccdcd01a0d8340d7585a9fa00000000a8ed3232ac02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", hex::encode(bytes));
+            //println!("{}", hex::encode(bytes));
+        }
     }
 }

@@ -112,6 +112,7 @@ impl Note {
     /// Generates a dummy spent note.
     pub fn dummy(
         rng: &mut impl RngCore,
+        account: Option<Name>,
         asset: Option<ExtendedAsset>,
     ) -> (SpendingKey, FullViewingKey, Self) {
         let sk = SpendingKey::random(rng);
@@ -123,7 +124,7 @@ impl Note {
         let note = Note::from_parts(
             0,
             recipient,
-            Name(0),
+            account.unwrap_or_else(|| Name(0)),
             asset.unwrap_or_else(|| ExtendedAsset::new(Asset::new(0, Symbol(0)).unwrap(), Name(0))),
             Rseed(bytes),
             [0; 512]
@@ -525,7 +526,7 @@ mod tests
     {
         let mut rng = OsRng.clone();
         let a = ExtendedAsset::from_string(&"5000.0000 EOS@eosio.token".to_string()).unwrap();
-        let (_, _, n) = Note::dummy(&mut rng, Some(a));
+        let (_, _, n) = Note::dummy(&mut rng, None, Some(a));
 
         let mut v = vec![];
 

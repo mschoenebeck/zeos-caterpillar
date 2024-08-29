@@ -2,7 +2,7 @@
 name = "zeos-caterpillar"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.80"
 
 [lib]
 name = "zeos_caterpillar"
@@ -27,7 +27,7 @@ constant_time_eq = "0.2.5"
 ff = "0.13"
 fpe = "0.5"
 group = { version = "0.13", features = ["wnaf-memuse"] }
-hex = "0.4.3"
+hex = { version = "0.4.3", features = ["serde"] }
 jubjub = "0.10"
 lazy_static = "1"
 libc = "0.2.147"

@@ -645,7 +645,6 @@ fn state_words_to_bytes(state_words: &[Word; 8]) -> [u8; OUTBYTES] {
     bytes
 }
 
-#[cfg(feature = "std")]
 impl std::io::Write for State {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.update(buf);

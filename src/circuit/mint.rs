@@ -1,6 +1,8 @@
 use bellman::{Circuit, ConstraintSystem, SynthesisError};
-use bellman::gadgets::{blake2s, boolean, boolean::Boolean, multipack, num::Num};
+use bellman::gadgets::{blake2s, boolean, boolean::Boolean, boolean::AllocatedBit, multipack, num::Num};
 use ff::PrimeField;
+use crate::circuit::conditionally_swap_u256;
+use crate::circuit::u256_into_boolean_vec_le;
 use crate::{address::Address, keys::ProofGenerationKey};
 use super::constants::{NOTE_COMMITMENT_RANDOMNESS_GENERATOR, PROOF_GENERATION_KEY_GENERATOR};
 use super::{ecc, pedersen_hash, OrExt};
@@ -10,6 +12,8 @@ pub struct Mint
 {
     /// The EOSIO account this note is associated with (Mint: sender, Transfer: 0, Burn: receiver, Auth: == contract)
     pub account: Option<u64>,
+    /// auth token data hash
+    pub auth_hash: Option<[u64; 4]>,
     /// The amount (FT) or ID (NFT) of the note, 0 if AT
     pub value: Option<u64>,
     /// The symbl of the note, 0 if NFT/AT
@@ -35,14 +39,12 @@ impl Circuit<bls12_381::Scalar> for Mint
     {
         let mut note_preimage = vec![];
         let mut inputs2_bits = vec![];
-        let mut inputs3_bits = vec![];
 
         // note account to boolean bit vector
         let account_bits = boolean::u64_into_boolean_vec_le(
             cs.namespace(|| "account"),
             self.account
         )?;
-        inputs3_bits.extend(account_bits.clone());
 
         // note value to boolean bit vector
         let value_bits = boolean::u64_into_boolean_vec_le(
@@ -66,7 +68,7 @@ impl Circuit<bls12_381::Scalar> for Mint
         inputs2_bits.extend(contract_bits.clone());
 
         // append inputs bits (account, value, symbol, contract) to note preimage
-        note_preimage.extend(inputs3_bits.clone());
+        note_preimage.extend(account_bits.clone());
         note_preimage.extend(inputs2_bits.clone());
 
         // create AUTH bit: if value == 0 && symbol == 0 (i.e. if no bit in value_bits nor in symbol_bits is set) then AUTH = 1 else AUTH = 0
@@ -229,7 +231,33 @@ impl Circuit<bls12_381::Scalar> for Mint
         cm.get_u().inputize(cs.namespace(|| "commitment"))?;
         // expose inputs2 contents (value, symbol and contract) as one input vector
         multipack::pack_into_inputs(cs.namespace(|| "pack inputs2 contents"), &inputs2_bits)?;
-        // expose inputs3 contents (account) as one input vector
+
+        // auth data hash to boolean bit vector
+        let auth_hash_bits = u256_into_boolean_vec_le(
+            cs.namespace(|| "auth_hash"),
+            self.auth_hash
+        )?;
+        // account (plus zero) bits to boolean vector
+        let zero_bits = boolean::u64_into_boolean_vec_le(
+            cs.namespace(|| "zero bits"),
+            Some(0)
+        )?;
+        let mut account_zero_bits = vec![];
+        account_zero_bits.extend(account_bits);
+        account_zero_bits.extend(zero_bits.clone());
+        account_zero_bits.extend(zero_bits.clone());
+        account_zero_bits.extend(zero_bits);
+        // inputs3 is either (account) or (auth_hash)
+        let auth_bit = AllocatedBit::alloc(cs.namespace(|| "auth bit"), auth.get_value())?;
+        let (mut inputs3_bits, _) = conditionally_swap_u256(
+            cs.namespace(|| "conditional swap of auth_hash_bits"),
+            &account_zero_bits,
+            &auth_hash_bits,
+            &auth_bit,
+        )?;
+        // erase MSB (truncate to 254)
+        inputs3_bits.truncate(254);
+        // expose inputs3 contents (either <account> extended with zero bits or <auth_hash>) as one input vector
         multipack::pack_into_inputs(cs.namespace(|| "pack inputs3 contents"), &inputs3_bits)?;
 
         Ok(())
@@ -258,14 +286,14 @@ mod tests
     use std::fs::File;
 
     #[test]
-    fn test_mint_circuit()
+    fn test_mint_circuit_utxo()
     {
         let mut rng = OsRng.clone();
         let (sk, _, n) = Note::dummy(
             &mut rng,
+            None,
             ExtendedAsset::from_string(&"1234567890987654321@atomicassets".to_string())
         );
-        let (_sk_dummy, _, _) = Note::dummy(&mut rng, None);
         let mut inputs2_contents = [0; 24];
         inputs2_contents[0..8].copy_from_slice(&n.amount().to_le_bytes());
         inputs2_contents[8..16].copy_from_slice(&n.symbol().raw().to_le_bytes());
@@ -283,6 +311,66 @@ mod tests
 
         let instance = Mint {
             account: Some(n.account().raw()),
+            auth_hash: Some([0; 4]),
+            value: Some(n.amount()),
+            symbol: Some(n.symbol().raw()),
+            contract: Some(n.contract().raw()),
+            address: Some(n.address()),
+            rcm: Some(n.rcm()),
+            proof_generation_key: Some(sk.proof_generation_key())
+        };
+
+        instance.synthesize(&mut cs).unwrap();
+
+        assert!(cs.is_satisfied());
+        println!("num constraints: {}", cs.num_constraints());
+        println!("cs hash: {}", cs.hash());
+
+        assert_eq!(
+            cs.get("randomization of note commitment/u3/num").to_repr(),
+            n.commitment().to_bytes()
+        );
+
+        assert_eq!(cs.num_inputs(), 4);
+        assert_eq!(cs.get_input(0, "ONE"), bls12_381::Scalar::one());
+        assert_eq!(cs.get_input(1, "commitment/input variable").to_repr(), n.commitment().to_bytes());
+        assert_eq!(cs.get_input(2, "pack inputs2 contents/input 0"), inputs2_contents[0]);
+        assert_eq!(cs.get_input(3, "pack inputs3 contents/input 0"), inputs3_contents[0]);
+    }
+
+    #[test]
+    fn test_mint_circuit_auth()
+    {
+        let mut rng = OsRng.clone();
+        let code = Name::from_string(&String::from("zeosexchange")).unwrap();
+        let (sk, _, n) = Note::dummy(
+            &mut rng,
+            Some(code),
+            Some(ExtendedAsset::new(Asset::new(0, Symbol(0)).unwrap(), code))
+        );
+        let mut inputs2_contents = [0; 24];
+        inputs2_contents[16..24].copy_from_slice(&n.contract().raw().to_le_bytes());
+        let inputs2_contents = multipack::bytes_to_bits_le(&inputs2_contents);
+        let inputs2_contents = multipack::compute_multipacking(&inputs2_contents);
+        assert_eq!(inputs2_contents.len(), 1);
+        let hash: [u64; 4] = [42; 4];
+        let mut inputs3_contents = [0; 32];
+        inputs3_contents[0..8].copy_from_slice(&hash[0].to_le_bytes());
+        inputs3_contents[8..16].copy_from_slice(&hash[1].to_le_bytes());
+        inputs3_contents[16..24].copy_from_slice(&hash[2].to_le_bytes());
+        inputs3_contents[24..32].copy_from_slice(&hash[3].to_le_bytes());
+        let mut inputs3_contents = multipack::bytes_to_bits_le(&inputs3_contents);
+        inputs3_contents.truncate(254);
+        let inputs3_contents_: Vec<Scalar> = multipack::compute_multipacking(&inputs3_contents);
+        assert_eq!(inputs3_contents_.len(), 1);
+        let mut inputs3_contents = vec![];
+        inputs3_contents.extend(inputs3_contents_.clone());
+
+        let mut cs = TestConstraintSystem::new();
+
+        let instance = Mint {
+            account: Some(n.account().raw()),
+            auth_hash: Some(hash),
             value: Some(n.amount()),
             symbol: Some(n.symbol().raw()),
             contract: Some(n.contract().raw()),
@@ -314,6 +402,7 @@ mod tests
     {
         let instance = Mint {
             account: None,
+            auth_hash: None,
             value: None,
             symbol: None,
             contract: None,
@@ -351,12 +440,13 @@ mod tests
         let params = Parameters::<Bls12>::read(f, false).unwrap();
 
         let mut rng = OsRng.clone();
-        let (_sk, _, n) = Note::dummy(&mut rng, Some(ExtendedAsset::new(Asset::new(0, Symbol(12)).unwrap(), Name(0))));
-        let (sk_dummy, _, _) = Note::dummy(&mut rng, None);
+        let (_sk, _, n) = Note::dummy(&mut rng, Some(Name(42)), Some(ExtendedAsset::new(Asset::new(0, Symbol(12)).unwrap(), Name(0))));
+        let (sk_dummy, _, _) = Note::dummy(&mut rng, None, None);
 
         println!("create proof");
         let instance = Mint {
             account: Some(n.account().raw()),
+            auth_hash: Some([0; 4]),
             value: Some(n.amount()),
             symbol: Some(n.symbol().raw()),
             contract: Some(n.contract().raw()),
@@ -421,6 +511,7 @@ mod tests
         println!("create proof");
         let instance = Mint {
             account: Some(note.account().raw()),
+            auth_hash: Some([0; 4]),
             value: Some(note.amount()),
             symbol: Some(note.symbol().raw()),
             contract: Some(note.contract().raw()),

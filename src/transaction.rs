@@ -1,5 +1,5 @@
 use crate::address::Address;
-use crate::eosio::{Name, Asset, Symbol, Transaction, Authorization, Action, ExtendedAsset};
+use crate::eosio::{pack, Action, Asset, Authorization, ExtendedAsset, Name, PackedAction, Symbol, Transaction};
 use crate::keys::{FullViewingKey, SpendingKey};
 use crate::note::nullifier::ExtractedNullifier;
 use crate::note::{Note, NoteEx, Rseed, ExtractedNoteCommitment};
@@ -124,6 +124,16 @@ pub struct AuthenticateDesc
 {
     pub contract: Name,
     pub auth_token: String,
+    pub actions: Vec<PackedActionDesc>,
+    pub burn: bool
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PackedActionDesc
+{
+    pub account: Name,
+    pub name: Name,
+    pub authorization: Vec<String>,
     pub data: String
 }
 
@@ -314,15 +324,19 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                             }
                         );
 
-                        // check if this note is an Auth token
+                        // check if this note is an auth token
                         if n.quantity().eq(&Asset::from_string(&"0".to_string()).unwrap())
                         {
                             if !n.contract().eq(&n.account()) { Err(TransactionError::AuthTokenContractAccount)?; }
                             if desc.to.eq(&"$SELF") { auth_tokens.push(n.clone()); }
+                            // if this auth note shall be published we need to add the 'publishnotes' fee
+                            if desc.publish_note { fee += fees.get(&Name::from_string(&"publishnotes".to_string()).unwrap()).unwrap().amount(); }
                         }
-
-                        // add fee
-                        fee += fees.get(&Name::from_string(&"mint".to_string()).unwrap()).unwrap().amount();
+                        else
+                        {
+                            // add mint fee
+                            fee += fees.get(&Name::from_string(&"mint".to_string()).unwrap()).unwrap().amount();
+                        }
 
                         serde_json::to_value(ResolvedMintDesc{
                             note: n,
@@ -368,7 +382,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
 
                                 spend_output.push(ResolvedSpendOutputDesc{
                                     note_a: nft.clone(),
-                                    note_b: if note.account().eq(&Name(0)) { note.clone() } else { Note::dummy(&mut rng, Some(ExtendedAsset::new(Asset::new(0, desc.symbol.clone()).unwrap(), desc.contract))).2 },
+                                    note_b: if note.account().eq(&Name(0)) { note.clone() } else { Note::dummy(&mut rng, None, Some(ExtendedAsset::new(Asset::new(0, desc.symbol.clone()).unwrap(), desc.contract))).2 },
                                     publish_note_b: if note.account().eq(&Name(0)) { srd.publish_note } else { false },
                                     unshielded_outputs: if note.account().eq(&Name(0)) { vec![] } else { vec![(note, srd.publish_note)] },
                                 })
@@ -457,7 +471,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                             {
                                 spend_output.push(ResolvedSpendOutputDesc{
                                     note_a: notes_to_spend[i].clone(),
-                                    note_b: if i < shielded_outputs.len() { shielded_outputs[i].0.clone() } else { Note::dummy(&mut rng, Some(ExtendedAsset::new(Asset::new(0, desc.symbol.clone()).unwrap(), desc.contract))).2 },
+                                    note_b: if i < shielded_outputs.len() { shielded_outputs[i].0.clone() } else { Note::dummy(&mut rng, None, Some(ExtendedAsset::new(Asset::new(0, desc.symbol.clone()).unwrap(), desc.contract))).2 },
                                     publish_note_b: if i < shielded_outputs.len() { shielded_outputs[i].1 } else { false },
                                     // add unshielded outputs to first spend_output
                                     unshielded_outputs: if i == 0 { unshielded_outputs.clone() } else { vec![] },
@@ -512,9 +526,16 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                         // add fee
                         fee += fees.get(&Name::from_string(&"authenticate".to_string()).unwrap()).unwrap().amount();
 
+                        // TODO: proper error handling with '?' instead of 'unwrap()'
                         serde_json::to_value(ResolvedAuthenticateDesc{
                             auth_note: auth_token,
-                            data: hex::decode(desc.data)?
+                            actions: desc.actions.iter().map(|pad| PackedAction{
+                                account: pad.account,
+                                name: pad.name,
+                                authorization: pad.authorization.iter().map(|auth| Authorization::from_string(auth).unwrap()).collect(),
+                                data: hex::decode(pad.data.clone()).unwrap()
+                            }).collect(),
+                            burn: desc.burn
                         })?
                     }
                 }),
@@ -794,7 +815,8 @@ pub struct ResolvedOutputDesc
 pub struct ResolvedAuthenticateDesc
 {
     pub auth_note: Note,
-    pub data: Vec<u8>
+    pub actions: Vec<PackedAction>,
+    pub burn: bool
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -857,28 +879,34 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                 // bundle all consecutive mints into one sequence
                 let mut mints = vec![];
                 let mut note_cts = vec![];
+                let mut auth_note_cts = vec![];
                 while i < rztx.rzactions.len() && rztx.rzactions[i].name == Name(10639630974360485888)
                 {
                     let data: ResolvedMintDesc = serde_json::from_value(rztx.rzactions[i].data.clone())?;
 
-                    mints.push(PlsMint{
-                        cm: crate::contract::ScalarBytes(data.note.commitment().to_bytes()),
-                        value: data.note.amount(),
-                        symbol: data.note.symbol().clone(),
-                        contract: data.note.contract().clone(),
-                        proof: {
-                            let instance = Mint {
-                                account: Some(data.note.account().raw()),
-                                value: Some(data.note.amount()),
-                                symbol: Some(data.note.symbol().raw()),
-                                contract: Some(data.note.contract().raw()),
-                                address: Some(data.note.address()),
-                                rcm: Some(data.note.rcm()),
-                                proof_generation_key: Some(pgk.clone()),
-                            };
-                            AffineProofBytesLE::from(create_random_proof(instance, mint_params, &mut OsRng)?)
-                        }
-                    });
+                    // only add a mint action if this is NOT an auth note
+                    if !data.note.quantity().eq(&Asset::from_string(&"0".to_string()).unwrap())
+                    {
+                        mints.push(PlsMint{
+                            cm: crate::contract::ScalarBytes(data.note.commitment().to_bytes()),
+                            value: data.note.amount(),
+                            symbol: data.note.symbol().clone(),
+                            contract: data.note.contract().clone(),
+                            proof: {
+                                let instance = Mint {
+                                    account: Some(data.note.account().raw()),
+                                    auth_hash: Some([0; 4]),
+                                    value: Some(data.note.amount()),
+                                    symbol: Some(data.note.symbol().raw()),
+                                    contract: Some(data.note.contract().raw()),
+                                    address: Some(data.note.address()),
+                                    rcm: Some(data.note.rcm()),
+                                    proof_generation_key: Some(pgk.clone()),
+                                };
+                                AffineProofBytesLE::from(create_random_proof(instance, mint_params, &mut OsRng)?)
+                            }
+                        });
+                    }
 
                     let note_ct = {
                         let esk = derive_esk(&data.note).unwrap();
@@ -894,7 +922,8 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
 
                     if data.publish_note
                     {
-                        note_cts.push(note_ct);
+                        if data.note.quantity().eq(&Asset::from_string(&"0".to_string()).unwrap()) { auth_note_cts.push(note_ct); }
+                        else { note_cts.push(note_ct); }
                     }
                     else
                     {
@@ -924,15 +953,30 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                     i = i + 1;
                 }
 
-                tx.actions.push(Action{
-                    account: rztx.alias_authority.actor,
-                    name: Name(10639630974360485888), // mint
-                    authorization: vec![rztx.alias_authority.clone()],
-                    data: serde_json::to_value(PlsMintAction{
-                        actions: mints,
-                        note_ct: note_cts
-                    })?
-                });
+                if !mints.is_empty()
+                {
+                    tx.actions.push(Action{
+                        account: rztx.alias_authority.actor,
+                        name: Name(10639630974360485888), // mint
+                        authorization: vec![rztx.alias_authority.clone()],
+                        data: serde_json::to_value(PlsMintAction{
+                            actions: mints,
+                            note_ct: note_cts
+                        })?
+                    });
+                }
+
+                if !auth_note_cts.is_empty()
+                {
+                    tx.actions.push(Action{
+                        account: rztx.alias_authority.actor,
+                        name: Name(12578297992662373760), // publishnotes
+                        authorization: vec![rztx.alias_authority.clone()],
+                        data: serde_json::to_value(PlsPublishNotesAction{
+                            note_ct: auth_note_cts
+                        })?
+                    });
+                }
             }
 
             // spend
@@ -1262,10 +1306,18 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                         action: PlsAuthenticate{
                             cm: ScalarBytes(data.auth_note.commitment().to_bytes()),
                             contract: data.auth_note.contract().clone(),
-                            data: data.data,
+                            actions: data.actions.clone(),
+                            burn: if data.burn { 1 } else { 0 },
                             proof: {
                                 let instance = Mint {
                                     account: Some(data.auth_note.account().raw()),
+                                    auth_hash: {
+                                        let mut state = Blake2s7rParams::new().hash_length(32).personal(&[0; 8]).to_state();
+                                        state.update(&pack(data.actions));
+                                        let hash: [u8; 32] = state.finalize().as_bytes().try_into()?;
+                                        let hash = [u64::from_le_bytes(hash[0..8].try_into()?), u64::from_le_bytes(hash[8..16].try_into()?), u64::from_le_bytes(hash[16..24].try_into()?), u64::from_le_bytes(hash[24..32].try_into()?)];
+                                        Some(hash)
+                                    },
                                     value: Some(data.auth_note.amount()),
                                     symbol: Some(data.auth_note.symbol().raw()),
                                     contract: Some(data.auth_note.contract().raw()),
@@ -1634,6 +1686,7 @@ pub fn zsign_transfer_and_mint_transaction(
             proof: {
                 let circuit_instance = Mint {
                     account: Some(rm.note.account().raw()),
+                    auth_hash: Some([0; 4]),
                     value: Some(rm.note.amount()),
                     symbol: Some(rm.note.symbol().raw()),
                     contract: Some(rm.note.contract().raw()),
@@ -1788,7 +1841,15 @@ mod tests
                     "data": {
                         "contract": "zeosexchange",
                         "auth_token": "$AUTH0",
-                        "data": "08EDFEB6833CA8EDFEB6833C"
+                        "actions": [
+                            {
+                                "account": "eosio.token",
+                                "name": "transfer",
+                                "authorization": ["zeosexchange@active"],
+                                "data": "a0d8340d7585a9fae091d9ee5682a9faa08601000000000004454f53000000000474657374"
+                            }
+                        ],
+                        "burn": true
                     }
                 },
                 {

@@ -1,7 +1,7 @@
 use bellman::groth16::{Proof, VerifyingKey};
 use bls12_381::{Bls12, G1Affine, G2Affine};
 use serde::{Serialize, Deserialize, Serializer, Deserializer, de::Visitor, de};
-use crate::eosio::{Asset, Name, Symbol};
+use crate::eosio::{Asset, Name, PackedAction, Symbol};
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -377,7 +377,8 @@ pub struct PlsAuthenticate
 {
     pub cm: ScalarBytes,
     pub contract: Name,
-    pub data: Vec<u8>,
+    pub actions: Vec<PackedAction>,
+    pub burn: u8,
     pub proof: AffineProofBytesLE
 }
 
@@ -984,6 +985,7 @@ mod tests
         );
         let circuit_instance = Mint {
             account: Some(note.account().raw()),
+            auth_hash: Some([0; 4]),
             value: Some(note.amount()),
             symbol: Some(note.symbol().raw()),
             contract: Some(note.contract().raw()),

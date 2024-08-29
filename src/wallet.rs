@@ -741,8 +741,17 @@ impl Wallet
                         let index = self.unspent_notes.iter().position(|n| n.note().commitment().0.eq(&Scalar::from(a.cm.clone())));
                         if index.is_some()
                         {
-                            self.spent_notes.push(self.unspent_notes.remove(index.unwrap()));
-                            ats_spent += 1;
+                            if a.burn == 0
+                            {
+                                // normal access via auth token
+                                // TODO: log this somehow?
+                            }
+                            else
+                            {
+                                // auth note was burned
+                                self.spent_notes.push(self.unspent_notes.remove(index.unwrap()));
+                                ats_spent += 1;
+                            }
                         }
                     }
                 }
@@ -906,7 +915,7 @@ mod tests
         }
         println!("Wallet size: {}", w.size());
         assert!(w.note_exist_in_unspent(w.unspent_notes[0].note()));
-        assert!(!w.note_exist_in_unspent(&Note::dummy(&mut rng, None).2));
+        assert!(!w.note_exist_in_unspent(&Note::dummy(&mut rng, None, None).2));
 
         let mut v = vec![];
         assert!(w.write(&mut v).is_ok());

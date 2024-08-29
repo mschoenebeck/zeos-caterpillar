@@ -530,6 +530,7 @@ mod tests
         let mut rng = OsRng.clone();
         let (sk_a, fvk_a, note_a) = Note::dummy(
             &mut rng,
+            None,
             ExtendedAsset::from_string(&"1234567890987654321@atomicassets".to_string())
         );
 
@@ -575,10 +576,12 @@ mod tests
 
         let (_, _, note_b) = Note::dummy(
             &mut rng,
+            None,
             ExtendedAsset::from_string(&"1234567890987654321@atomicassets".to_string())
         );
         let (_, _, note_c) = Note::dummy(
             &mut rng,
+            None,
             ExtendedAsset::from_string(&"0@atomicassets".to_string())
         );
 
@@ -647,6 +650,7 @@ mod tests
         let mut rng = OsRng.clone();
         let (sk_a, fvk_a, note_a) = Note::dummy(
             &mut rng,
+            None,
             ExtendedAsset::from_string(&"1234567890987654321@atomicassets".to_string())
         );
 
@@ -692,10 +696,12 @@ mod tests
 
         let (_, _, note_b) = Note::dummy(
             &mut rng,
+            None,
             ExtendedAsset::from_string(&"1234567890987654321@atomiassets".to_string())
         );
         let (_, _, note_c) = Note::dummy(
             &mut rng,
+            None,
             ExtendedAsset::from_string(&"0@atomiassets".to_string())
         );
 
