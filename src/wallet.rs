@@ -404,17 +404,17 @@ impl Wallet
         vec![]
     }
 
-    pub fn authentication_tokens(&self, contract: &Name) -> Vec<NoteEx>
+    pub fn authentication_tokens(&self, contract: &Name, spent: bool) -> Vec<NoteEx>
     {
         if contract.raw() == 0
         {
             // select all auth tokens from all contracts
-            return self.unspent_notes.iter().map(|n| n.clone()).filter(|n| n.note().symbol().raw() == 0 && n.note().amount() == 0).collect();
+            return if spent { &self.spent_notes } else { &self.unspent_notes }.iter().map(|n| n.clone()).filter(|n| n.note().symbol().raw() == 0 && n.note().amount() == 0).collect();
         }
         if contract.raw() != 0
         {
             // select all auth tokens from this particular contract
-            return self.unspent_notes.iter().map(|n| n.clone()).filter(|n| n.note().contract().eq(&contract) && n.note().symbol().raw() == 0 && n.note().amount() == 0).collect()
+            return if spent { &self.spent_notes } else { &self.unspent_notes }.iter().map(|n| n.clone()).filter(|n| n.note().contract().eq(&contract) && n.note().symbol().raw() == 0 && n.note().amount() == 0).collect()
         }
         vec![]
     }
@@ -524,21 +524,24 @@ impl Wallet
             match try_note_decryption(&PreparedIncomingViewingKey::new(&fvk.ivk()), &encrypted_note) {
                 Some(note) => {
                     // Merkle tree must be up to date! We check if there's a leaf for this note and get it's array index in the merkle
-                    // tree. If there is no index (i.e. leaf), this note can't be valid and is discarded.
-                    let cm = note.commitment();
-                    let idx = self.merkle_tree.iter().find_map(|(key, val)| if val.0 == cm.to_bytes() { Some(key) } else { None });
-                    if idx.is_none() { continue; }
+                    // tree. If there is no index (i.e. leaf), this note can't be valid and is discarded. Only Auth Tokens have no merkle leaves!
+                    let tree_idx = if !note.is_auth_token() {
+                        let cm = note.commitment();
+                        let idx = self.merkle_tree.iter().find_map(|(key, val)| if val.0 == cm.to_bytes() { Some(key) } else { None });
+                        if idx.is_none() { continue; }
+                        *idx.unwrap()
+                    } else { 0 };
                     let note_ex = NoteEx::from_parts(
                         block_num,
                         block_ts,
                         wallet_ts,
-                        *idx.unwrap(),
+                        tree_idx,
                         note
                     );
                     // make sure a note is not added twice
                     if !self.note_exist_in_unspent(note_ex.note()) && !self.note_exist_in_spent(note_ex.note())
                     {
-                        if note_ex.note().symbol().raw() == 0 && note_ex.note().amount() == 0 { ats_received += 1; }
+                        if note_ex.note().is_auth_token() { ats_received += 1; }
                         else if note_ex.note().symbol().raw() == 0 && note_ex.note().amount() != 0 { nfts_received += 1; }
                         else { if !note_ex.note().memo().eq(&MEMO_CHANGE_NOTE) { fts_received += 1; } } // don't count 'change' notes
                         self.unspent_notes.push(note_ex);

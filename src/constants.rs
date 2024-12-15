@@ -9,8 +9,7 @@ use lazy_static::lazy_static;
 /// This is chosen to be some random string that we couldn't have anticipated when we designed
 /// the algorithm, for rigidity purposes.
 /// We deliberately use an ASCII hex string of 32 bytes here.
-pub const GH_FIRST_BLOCK: &[u8; 64] =
-    b"096b36a5804bfacef1691e173c366a47ff5ba84a44f26ddd7e8d9f79d5b42df0";
+pub const GH_FIRST_BLOCK: &[u8; 64] = b"096b36a5804bfacef1691e173c366a47ff5ba84a44f26ddd7e8d9f79d5b42df0";
 
 /// Merkle Tree Depth
 pub const MERKLE_TREE_DEPTH: usize = 3;

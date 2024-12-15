@@ -443,6 +443,7 @@ pub extern fn wallet_non_fungible_tokens_json(
 pub extern fn wallet_authentication_tokens_json(
     p_wallet: *mut Wallet,
     contract: u64,
+    spent: bool,
     pretty: bool
 ) -> *const libc::c_char
 {
@@ -451,7 +452,7 @@ pub extern fn wallet_authentication_tokens_json(
         &mut *p_wallet
     };
 
-    let v: Vec<String> = wallet.authentication_tokens(&Name(contract)).iter().map(|n| hex::encode(n.note().commitment().to_bytes()) + "@" + &n.note().contract().to_string()).collect();
+    let v: Vec<String> = wallet.authentication_tokens(&Name(contract), spent).iter().map(|n| hex::encode(n.note().commitment().to_bytes()) + "@" + &n.note().contract().to_string()).collect();
 
     let c_string = CString::new(
         if pretty { serde_json::to_string_pretty(&v).unwrap() }

@@ -104,7 +104,6 @@ pub struct MintDesc
 pub struct SpendSequenceDesc
 {
     pub contract: Name,
-    pub symbol: Symbol,
     pub change_to: String,
     pub publish_change_note: bool,
     pub to: Vec<SpendRecipientDesc>
@@ -114,7 +113,7 @@ pub struct SpendSequenceDesc
 pub struct SpendRecipientDesc
 {
     pub to: String,
-    pub amount: u64,
+    pub quantity: Asset,
     pub memo: String,
     pub publish_note: bool
 }
@@ -122,7 +121,6 @@ pub struct SpendRecipientDesc
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AuthenticateDesc
 {
-    pub contract: Name,
     pub auth_token: String,
     pub actions: Vec<PackedActionDesc>,
     pub burn: bool
@@ -355,11 +353,14 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                         let mut spend = vec![];
                         let mut output = vec![];
 
-                        if desc.symbol.raw() == 0 // NFT case
+                        // determine symbol of this 'spend' sequence from the first recipient (must have at least one)
+                        assert!(desc.to.len() > 0);
+                        let symbol = desc.to[0].quantity.symbol();
+                        if symbol.raw() == 0 // NFT case
                         {
                             for srd in desc.to.iter()
                             {
-                                let nft = select_nft_note(&mut unspent_notes, &Asset::new(srd.amount as i64, desc.symbol.clone()).unwrap());
+                                let nft = select_nft_note(&mut unspent_notes, &srd.quantity);
                                 if nft.is_none() { Err(TransactionError::NFTNotFound)? }
                                 // NFTs are always spent via the SpendOutput circuit (to prevent "splitting")
                                 let nft = nft.unwrap();
@@ -382,7 +383,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
 
                                 spend_output.push(ResolvedSpendOutputDesc{
                                     note_a: nft.clone(),
-                                    note_b: if note.account().eq(&Name(0)) { note.clone() } else { Note::dummy(&mut rng, None, Some(ExtendedAsset::new(Asset::new(0, desc.symbol.clone()).unwrap(), desc.contract))).2 },
+                                    note_b: if note.account().eq(&Name(0)) { note.clone() } else { Note::dummy(&mut rng, None, Some(ExtendedAsset::new(Asset::new(0, symbol.clone()).unwrap(), desc.contract))).2 },
                                     publish_note_b: if note.account().eq(&Name(0)) { srd.publish_note } else { false },
                                     unshielded_outputs: if note.account().eq(&Name(0)) { vec![] } else { vec![(note, srd.publish_note)] },
                                 })
@@ -396,7 +397,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
 
                             for srd in desc.to.iter()
                             {
-                                total_amount_out += srd.amount;
+                                total_amount_out += srd.quantity.amount();
 
                                 if !srd.to.eq(&"$SELF") && srd.to.len() <= 12 // unshielded recipient
                                 {
@@ -405,7 +406,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                                             0,
                                             Address::dummy(&mut rng),
                                             Name::from_string(&srd.to)?,
-                                            ExtendedAsset::new(Asset::new(srd.amount as i64, desc.symbol.clone()).unwrap(), desc.contract.clone()),
+                                            ExtendedAsset::new(srd.quantity.clone(), desc.contract.clone()),
                                             Rseed::new(&mut rng),
                                             {
                                                 let memo = insert_vars(&srd.memo, &wallet.default_address().unwrap().to_bech32m()?, &auth_tokens);
@@ -424,7 +425,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                                             0,
                                             if srd.to.eq(&"$SELF") { wallet.default_address().unwrap() } else { Address::from_bech32m(&srd.to)? },
                                             Name(0),
-                                            ExtendedAsset::new(Asset::new(srd.amount as i64, desc.symbol.clone()).unwrap(), desc.contract.clone()),
+                                            ExtendedAsset::new(srd.quantity.clone(), desc.contract.clone()),
                                             Rseed::new(&mut rng),
                                             {
                                                 let memo = insert_vars(&srd.memo, &wallet.default_address().unwrap().to_bech32m()?, &auth_tokens);
@@ -439,7 +440,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                             }
 
                             // select notes to spend
-                            let notes_to_spend = select_ft_notes(&mut unspent_notes, &Asset::new(total_amount_out as i64, desc.symbol.clone()).unwrap(), &desc.contract);
+                            let notes_to_spend = select_ft_notes(&mut unspent_notes, &Asset::new(total_amount_out as i64, symbol.clone()).unwrap(), &desc.contract);
                             if notes_to_spend.is_none() { Err(TransactionError::InsufficientFunds)? }
                             let (notes_to_spend, change_amount) = notes_to_spend.unwrap();
 
@@ -449,7 +450,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                                     0,
                                     if desc.change_to.eq(&"$SELF") { wallet.default_address().unwrap() } else { Address::from_bech32m(&desc.change_to)? },
                                     Name(0),
-                                    ExtendedAsset::new(Asset::new(change_amount as i64, desc.symbol.clone()).unwrap(), desc.contract.clone()),
+                                    ExtendedAsset::new(Asset::new(change_amount as i64, symbol.clone()).unwrap(), desc.contract.clone()),
                                     Rseed::new(&mut rng),
                                     MEMO_CHANGE_NOTE
                                 ),
@@ -471,7 +472,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                             {
                                 spend_output.push(ResolvedSpendOutputDesc{
                                     note_a: notes_to_spend[i].clone(),
-                                    note_b: if i < shielded_outputs.len() { shielded_outputs[i].0.clone() } else { Note::dummy(&mut rng, None, Some(ExtendedAsset::new(Asset::new(0, desc.symbol.clone()).unwrap(), desc.contract))).2 },
+                                    note_b: if i < shielded_outputs.len() { shielded_outputs[i].0.clone() } else { Note::dummy(&mut rng, None, Some(ExtendedAsset::new(Asset::new(0, symbol.clone()).unwrap(), desc.contract))).2 },
                                     publish_note_b: if i < shielded_outputs.len() { shielded_outputs[i].1 } else { false },
                                     // add unshielded outputs to first spend_output
                                     unshielded_outputs: if i == 0 { unshielded_outputs.clone() } else { vec![] },
@@ -1948,37 +1949,36 @@ mod tests
                     "name": "spend",
                     "data": {
                         "contract": "thezeostoken",
-                        "symbol": "4,EOS",
                         "change_to": "$SELF",
                         "publish_change_note": true,
                         "to": [
                             {
                                 "to": "mschoenebeck",
-                                "amount": 100000,
+                                "quantity": "10.0000 EOS",
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 20000,
+                                "quantity": "2.0000 EOS",
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 20000,
+                                "quantity": "2.0000 EOS",
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 10000,
+                                "quantity": "1.0000 EOS",
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 10000,
+                                "quantity": "1.0000 EOS",
                                 "memo": "",
                                 "publish_note": true
                             }
@@ -1989,13 +1989,12 @@ mod tests
                     "name": "spend",
                     "data": {
                         "contract": "atomicassets",
-                        "symbol": "0,",
                         "change_to": "$SELF",
                         "publish_change_note": true,
                         "to": [
                             {
                                 "to": "$SELF",
-                                "amount": 12345678987654321,
+                                "quantity": "12345678987654321",
                                 "memo": "",
                                 "publish_note": true
                             }

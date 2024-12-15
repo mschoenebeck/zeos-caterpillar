@@ -220,6 +220,16 @@ impl Note {
         &self.memo
     }
 
+    /// Is this note an NFT
+    pub fn is_nft(&self) -> bool {
+        self.symbol().raw() == 0
+    }
+
+    /// Is this note an NFT
+    pub fn is_auth_token(&self) -> bool {
+        self.symbol().raw() == 0 && self.amount() == 0
+    }
+
     /// Sets the amount of this note.
     pub fn set_amount(&mut self, amount: u64) {
         self.asset = ExtendedAsset::new(Asset::new(amount as i64, self.symbol().clone()).unwrap(), self.contract().clone())
