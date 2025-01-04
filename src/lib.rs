@@ -77,6 +77,13 @@ extern "C"
     fn log_many(a: &str, b: &str);
 }
 
+#[cfg(feature = "multicore")]
+// see: https://github.com/GoogleChromeLabs/wasm-bindgen-rayon
+// only enable this when build as wasm since wasm_bindgen_rayon
+// conflicts in build for default target (like for unit tests)
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub use wasm_bindgen_rayon::init_thread_pool;
+
 // WASM Bindgen Resouces:
 // https://rustwasm.github.io/wasm-bindgen/examples/hello-world.html
 //

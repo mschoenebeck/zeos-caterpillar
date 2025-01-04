@@ -1,0 +1,10 @@
+<html>
+<head>
+</head>
+<body>
+    <script type="module" crossorigin="anonymous">
+        // need to start the multi-threaded code from inside a separate thread (main thread not allowed)
+        new Worker('/multi-threaded/worker.js', { type: 'module' });
+    </script>
+</body>
+</html>
