@@ -29,9 +29,9 @@ pub mod transaction_spend_tests;
 
 use wallet::Wallet;
 use eosio::{Name, Symbol, Authorization, ExtendedAsset, Transaction};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use transaction::{ZTransaction, ResolvedZTransaction, resolve_ztransaction, zsign_transaction, zverify_spend_transaction};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use keys::IncomingViewingKey;
 use std::collections::HashMap;
 use bellman::groth16::Parameters;
@@ -41,17 +41,17 @@ use crate::{
     eosio::Asset,
     transaction::{MintDesc, zsign_transfer_and_mint_transaction},
 };
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::slice;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::ffi::CString;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::ffi::CStr;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
 // generalized log function for use in different targets
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub fn log(msg: &str)
 {
     println!("{}", msg);
@@ -129,7 +129,7 @@ pub fn js_zsign_transfer_and_mint_transaction(
 //
 // The following functions are exposed to C via FFI:
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub unsafe extern "C" fn wallet_create(
     seed: *const libc::c_char,
@@ -200,7 +200,7 @@ pub unsafe extern "C" fn wallet_create(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub extern "C" fn wallet_close(
     p_wallet: *mut Wallet
@@ -214,7 +214,7 @@ pub extern "C" fn wallet_close(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub unsafe extern "C" fn wallet_size(
     p_wallet: *mut Wallet
@@ -227,7 +227,7 @@ pub unsafe extern "C" fn wallet_size(
     wallet.size() as u64
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub unsafe extern "C" fn wallet_is_ivk(
     p_wallet: *mut Wallet
@@ -240,7 +240,7 @@ pub unsafe extern "C" fn wallet_is_ivk(
     wallet.is_ivk()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub extern fn wallet_chain_id(
     p_wallet: *mut Wallet
@@ -254,7 +254,7 @@ pub extern fn wallet_chain_id(
     c_string.into_raw() // Move ownership to C
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub extern fn wallet_protocol_contract(
     p_wallet: *mut Wallet
@@ -268,7 +268,7 @@ pub extern fn wallet_protocol_contract(
     c_string.into_raw() // Move ownership to C
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub extern fn wallet_alias_authority(
     p_wallet: *mut Wallet
@@ -282,7 +282,7 @@ pub extern fn wallet_alias_authority(
     c_string.into_raw() // Move ownership to C
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub unsafe extern "C" fn wallet_block_num(
     p_wallet: *mut Wallet
@@ -295,7 +295,7 @@ pub unsafe extern "C" fn wallet_block_num(
     wallet.block_num()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub unsafe extern "C" fn wallet_leaf_count(
     p_wallet: *mut Wallet
@@ -308,7 +308,7 @@ pub unsafe extern "C" fn wallet_leaf_count(
     wallet.leaf_count()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub unsafe extern "C" fn wallet_write(
     p_wallet: *mut Wallet,
@@ -326,7 +326,7 @@ pub unsafe extern "C" fn wallet_write(
     if res.is_err() { -1 } else { 0 }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub unsafe extern "C" fn wallet_read(
     p_bytes: *const u8,
@@ -346,7 +346,7 @@ pub unsafe extern "C" fn wallet_read(
     true
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub extern fn wallet_json(
     p_wallet: *mut Wallet,
@@ -362,7 +362,7 @@ pub extern fn wallet_json(
     c_string.into_raw() // Move ownership to C
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub extern fn wallet_balances_json(
     p_wallet: *mut Wallet,
@@ -381,7 +381,7 @@ pub extern fn wallet_balances_json(
     c_string.into_raw() // Move ownership to C
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub extern fn wallet_unspent_notes_json(
     p_wallet: *mut Wallet,
@@ -400,7 +400,7 @@ pub extern fn wallet_unspent_notes_json(
     c_string.into_raw() // Move ownership to C
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub extern fn wallet_fungible_tokens_json(
     p_wallet: *mut Wallet,
@@ -423,7 +423,7 @@ pub extern fn wallet_fungible_tokens_json(
     c_string.into_raw() // Move ownership to C
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub extern fn wallet_non_fungible_tokens_json(
     p_wallet: *mut Wallet,
@@ -445,7 +445,7 @@ pub extern fn wallet_non_fungible_tokens_json(
     c_string.into_raw() // Move ownership to C
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub extern fn wallet_authentication_tokens_json(
     p_wallet: *mut Wallet,
@@ -468,7 +468,7 @@ pub extern fn wallet_authentication_tokens_json(
     c_string.into_raw() // Move ownership to C
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub extern fn wallet_unpublished_notes_json(
     p_wallet: *mut Wallet,
@@ -487,7 +487,7 @@ pub extern fn wallet_unpublished_notes_json(
     c_string.into_raw() // Move ownership to C
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub extern fn wallet_transaction_history_json(
     p_wallet: *mut Wallet,
@@ -506,7 +506,7 @@ pub extern fn wallet_transaction_history_json(
     c_string.into_raw() // Move ownership to C
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub extern fn wallet_addresses_json(
     p_wallet: *mut Wallet,
@@ -525,7 +525,7 @@ pub extern fn wallet_addresses_json(
     c_string.into_raw() // Move ownership to C
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub extern fn wallet_derive_address(
     p_wallet: *mut Wallet,
@@ -542,7 +542,7 @@ pub extern fn wallet_derive_address(
 
 /// The ptr should be a valid pointer to the string allocated by rust
 /// source: https://dev.to/kgrech/7-ways-to-pass-a-string-between-rust-and-c-4ieb
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub unsafe extern fn free_string(ptr: *const libc::c_char)
 {
@@ -550,7 +550,7 @@ pub unsafe extern fn free_string(ptr: *const libc::c_char)
     let _ = CString::from_raw(ptr as *mut _);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub unsafe extern fn wallet_add_leaves(
     p_wallet: *mut Wallet,
@@ -573,7 +573,7 @@ pub unsafe extern fn wallet_add_leaves(
     wallet.add_leaves(bytes.as_slice());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub unsafe extern fn wallet_add_notes(
     p_wallet: *mut Wallet,
@@ -596,7 +596,7 @@ pub unsafe extern fn wallet_add_notes(
     wallet.add_notes(&notes_vec, 0, 0);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub unsafe extern fn wallet_add_unpublished_notes(
     p_wallet: *mut Wallet,
@@ -619,7 +619,7 @@ pub unsafe extern fn wallet_add_unpublished_notes(
     wallet.add_unpublished_notes(&unpublished_notes_map);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub unsafe extern fn wallet_resolve(
     p_wallet: *mut Wallet,
@@ -663,7 +663,7 @@ pub unsafe extern fn wallet_resolve(
     c_string.into_raw() // Move ownership to C
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub unsafe extern fn wallet_zsign(
     p_wallet: *mut Wallet,
@@ -719,7 +719,7 @@ pub unsafe extern fn wallet_zsign(
     c_string.into_raw() // Move ownership to C
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub unsafe extern fn wallet_zverify_spend(
     tx_json: *const libc::c_char,
@@ -760,7 +760,7 @@ pub unsafe extern fn wallet_zverify_spend(
     zverify_spend_transaction(&tx, &params)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub unsafe extern fn wallet_transact(
     p_wallet: *mut Wallet,
@@ -835,7 +835,7 @@ pub unsafe extern fn wallet_transact(
     c_string.into_raw() // Move ownership to C
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[no_mangle]
 pub unsafe extern fn wallet_digest_block(
     p_wallet: *mut Wallet,
