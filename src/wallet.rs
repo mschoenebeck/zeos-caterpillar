@@ -863,7 +863,7 @@ mod tests
     use crate::{
         wallet::Wallet,
         note::{Note, Rseed},
-        eosio::{Authorization, Name, Transaction, Action, Symbol, ExtendedAsset},
+        eosio::{Authorization, Name, Transaction, Action, ExtendedAsset},
         contract::{PlsMint, ScalarBytes, AffineProofBytesLE},
         note_encryption::{NoteEncryption, TransmittedNoteCiphertext, derive_esk, ka_derive_public},
         keys::{SpendingKey, FullViewingKey}
@@ -950,7 +950,7 @@ mod tests
                     data: serde_json::to_value(PlsMint{
                         cm: ScalarBytes([0; 32]),
                         value: 0,
-                        symbol: Symbol(0),
+                        symbol: 0, //Symbol(0),
                         contract: Name(0),
                         proof: AffineProofBytesLE([0; 384])
                     }).unwrap()

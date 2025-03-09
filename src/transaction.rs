@@ -891,7 +891,7 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                         mints.push(PlsMint{
                             cm: crate::contract::ScalarBytes(data.note.commitment().to_bytes()),
                             value: data.note.amount(),
-                            symbol: data.note.symbol().clone(),
+                            symbol: data.note.symbol().raw(),
                             contract: data.note.contract().clone(),
                             proof: {
                                 let instance = Mint {
@@ -1682,7 +1682,7 @@ pub fn zsign_transfer_and_mint_transaction(
         mints.push(PlsMint{
             cm: ScalarBytes(rm.note.commitment().to_bytes()),
             value: rm.note.amount(),
-            symbol: rm.note.symbol().clone(),
+            symbol: rm.note.symbol().raw(),
             contract: rm.note.contract().clone(),
             proof: {
                 let circuit_instance = Mint {

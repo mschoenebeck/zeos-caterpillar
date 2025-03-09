@@ -1,6 +1,0 @@
-[toolchain]
-#channel = "1.70.0"
-#channel = "nightly"
-#channel = "1.80.0"
-channel = "stable"
-components = [ "clippy", "rustfmt" ]

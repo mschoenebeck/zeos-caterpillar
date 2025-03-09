@@ -301,7 +301,11 @@ pub struct PlsMint
 {
     pub cm: ScalarBytes,
     pub value: u64,
-    pub symbol: Symbol,
+    // too many wallet don't accept a value of zero for type symbol
+    // that's why we change it to a u64 to avoid serialization problems
+    // with, for exampl, eosjs or wharfkit etc
+    //pub symbol: Symbol,
+    pub symbol: u64,
     pub contract: Name,
     pub proof: AffineProofBytesLE
 }
@@ -998,7 +1002,7 @@ mod tests
         let a = PlsMint{
             cm: ScalarBytes(note.commitment().to_bytes()),
             value: note.amount(),
-            symbol: note.symbol().clone(),
+            symbol: note.symbol().raw(),
             contract: note.contract().clone(),
             proof: AffineProofBytesLE::from(proof.clone())
         };
