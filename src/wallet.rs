@@ -578,9 +578,9 @@ impl Wallet
         let mut history = vec![];
         let mut received = self.unspent_notes.clone();
         received.append(&mut self.spent_notes.clone());
-        received.sort_by(|a, b| b.wallet_ts().cmp(&a.wallet_ts()));
+        received.sort_by(|a, b| b.block_ts().cmp(&a.block_ts()));
         let mut sent = self.outgoing_notes.clone();
-        sent.sort_by(|a, b| b.wallet_ts().cmp(&a.wallet_ts()));
+        sent.sort_by(|a, b| b.block_ts().cmp(&a.block_ts()));
         while !received.is_empty() || !sent.is_empty()
         {
             let mut htx = HistoryTransaction{
@@ -593,47 +593,47 @@ impl Wallet
 
             if !received.is_empty() && !sent.is_empty()
             {
-                if sent[0].wallet_ts() <= received[0].wallet_ts()
+                if sent[0].block_ts() <= received[0].block_ts()
                 {
                     tx.push(sent.remove(0));
-                    while !sent.is_empty() && sent[0].wallet_ts() == tx[0].wallet_ts()
+                    while !sent.is_empty() && sent[0].block_ts() == tx[0].block_ts()
                     {
                         tx.push(sent.remove(0));
                     }
                     htx.tx_type = "Sent".to_string();
-                    htx.date_time = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].wallet_ts())).format("%Y-%m-%d %H:%M:%S").to_string();
+                    htx.date_time = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].block_ts())).format("%Y-%m-%d %H:%M:%S").to_string();
                 }
                 else
                 {
                     tx.push(received.remove(0));
-                    while !received.is_empty() && received[0].wallet_ts() == tx[0].wallet_ts()
+                    while !received.is_empty() && received[0].block_ts() == tx[0].block_ts()
                     {
                         tx.push(received.remove(0));
                     }
                     htx.tx_type = "Received".to_string();
-                    htx.date_time = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].wallet_ts())).format("%Y-%m-%d %H:%M:%S").to_string();
+                    htx.date_time = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].block_ts())).format("%Y-%m-%d %H:%M:%S").to_string();
                 }
 
             }
             else if !received.is_empty() && sent.is_empty()
             {
                 tx.push(received.remove(0));
-                while !received.is_empty() && received[0].wallet_ts() == tx[0].wallet_ts()
+                while !received.is_empty() && received[0].block_ts() == tx[0].block_ts()
                 {
                     tx.push(received.remove(0));
                 }
                 htx.tx_type = "Received".to_string();
-                htx.date_time = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].wallet_ts())).format("%Y-%m-%d %H:%M:%S").to_string();
+                htx.date_time = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].block_ts())).format("%Y-%m-%d %H:%M:%S").to_string();
             }
             else if received.is_empty() && !sent.is_empty()
             {
                 tx.push(sent.remove(0));
-                while !sent.is_empty() && sent[0].wallet_ts() == tx[0].wallet_ts()
+                while !sent.is_empty() && sent[0].block_ts() == tx[0].block_ts()
                 {
                     tx.push(sent.remove(0));
                 }
                 htx.tx_type = "Sent".to_string();
-                htx.date_time = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].wallet_ts())).format("%Y-%m-%d %H:%M:%S").to_string();
+                htx.date_time = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].block_ts())).format("%Y-%m-%d %H:%M:%S").to_string();
             }
 
             for n in tx.iter()
