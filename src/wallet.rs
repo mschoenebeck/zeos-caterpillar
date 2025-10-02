@@ -54,9 +54,11 @@ pub struct Wallet
     // wallet metadata
     chain_id: [u8; 32],
     protocol_contract: Name,
+    vault_contract: Name,
     alias_authority: Authorization,
     block_num: u32,
     leaf_count: u64,
+    auth_count: u64,
 
     // the different note pools
     unspent_notes: Vec<NoteEx>,
@@ -86,6 +88,7 @@ impl Wallet
         is_ivk: bool,
         chain_id: [u8; 32],
         protocol_contract: Name,
+        vault_contract: Name,
         alias_authority: Authorization
     ) -> Option<Self>
     {
@@ -112,9 +115,11 @@ impl Wallet
             diversifiers,
             chain_id,
             protocol_contract,
+            vault_contract,
             alias_authority,
             block_num: 0,
             leaf_count: 0,
+            auth_count: 0,
             unspent_notes: vec![],
             spent_notes: vec![],
             outgoing_notes: vec![],
@@ -135,10 +140,12 @@ impl Wallet
         }
         writer.write_all(&self.chain_id)?;
         writer.write_u64::<LittleEndian>(self.protocol_contract.raw())?;
+        writer.write_u64::<LittleEndian>(self.vault_contract.raw())?;
         writer.write_u64::<LittleEndian>(self.alias_authority.actor.raw())?;
         writer.write_u64::<LittleEndian>(self.alias_authority.permission.raw())?;
         writer.write_u32::<LittleEndian>(self.block_num)?;
         writer.write_u64::<LittleEndian>(self.leaf_count)?;
+        writer.write_u64::<LittleEndian>(self.auth_count)?;
         writer.write_u32::<LittleEndian>(self.unspent_notes.len() as u32)?;
         for n in self.unspent_notes.iter()
         {
@@ -195,12 +202,14 @@ impl Wallet
         let mut chain_id = [0; 32];
         reader.read_exact(&mut chain_id)?;
         let protocol_contract = Name(reader.read_u64::<LittleEndian>()?);
+        let vault_contract = Name(reader.read_u64::<LittleEndian>()?);
         let alias_authority = Authorization{
             actor: Name(reader.read_u64::<LittleEndian>()?),
             permission: Name(reader.read_u64::<LittleEndian>()?)
         };
         let block_num = reader.read_u32::<LittleEndian>()?;
         let leaf_count = reader.read_u64::<LittleEndian>()?;
+        let auth_count = reader.read_u64::<LittleEndian>()?;
 
         let unspent_notes_len = reader.read_u32::<LittleEndian>()? as usize;
         let mut unspent_notes = vec![];
@@ -234,9 +243,11 @@ impl Wallet
             diversifiers,
             chain_id,
             protocol_contract,
+            vault_contract,
             alias_authority,
             block_num,
             leaf_count: 0,
+            auth_count,
             unspent_notes,
             spent_notes,
             outgoing_notes,
@@ -280,9 +291,11 @@ impl Wallet
         self.diversifiers.len() * 8 +
         32 +                                // chain ID
         8 +                                 // protocol contract
+        8 +                                 // vault contract
         16 +                                // alias authority
         4 +                                 // latest block number
         8 +                                 // leaf count
+        8 +                                 // auth count
         4 +                                 // unspent_notes.len()
         self.unspent_notes.len() * 655 +
         4 +                                 // spent_notes.len()
@@ -309,6 +322,11 @@ impl Wallet
         self.protocol_contract
     }
 
+    pub fn vault_contract(&self) -> Name
+    {
+        self.vault_contract
+    }
+
     pub fn alias_authority(&self) -> &Authorization
     {
         &self.alias_authority
@@ -322,6 +340,16 @@ impl Wallet
     pub fn leaf_count(&self) -> u64
     {
         self.leaf_count
+    }
+
+    pub fn auth_count(&self) -> u64
+    {
+        self.auth_count
+    }
+
+    pub fn set_auth_count(&mut self, count: u64)
+    {
+        self.auth_count = count;
     }
 
     pub fn is_ivk(&self) -> bool
@@ -780,6 +808,14 @@ impl Wallet
     {
         let ts = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_millis() as u64;
         self.unpublished_notes.insert(ts, unpublished_notes.clone());
+        // attempt to add all unpublished notes to this wallet
+        for(_, map) in self.unpublished_notes.clone().into_iter()
+        {
+            for(_, notes) in map.into_iter()
+            {
+                self.add_notes(&notes, 0, 0);
+            }
+        }
     }
 
     fn insert_into_merkle_tree(&mut self, leaf: &ScalarBytes) -> u64
@@ -881,6 +917,7 @@ mod tests
             false,
             [0; 32],
             Name::from_string(&format!("zeos4privacy")).unwrap(),
+            Name::from_string(&format!("thezeosvault")).unwrap(),
             Authorization::from_string(&format!("thezeosalias@public")).unwrap()
         ).unwrap();
 
@@ -982,6 +1019,7 @@ mod tests
             false,
             [0; 32],
             Name::from_string(&format!("zeos4privacy")).unwrap(),
+            Name::from_string(&format!("thezeosvault")).unwrap(),
             Authorization::from_string(&format!("thezeosalias@public")).unwrap()
         ).unwrap();
 

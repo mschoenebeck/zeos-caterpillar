@@ -10,7 +10,8 @@ use crate::{
     keys::{EphemeralSecretKey, NullifierDerivingKey, SpendingKey, FullViewingKey, prf_expand},
     note::nullifier::Nullifier, address::Address,
 };
-use crate::constants::MERKLE_TREE_DEPTH;
+use crate::constants::{MERKLE_TREE_DEPTH, RSEED_PERSONALIZATION};
+use blake2s_simd::Params as Blake2sParams;
 
 mod commitment;
 pub use self::commitment::{ExtractedNoteCommitment, NoteCommitment};
@@ -31,6 +32,19 @@ impl Rseed
         let mut bytes = [0; 32];
         rng.fill_bytes(&mut bytes);
         Rseed(bytes)
+    }
+
+    pub fn from_seed(seed: &[u8]) -> Self {
+        let h: [u8; 32] = Blake2sParams::new()
+            .hash_length(32)
+            .personal(RSEED_PERSONALIZATION)
+            .to_state()
+            .update(seed)
+            .finalize()
+            .as_bytes()
+            .try_into()
+            .expect("output length is correct");
+        Rseed(h)
     }
 
     /// Defined in [Zcash Protocol Spec § 4.7.2: Sending Notes (Sapling)][saplingsend].

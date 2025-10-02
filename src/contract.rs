@@ -296,15 +296,81 @@ impl From<AffineProofBytesLE> for Proof<Bls12>
     }
 }
 
+// in EOSIO u64 values are encoded as numbers if <= u32 max and encoded as string if > u32 max
+fn de_u64_from_str_or_int<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct U64Visitor;
+
+    impl<'de> de::Visitor<'de> for U64Visitor {
+        type Value = u64;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "a u64 or a decimal string containing a u64")
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<u64, E> {
+            Ok(v)
+        }
+
+        fn visit_i64<E>(self, v: i64) -> Result<u64, E>
+        where
+            E: de::Error,
+        {
+            if v < 0 {
+                return Err(E::custom("negative values not allowed for amount"));
+            }
+            Ok(v as u64)
+        }
+
+        fn visit_u128<E>(self, v: u128) -> Result<u64, E>
+        where
+            E: de::Error,
+        {
+            u64::try_from(v).map_err(|_| E::custom("value over u64::MAX"))
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<u64, E>
+        where
+            E: de::Error,
+        {
+            v.parse::<u64>()
+                .map_err(|_| E::invalid_value(de::Unexpected::Str(v), &"a decimal u64 string"))
+        }
+
+        fn visit_string<E>(self, v: String) -> Result<u64, E>
+        where
+            E: de::Error,
+        {
+            self.visit_str(&v)
+        }
+    }
+
+    deserializer.deserialize_any(U64Visitor)
+}
+fn ser_u64_num_or_string<S>(v: &u64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if *v <= u32::MAX as u64 {
+        serializer.serialize_u64(*v)
+    } else {
+        serializer.serialize_str(&v.to_string())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlsMint
 {
     pub cm: ScalarBytes,
+    #[serde(deserialize_with = "de_u64_from_str_or_int", serialize_with = "ser_u64_num_or_string")]
     pub value: u64,
     // too many wallet don't accept a value of zero for type symbol
     // that's why we change it to a u64 to avoid serialization problems
     // with, for exampl, eosjs or wharfkit etc
     //pub symbol: Symbol,
+    #[serde(deserialize_with = "de_u64_from_str_or_int", serialize_with = "ser_u64_num_or_string")]
     pub symbol: u64,
     pub contract: Name,
     pub proof: AffineProofBytesLE
@@ -334,6 +400,7 @@ pub struct PlsSpendOutput
     pub cm_b: ScalarBytes,
     pub cv_net_u: ScalarBytes,
     pub cv_net_v: ScalarBytes,
+    #[serde(deserialize_with = "de_u64_from_str_or_int", serialize_with = "ser_u64_num_or_string")]
     pub value_c: u64,
     pub symbol: Symbol,
     pub contract: Name,
@@ -345,6 +412,7 @@ pub struct PlsSpendOutput
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlsUnshieldedRecipient
 {
+    #[serde(deserialize_with = "de_u64_from_str_or_int", serialize_with = "ser_u64_num_or_string")]
     pub amount: u64,
     pub account: Name,
     pub memo: String

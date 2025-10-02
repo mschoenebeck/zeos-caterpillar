@@ -30,6 +30,7 @@ mod tests
             false,
             [0; 32],
             Name::from_string(&format!("zeos4privacy")).unwrap(),
+            Name::from_string(&format!("thezeosvault")).unwrap(),
             Authorization::from_string(&format!("thezeosalias@public")).unwrap()
         ).unwrap();
 
@@ -75,11 +76,12 @@ mod tests
         fees.insert(Name::from_string(&"output".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
         fees.insert(Name::from_string(&"authenticate".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
         fees.insert(Name::from_string(&"publishnotes".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        fees.insert(Name::from_string(&"withdraw".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        //fees.insert(Name::from_string(&"withdraw".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
 
         let json = r#"{
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
             "protocol_contract": "zeos4privacy",
+            "vault_contract": "thezeosvault",
             "alias_authority": "thezeosalias@public",
             "add_fee": true,
             "publish_fee_note": true,
@@ -88,43 +90,42 @@ mod tests
                     "name": "spend",
                     "data": {
                         "contract": "eosio.token",
-                        "symbol": "4,EOS",
                         "change_to": "$SELF",
                         "publish_change_note": true,
                         "to": [
                             {
                                 "to": "mschoenebeck",
-                                "amount": 100000,
+                                "quantity": "10.0000 EOS",
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "mschoenebeck",
-                                "amount": 100000,
+                                "quantity": "10.0000 EOS",
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 20000,
+                                "quantity": "2.0000 EOS",
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 20000,
+                                "quantity": "2.0000 EOS",
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 10000,
+                                "quantity": "1.0000 EOS",
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 10000,
+                                "quantity": "1.0000 EOS",
                                 "memo": "",
                                 "publish_note": true
                             }
@@ -154,6 +155,7 @@ mod tests
         let json = r#"{
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
             "protocol_contract": "zeos4privacy",
+            "vault_contract": "thezeosvault",
             "alias_authority": "thezeosalias@public",
             "add_fee": true,
             "publish_fee_note": true,
@@ -162,49 +164,48 @@ mod tests
                     "name": "spend",
                     "data": {
                         "contract": "eosio.token",
-                        "symbol": "4,EOS",
                         "change_to": "$SELF",
                         "publish_change_note": true,
                         "to": [
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 10000,
+                                "quantity": "1.0000 EOS"
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 10000,
+                                "quantity": "1.0000 EOS"
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 10000,
+                                "quantity": "1.0000 EOS"
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 10000,
+                                "quantity": "1.0000 EOS"
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 10000,
+                                "quantity": "1.0000 EOS"
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 10000,
+                                "quantity": "1.0000 EOS"
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 10000,
+                                "quantity": "1.0000 EOS"
                                 "memo": "",
                                 "publish_note": true
                             }
@@ -234,6 +235,7 @@ mod tests
         let json = r#"{
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
             "protocol_contract": "zeos4privacy",
+            "vault_contract": "thezeosvault",
             "alias_authority": "thezeosalias@public",
             "add_fee": true,
             "publish_fee_note": true,
@@ -242,13 +244,12 @@ mod tests
                     "name": "spend",
                     "data": {
                         "contract": "eosio.token",
-                        "symbol": "4,EOS",
                         "change_to": "$SELF",
                         "publish_change_note": true,
                         "to": [
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 500000,
+                                "quantity": "50.0000 EOS",
                                 "memo": "",
                                 "publish_note": true
                             }
@@ -278,6 +279,7 @@ mod tests
         let json = r#"{
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
             "protocol_contract": "zeos4privacy",
+            "vault_contract": "thezeosvault",
             "alias_authority": "thezeosalias@public",
             "add_fee": true,
             "publish_fee_note": true,
@@ -286,31 +288,30 @@ mod tests
                     "name": "spend",
                     "data": {
                         "contract": "atomicassets",
-                        "symbol": "0,",
                         "change_to": "$SELF",
                         "publish_change_note": true,
                         "to": [
                             {
                                 "to": "mschoenebeck",
-                                "amount": 12345678987654321,
+                                "quantity": "12345678987654321",
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 99999999998765431,
+                                "quantity": "99999999998765431",
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "za1myffclyc7d5k05q9tpd9kn74el0uljwhfycm0kxnqmpvv5qzcm8wezc70855rlsmlehmwv87k5c",
-                                "amount": 88888888887654321,
+                                "quantity": "88888888887654321",
                                 "memo": "",
                                 "publish_note": true
                             },
                             {
                                 "to": "mschoenebeck",
-                                "amount": 12345677777777321,
+                                "quantity": "12345677777777321",
                                 "memo": "",
                                 "publish_note": true
                             }

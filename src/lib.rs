@@ -28,9 +28,10 @@ pub mod transaction;
 pub mod transaction_spend_tests;
 
 use wallet::Wallet;
+use crate::address::Address;
 use eosio::{Name, Symbol, Authorization, ExtendedAsset, Transaction};
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-use transaction::{ZTransaction, ResolvedZTransaction, resolve_ztransaction, zsign_transaction, zverify_spend_transaction};
+use transaction::{ZTransaction, ResolvedZTransaction, resolve_ztransaction, zsign_transaction, zverify_spend_transaction, create_auth_token};
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 use keys::IncomingViewingKey;
 use std::collections::HashMap;
@@ -87,7 +88,7 @@ pub use wasm_bindgen_rayon::init_thread_pool;
 // WASM Bindgen Resouces:
 // https://rustwasm.github.io/wasm-bindgen/examples/hello-world.html
 //
-// The following class is a wallet-wrapper for use in JS Browser applications
+// The following function is for easy use (EOSIO account => ZEOS wallet) in JS Browser applications
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
@@ -136,6 +137,7 @@ pub unsafe extern "C" fn wallet_create(
     is_ivk: bool,
     chain_id: *const libc::c_char,
     protocol_contract: *const libc::c_char,
+    vault_contract: *const libc::c_char,
     alias_authority: *const libc::c_char,
     p_wallet: &mut *mut Wallet
 ) -> bool
@@ -161,6 +163,13 @@ pub unsafe extern "C" fn wallet_create(
             "FFI seed string conversion failed (protocol_contract)"
         }
     };
+    let vault_contract_str: &str = match std::ffi::CStr::from_ptr(vault_contract).to_str() {
+        Ok(s) => s,
+        Err(_e) => {
+            println!("FFI seed string conversion failed (vault_contract)");
+            "FFI seed string conversion failed (vault_contract)"
+        }
+    };
     let alias_authority_str: &str = match std::ffi::CStr::from_ptr(alias_authority).to_str() {
         Ok(s) => s,
         Err(_e) => {
@@ -179,6 +188,7 @@ pub unsafe extern "C" fn wallet_create(
             is_ivk,
             hex::decode(chain_id_str).unwrap().try_into().unwrap(),
             Name::from_string(&protocol_contract_str.to_string()).unwrap(),
+            Name::from_string(&vault_contract_str.to_string()).unwrap(),
             Authorization::from_string(&alias_authority_str.to_string()).unwrap()
         );
         if wallet.is_none() { return false }
@@ -192,6 +202,7 @@ pub unsafe extern "C" fn wallet_create(
             is_ivk,
             hex::decode(chain_id_str).unwrap().try_into().unwrap(),
             Name::from_string(&protocol_contract_str.to_string()).unwrap(),
+            Name::from_string(&vault_contract_str.to_string()).unwrap(),
             Authorization::from_string(&alias_authority_str.to_string()).unwrap()
         );
         if wallet.is_none() { return false }
@@ -270,6 +281,20 @@ pub extern fn wallet_protocol_contract(
 
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 #[no_mangle]
+pub extern fn wallet_vault_contract(
+    p_wallet: *mut Wallet
+) -> *const libc::c_char
+{
+    let wallet = unsafe {
+        assert!(!p_wallet.is_null());
+        &mut *p_wallet
+    };
+    let c_string = CString::new(wallet.vault_contract().to_string()).expect("CString::new failed");
+    c_string.into_raw() // Move ownership to C
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[no_mangle]
 pub extern fn wallet_alias_authority(
     p_wallet: *mut Wallet
 ) -> *const libc::c_char
@@ -306,6 +331,33 @@ pub unsafe extern "C" fn wallet_leaf_count(
         &mut *p_wallet
     };
     wallet.leaf_count()
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[no_mangle]
+pub unsafe extern "C" fn wallet_auth_count(
+    p_wallet: *mut Wallet
+) -> u64
+{
+    let wallet = unsafe {
+        assert!(!p_wallet.is_null());
+        &mut *p_wallet
+    };
+    wallet.auth_count()
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[no_mangle]
+pub unsafe extern "C" fn wallet_set_auth_count(
+    p_wallet: *mut Wallet,
+    count: u64
+)
+{
+    let wallet = unsafe {
+        assert!(!p_wallet.is_null());
+        &mut *p_wallet
+    };
+    wallet.set_auth_count(count);
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -617,6 +669,45 @@ pub unsafe extern fn wallet_add_unpublished_notes(
 
     let unpublished_notes_map: HashMap<String, Vec<String>> = serde_json::from_str(unpublished_notes_str).unwrap();
     wallet.add_unpublished_notes(&unpublished_notes_map);
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[no_mangle]
+pub unsafe extern fn wallet_create_unpublished_auth_note(
+    p_wallet: *mut Wallet,
+    seed: *const libc::c_char,
+    contract: u64,
+    address: *const libc::c_char
+) -> *const libc::c_char
+{
+    let wallet = unsafe {
+        assert!(!p_wallet.is_null());
+        &mut *p_wallet
+    };
+    let seed_str: &str = match std::ffi::CStr::from_ptr(seed).to_str() {
+        Ok(s) => s,
+        Err(_e) => {
+            println!("FFI string conversion failed (seed)");
+            "FFI string conversion failed (seed)"
+        }
+    };
+    let address_str: &str = match std::ffi::CStr::from_ptr(address).to_str() {
+        Ok(s) => s,
+        Err(_e) => {
+            println!("FFI string conversion failed (address)");
+            "FFI string conversion failed (address)"
+        }
+    };
+
+    let unpublished_notes_map: HashMap<String, Vec<String>> = create_auth_token(
+        wallet,
+        seed_str.to_string(),
+        Name(contract),
+        Address::from_bech32m(&address_str.to_string()).unwrap()
+    ).unwrap();
+
+    let c_string = CString::new(serde_json::to_string(&unpublished_notes_map).unwrap()).expect("CString::new failed");
+    c_string.into_raw() // Move ownership to C
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]

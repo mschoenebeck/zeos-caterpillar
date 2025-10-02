@@ -44,7 +44,7 @@ pub enum TransactionError
     SpendParams,
     OutputParams,
     InvalidNote,
-    InvalidProtocolContractOrAliasAuthority
+    InvalidProtocolContractOrVaultContractOrAliasAuthority
 }
 impl Error for TransactionError {}
 impl fmt::Display for TransactionError
@@ -65,7 +65,7 @@ impl fmt::Display for TransactionError
             Self::SpendParams => write!(f, "invalid spend params"),
             Self::OutputParams => write!(f, "invalid output params"),
             Self::InvalidNote => write!(f, "note invalid"),
-            Self::InvalidProtocolContractOrAliasAuthority => write!(f, "protocol contract or alias authority invalid"),
+            Self::InvalidProtocolContractOrVaultContractOrAliasAuthority => write!(f, "protocol contract or vault contract or alias authority invalid"),
         }
     }
 }
@@ -76,6 +76,7 @@ pub struct ZTransaction
 {
     pub chain_id: String,
     pub protocol_contract: Name,
+    pub vault_contract: Name,
     pub alias_authority: String,
     pub add_fee: bool,
     pub publish_fee_note: bool,
@@ -277,15 +278,16 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
     {
         Err(TransactionError::IvkWallet)?
     }
-    if !wallet.protocol_contract().eq(&ztx.protocol_contract) || !wallet.alias_authority().eq(&Authorization::from_string(&ztx.alias_authority).unwrap())
+    if !wallet.protocol_contract().eq(&ztx.protocol_contract) || !wallet.vault_contract().eq(&ztx.vault_contract) || !wallet.alias_authority().eq(&Authorization::from_string(&ztx.alias_authority).unwrap())
     {
-        Err(TransactionError::InvalidProtocolContractOrAliasAuthority)?
+        Err(TransactionError::InvalidProtocolContractOrVaultContractOrAliasAuthority)?
     }
 
     let mut rng = OsRng.clone();
     let mut rztx = ResolvedZTransaction{
         chain_id: hex::decode(ztx.chain_id.clone())?.try_into().unwrap_or_else(|v: Vec<u8>| panic!("chain_id: expected a Vec of length {} but it was {}", 32, v.len())),
         protocol_contract: ztx.protocol_contract,
+        vault_contract: ztx.vault_contract,
         alias_authority: Authorization::from_string(&ztx.alias_authority).unwrap(),
         rzactions: vec![]
     };
@@ -564,8 +566,8 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                     data: {
                         let desc: WithdrawDesc = serde_json::from_value(za.data.clone())?;
 
-                        // add fee
-                        fee += fees.get(&Name::from_string(&"withdraw".to_string()).unwrap()).unwrap().amount();
+                        // no fee for withdraw action
+                        //fee += fees.get(&Name::from_string(&"withdraw".to_string()).unwrap()).unwrap().amount();
 
                         serde_json::to_value(ResolvedWithdrawDesc{
                             contract: desc.contract,
@@ -752,6 +754,7 @@ pub struct ResolvedZTransaction
 {
     pub chain_id: [u8; 32],
     pub protocol_contract: Name,
+    pub vault_contract: Name,
     pub alias_authority: Authorization,
     pub rzactions: Vec<ResolvedZAction>
 }
@@ -869,7 +872,7 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
         ]
     };
     let mut unpublished_notes: HashMap<String, Vec<String>> = HashMap::new();
-
+    let mut auth_count = wallet.auth_count();
     let mut i = 0;
     while i < rztx.rzactions.len()
     {
@@ -1314,9 +1317,11 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                                     account: Some(data.auth_note.account().raw()),
                                     auth_hash: {
                                         let mut state = Blake2s7rParams::new().hash_length(32).personal(&[0; 8]).to_state();
+                                        state.update(&auth_count.to_le_bytes());
                                         state.update(&pack(data.actions));
                                         let hash: [u8; 32] = state.finalize().as_bytes().try_into()?;
                                         let hash = [u64::from_le_bytes(hash[0..8].try_into()?), u64::from_le_bytes(hash[8..16].try_into()?), u64::from_le_bytes(hash[16..24].try_into()?), u64::from_le_bytes(hash[24..32].try_into()?)];
+                                        //hash[3] &= !0xC000000000000000u64;
                                         Some(hash)
                                     },
                                     value: Some(data.auth_note.amount()),
@@ -1332,6 +1337,7 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                     })?
                 });
 
+                auth_count = auth_count + 1;
                 i = i + 1;
             }
 
@@ -1751,6 +1757,61 @@ pub fn zsign_transfer_and_mint_transaction(
     Ok((tx, unpublished_notes))
 }
 
+pub fn create_auth_token(wallet: &Wallet, seed: String, contract: Name, recipient: Address) -> Result<HashMap<String, Vec<String>>, Box<dyn Error>>
+{
+    if wallet.is_ivk()
+    {
+        Err(TransactionError::IvkWallet)?
+    }
+    let fvk = FullViewingKey::from_spending_key(&wallet.spending_key().unwrap());
+    let mut rng = OsRng.clone();
+    let n = Note::from_parts(
+        0,
+        recipient,
+        contract, // in AUTH mode the Mint circuit enforces account == contract
+        ExtendedAsset::new(Asset::from_string(&"0".to_string()).unwrap(), contract),
+        Rseed::from_seed(seed.as_bytes()),
+        [0; 512]
+    );
+
+    let note_ct = {
+        let esk = derive_esk(&n).unwrap();
+        let epk = ka_derive_public(&n, &esk);
+        let ne = NoteEncryption::new(Some(fvk.ovk), n.clone());
+        let encrypted_note = TransmittedNoteCiphertext {
+            epk_bytes: epk.to_bytes().0,
+            enc_ciphertext: ne.encrypt_note_plaintext(),
+            out_ciphertext: ne.encrypt_outgoing_plaintext(&mut rng),
+        };
+        encrypted_note.to_base64()
+    };
+
+    let mut unpublished_notes: HashMap<String, Vec<String>> = HashMap::new();
+    let recipient = recipient.to_bech32m()?;
+    // check if recipient == self in order to not add this note twice: 1) as recipient note and 2) as "self" note below
+    if recipient != wallet.default_address().unwrap().to_bech32m()?
+    {
+        if unpublished_notes.contains_key(&recipient)
+        {
+            unpublished_notes.get_mut(&recipient).unwrap().push(note_ct.clone());
+        }
+        else
+        {
+            unpublished_notes.insert(recipient, vec![note_ct.clone()]);
+        }
+    }
+    if unpublished_notes.contains_key(&"self".to_string())
+    {
+        unpublished_notes.get_mut(&"self".to_string()).unwrap().push(note_ct);
+    }
+    else
+    {
+        unpublished_notes.insert("self".to_string(), vec![note_ct]);
+    }
+
+    Ok(unpublished_notes)
+}
+
 #[cfg(test)]
 mod tests
 {
@@ -1765,12 +1826,6 @@ mod tests
     #[test]
     fn test_insert_auth_into_memo()
     {
-        //println!("{:?}", Name::from_string(&"mint".to_string()));
-        //println!("{:?}", Name::from_string(&"spend".to_string()));
-        //println!("{:?}", Name::from_string(&"authenticate".to_string()));
-        //println!("{:?}", Name::from_string(&"publishnotes".to_string()));
-        //println!("{:?}", Name::from_string(&"withdraw".to_string()));
-        
         let mut rng = OsRng.clone();
         let memo = "AUTH:$AUTH0 This is a sample memo string with random $AUTH2 values $AUTH1 inserted into it $AUTH0$AUTH plus the default address: $SELF".to_string();
         let auth_tokens = vec![
@@ -1794,12 +1849,14 @@ mod tests
             false,
             [0; 32],
             Name::from_string(&format!("zeos4privacy")).unwrap(),
+            Name::from_string(&format!("thezeosvault")).unwrap(),
             Authorization::from_string(&format!("thezeosalias@public")).unwrap()
         ).unwrap();
 
         let json = r#"{
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
             "protocol_contract": "zeos4privacy",
+            "vault_contract": "thezeosvault",
             "alias_authority": "thezeosalias@public",
             "add_fee": false,
             "publish_fee_note": true,
@@ -1882,7 +1939,7 @@ mod tests
         fees.insert(Name::from_string(&"output".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
         fees.insert(Name::from_string(&"authenticate".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
         fees.insert(Name::from_string(&"publishnotes".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        fees.insert(Name::from_string(&"withdraw".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        //fees.insert(Name::from_string(&"withdraw".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
         println!("{}", serde_json::to_string_pretty(&fees).unwrap());
 
         let ztx: ZTransaction = serde_json::from_str(&json).unwrap();
@@ -1905,6 +1962,7 @@ mod tests
             false,
             [0; 32],
             Name::from_string(&format!("zeos4privacy")).unwrap(),
+            Name::from_string(&format!("thezeosvault")).unwrap(),
             Authorization::from_string(&format!("thezeosalias@public")).unwrap()
         ).unwrap();
 
@@ -1941,6 +1999,7 @@ mod tests
         let json = r#"{
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
             "protocol_contract": "zeos4privacy",
+            "vault_contract": "thezeosvault",
             "alias_authority": "thezeosalias@public",
             "add_fee": true,
             "publish_fee_note": true,
@@ -2013,7 +2072,7 @@ mod tests
         fees.insert(Name::from_string(&"output".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
         fees.insert(Name::from_string(&"authenticate".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
         fees.insert(Name::from_string(&"publishnotes".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        fees.insert(Name::from_string(&"withdraw".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        //fees.insert(Name::from_string(&"withdraw".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
 
         let ztx: ZTransaction = serde_json::from_str(&json).unwrap();
         let rztx = resolve_ztransaction(&w, &fee_token_contract, &fees, &ztx);
