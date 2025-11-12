@@ -31,7 +31,7 @@ pub struct Name(pub u64);
 
 impl Name
 {
-    pub fn from_string(str: &String) -> Result<Self, NameError>
+    pub fn from_string(str: &str) -> Result<Self, NameError>
     {
         let mut value = 0;
         if str.len() > 13
@@ -231,18 +231,17 @@ impl<'de> Visitor<'de> for NameVisitor {
     type Value = Name;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a string with 12 characters containing 'a' to 'z' and '1' to '5'")
+        formatter.write_str("an EOSIO name (<=13 chars, [a-z1-5.] with 13th char <= 'j')")
     }
 
     fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(Name::from_string(&value.to_string()).unwrap())
+        Name::from_string(value).map_err(E::custom)
     }
 }
-impl<'de> Deserialize<'de> for Name
-{
+impl<'de> Deserialize<'de> for Name {
     fn deserialize<D>(deserializer: D) -> Result<Name, D::Error>
     where
         D: Deserializer<'de>,
@@ -351,14 +350,15 @@ impl<'de> Visitor<'de> for SymbolCodeVisitor {
     type Value = SymbolCode;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a string of the format: 'EOS' max 7 characters, containing only 'A' to 'Z'")
+        formatter.write_str("an uppercase symbol code (1-7 chars, A-Z)")
     }
 
     fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(SymbolCode::from_string(&value.to_string()).unwrap())
+        SymbolCode::from_string(&value.to_string())
+            .ok_or_else(|| E::custom("invalid SymbolCode (must be 1-7 uppercase letters)"))
     }
 }
 impl<'de> Deserialize<'de> for SymbolCode
@@ -435,14 +435,15 @@ impl<'de> Visitor<'de> for SymbolVisitor {
     type Value = Symbol;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a string of the format: '4,EOS' max 7 characters, containing only 'A' to 'Z'")
+        formatter.write_str("a string like '4,EOS' (precision 0-255, code 1-7 uppercase A-Z) or '0,' for NFTs")
     }
 
     fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(Symbol::from_string(&value.to_string()).unwrap())
+        Symbol::from_string(&value.to_string())
+            .ok_or_else(|| E::custom("invalid Symbol (expected 'P,SC' where SC is A-Z up to 7 chars)"))
     }
 }
 impl<'de> Deserialize<'de> for Symbol
@@ -452,6 +453,23 @@ impl<'de> Deserialize<'de> for Symbol
         D: Deserializer<'de>,
     {
         deserializer.deserialize_str(SymbolVisitor)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetError {
+    SymbolMismatch,
+    Overflow,
+    OutOfRange,
+}
+impl Error for AssetError {}
+impl fmt::Display for AssetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AssetError::SymbolMismatch => write!(f, "asset symbols do not match"),
+            AssetError::Overflow       => write!(f, "asset arithmetic overflow"),
+            AssetError::OutOfRange     => write!(f, "asset amount out of allowed range"),
+        }
     }
 }
 
@@ -479,7 +497,7 @@ impl Asset
         Some(Asset{amount, symbol})
     }
 
-    pub fn from_string(str: &String) -> Option<Self>
+    pub fn from_string(str: &str) -> Option<Self>
     {
         let parts: Vec<String> = str.split(" ").map(|s| s.to_string()).collect();
         if parts.len() == 1 // NFT case
@@ -553,28 +571,63 @@ impl Asset
         &self.symbol
     }
 
-    pub fn add(&self, rhs: &Self) -> Self
+    pub fn add(&self, rhs: &Self) -> Result<Self, AssetError>
     {
-        assert!(self.symbol.eq(&rhs.symbol));
-        Asset { amount: self.amount + rhs.amount, symbol: self.symbol.clone() }
+        if self.symbol != rhs.symbol {
+            return Err(AssetError::SymbolMismatch);
+        }
+        let sum = self.amount.checked_add(rhs.amount).ok_or(AssetError::Overflow)?;
+        if self.symbol.raw() != 0 {
+            // For fungible tokens, enforce MAX_AMOUNT bounds
+            if !( -Self::MAX_AMOUNT <= sum && sum <= Self::MAX_AMOUNT ) {
+                return Err(AssetError::OutOfRange);
+            }
+        }
+        Ok(Asset { amount: sum, symbol: self.symbol.clone() })
     }
 
-    pub fn add_assign(&mut self, rhs: &Self)
+    pub fn add_assign(&mut self, rhs: &Self) -> Result<(), AssetError>
     {
-        assert!(self.symbol.eq(&rhs.symbol));
-        self.amount += rhs.amount;
+        if self.symbol != rhs.symbol {
+            return Err(AssetError::SymbolMismatch);
+        }
+        let sum = self.amount.checked_add(rhs.amount).ok_or(AssetError::Overflow)?;
+        if self.symbol.raw() != 0 {
+            if !( -Self::MAX_AMOUNT <= sum && sum <= Self::MAX_AMOUNT ) {
+                return Err(AssetError::OutOfRange);
+            }
+        }
+        self.amount = sum;
+        Ok(())
     }
 
-    pub fn sub(&self, rhs: &Self) -> Self
+    pub fn sub(&self, rhs: &Self) -> Result<Self, AssetError>
     {
-        assert!(self.symbol.eq(&rhs.symbol));
-        Asset { amount: self.amount - rhs.amount, symbol: self.symbol.clone() }
+        if self.symbol != rhs.symbol {
+            return Err(AssetError::SymbolMismatch);
+        }
+        let diff = self.amount.checked_sub(rhs.amount).ok_or(AssetError::Overflow)?;
+        if self.symbol.raw() != 0 {
+            if !( -Self::MAX_AMOUNT <= diff && diff <= Self::MAX_AMOUNT ) {
+                return Err(AssetError::OutOfRange);
+            }
+        }
+        Ok(Asset { amount: diff, symbol: self.symbol.clone() })
     }
 
-    pub fn sub_assign(&mut self, rhs: &Self)
+    pub fn sub_assign(&mut self, rhs: &Self) -> Result<(), AssetError>
     {
-        assert!(self.symbol.eq(&rhs.symbol));
-        self.amount -= rhs.amount;
+        if self.symbol != rhs.symbol {
+            return Err(AssetError::SymbolMismatch);
+        }
+        let diff = self.amount.checked_sub(rhs.amount).ok_or(AssetError::Overflow)?;
+        if self.symbol.raw() != 0 {
+            if !( -Self::MAX_AMOUNT <= diff && diff <= Self::MAX_AMOUNT ) {
+                return Err(AssetError::OutOfRange);
+            }
+        }
+        self.amount = diff;
+        Ok(())
     }
 
     pub fn write_decimal(number: u64, precision: u8, negative: bool) -> String
@@ -671,14 +724,15 @@ impl<'de> Visitor<'de> for AssetVisitor {
     type Value = Asset;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a string of the format: '10.0000 EOS'")
+        formatter.write_str("an asset string like '10.0000 EOS' or an NFT amount like '123456789'")
     }
 
     fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(Asset::from_string(&value.to_string()).unwrap())
+        Asset::from_string(&value.to_string())
+            .ok_or_else(|| E::custom("invalid Asset string"))
     }
 }
 impl<'de> Deserialize<'de> for Asset
@@ -716,7 +770,7 @@ impl ExtendedAsset
         &self.contract
     }
 
-    pub fn from_string(str: &String) -> Option<Self>
+    pub fn from_string(str: &str) -> Option<Self>
     {
         let parts: Vec<String> = str.split("@").map(|s| s.to_string()).collect();
         if parts.len() == 2
@@ -754,14 +808,15 @@ impl<'de> Visitor<'de> for ExtendedAssetVisitor {
     type Value = ExtendedAsset;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a string of the format: '10.0000 EOS@eosio.token'")
+        formatter.write_str("an extended asset like '10.0000 EOS@eosio.token'")
     }
 
     fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(ExtendedAsset::from_string(&value.to_string()).unwrap())
+        ExtendedAsset::from_string(&value.to_string())
+            .ok_or_else(|| E::custom("invalid ExtendedAsset string (expected '<amount> <CODE>@<contract>')"))
     }
 }
 impl<'de> Deserialize<'de> for ExtendedAsset
@@ -783,25 +838,35 @@ pub struct Authorization
 
 impl Authorization
 {
-    pub fn from_string(str: &String) -> Option<Self>
+    pub fn from_string(s: &str) -> Result<Self, String>
     {
-        // determine EOSIO Authorization tuple: actor@permission
-        let authorization_parts: Vec<String> = str.split('@').map(|s| s.to_string()).collect();
-        let actor = Some(Name::from_string(&authorization_parts[0]).unwrap());
-        let permission =
-            if authorization_parts.len() == 1 { Some(Name::from_string(&"active".to_string()).unwrap()) } else
-            if authorization_parts.len() == 2 { Some(Name::from_string(&authorization_parts[1]).unwrap()) } else
-            { None };
-        if actor.is_none() || permission.is_none() { return None; }
-        Some(Authorization{
-            actor: actor.unwrap(),
-            permission: permission.unwrap()
-        })
+        // Split actor@permission
+        let parts: Vec<&str> = s.split('@').collect();
+        if parts.is_empty() || parts[0].is_empty() {
+            return Err("authorization string is empty".into());
+        }
+
+        // Parse actor
+        let actor = Name::from_string(parts[0])
+            .map_err(|e| format!("invalid actor name '{}': {}", parts[0], e))?;
+
+        // Parse permission
+        let permission = if parts.len() == 1 {
+            Name::from_string("active")
+                .map_err(|e| format!("invalid default permission: {}", e))?
+        } else if parts.len() == 2 {
+            Name::from_string(parts[1])
+                .map_err(|e| format!("invalid permission '{}': {}", parts[1], e))?
+        } else {
+            return Err(format!("invalid authorization format '{}'", s));
+        };
+
+        Ok(Authorization { actor, permission })
     }
 
     pub fn to_string(&self) -> String
     {
-        self.actor.to_string() + "@" + &self.permission.to_string()
+        format!("{}@{}", self.actor.to_string(), self.permission.to_string())
     }
 }
 

@@ -150,7 +150,7 @@ mod tests
         };
         println!("{}", serde_json::to_string_pretty(&tx).unwrap());
         println!("zverify...");
-        assert!(zverify_spend_transaction(&tx.0, &params));
+        assert!(zverify_spend_transaction(&tx.0, &params).is_ok());
 
         let json = r#"{
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
@@ -230,7 +230,7 @@ mod tests
         };
         println!("{}", serde_json::to_string_pretty(&tx).unwrap());
         println!("zverify...");
-        assert!(zverify_spend_transaction(&tx.0, &params));
+        assert!(zverify_spend_transaction(&tx.0, &params).is_ok());
 
         let json = r#"{
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
@@ -274,7 +274,7 @@ mod tests
         };
         println!("{}", serde_json::to_string_pretty(&tx).unwrap());
         println!("zverify...");
-        assert!(zverify_spend_transaction(&tx.0, &params));
+        assert!(zverify_spend_transaction(&tx.0, &params).is_ok());
 
         let json = r#"{
             "chain_id": "aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906",
@@ -336,6 +336,6 @@ mod tests
         };
         println!("{}", serde_json::to_string_pretty(&tx).unwrap());
         println!("zverify...");
-        assert!(zverify_spend_transaction(&tx.0, &params));
+        assert!(zverify_spend_transaction(&tx.0, &params).is_ok());
     }
 }

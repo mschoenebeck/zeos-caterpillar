@@ -371,15 +371,42 @@ impl IncomingViewingKey {
     }
 
     /// Parse a Bech32m encoded Incoming Viewing Key
-    pub fn from_bech32m(str: &String) -> Result<Self, Box<dyn Error>>
-    {
-        if str.len() < 113 { Err(DecodingError::LengthInvalid { expected: 113, actual: str.len() })? }
-        let (hrp, data, variant) = bech32::decode(&str).unwrap();
-        let bytes: [u8; 64] = Vec::<u8>::from_base32(&data)?[0..64].try_into().expect("from_bech32m: incorrect length");
-        assert_eq!(hrp, "ivk");
-        assert_eq!(variant, Variant::Bech32m);
-        Ok(Self::from_bytes(&bytes).unwrap())
+    pub fn from_bech32m(s: &str) -> Result<Self, String> {
+        if s.len() < 113 {
+            return Err(format!(
+                "from_bech32m: invalid length, expected at least 113 chars, got {}",
+                s.len()
+            ));
+        }
+        let (hrp, data, variant) = bech32::decode(s)
+            .map_err(|e| format!("bech32 decode failed: {}", e))?;
+        if hrp != "ivk" {
+            return Err(format!("unexpected HRP '{}', expected 'ivk'", hrp).into());
+        }
+        if variant != bech32::Variant::Bech32m {
+            return Err(format!("unexpected bech32 variant {:?}, expected Bech32m", variant).into());
+        }
+        let decoded = Vec::<u8>::from_base32(&data)
+            .map_err(|e| format!("base32 decoding failed: {}", e))?;
+        if decoded.len() < 64 {
+            return Err(format!(
+                "from_bech32m: incorrect length, got {} bytes, expected at least 64",
+                decoded.len()
+            )
+            .into());
+        }
+        let bytes: [u8; 64] = decoded[0..64]
+            .try_into()
+            .map_err(|_| "from_bech32m: cannot slice 64 bytes".to_string())?;
+        let ivk_ct = Self::from_bytes(&bytes);
+        if bool::from(ivk_ct.is_some()) {
+            let ivk = ivk_ct.unwrap();
+            Ok(ivk)
+        } else {
+            Err("from_bech32m: invalid byte data for viewing key".to_string())
+        }
     }
+    
 
     /// Returns the payment address for this key corresponding to the given diversifier.
     pub fn to_payment_address(&self, d: Diversifier) -> Option<Address> {

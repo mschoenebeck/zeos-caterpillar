@@ -317,14 +317,14 @@ impl Wallet
         self.chain_id
     }
 
-    pub fn protocol_contract(&self) -> Name
+    pub fn protocol_contract(&self) -> &Name
     {
-        self.protocol_contract
+        &self.protocol_contract
     }
 
-    pub fn vault_contract(&self) -> Name
+    pub fn vault_contract(&self) -> &Name
     {
-        self.vault_contract
+        &self.vault_contract
     }
 
     pub fn alias_authority(&self) -> &Authorization
@@ -699,7 +699,7 @@ impl Wallet
     }
 
     // Merkle Tree must be up-to-date before calling this function!
-    pub fn digest_block(&mut self, block: &String) -> u64
+    pub fn digest_block(&mut self, block: &str) -> u64
     {
         let sk = SpendingKey::from_seed(&self.seed);
         let fvk = FullViewingKey::from_spending_key(&sk);
@@ -742,7 +742,7 @@ impl Wallet
                             for so in seq.spend_output.iter()
                             {
                                 // check if published nullifier belongs to one of our notes
-                                let index = self.unspent_notes.iter().position(|n| n.note().nullifier(&fvk.nk, n.position()).extract().0.eq(&Scalar::from(so.nf.clone())));
+                                let index = self.unspent_notes.iter().position(|n| n.note().nullifier(&fvk.nk, n.position()).extract().0.eq(&Scalar::try_from(so.nf.clone()).unwrap()));
                                 if index.is_some()
                                 {
                                     let note = self.unspent_notes.remove(index.unwrap());
@@ -754,7 +754,7 @@ impl Wallet
                             for s in seq.spend.iter()
                             {
                                 // check if published nullifier belongs to one of our notes
-                                let index = self.unspent_notes.iter().position(|n| n.note().nullifier(&fvk.nk, n.position()).extract().0.eq(&Scalar::from(s.nf.clone())));
+                                let index = self.unspent_notes.iter().position(|n| n.note().nullifier(&fvk.nk, n.position()).extract().0.eq(&Scalar::try_from(s.nf.clone()).unwrap()));
                                 if index.is_some()
                                 {
                                     let note = self.unspent_notes.remove(index.unwrap());
@@ -769,7 +769,7 @@ impl Wallet
                         let a: PlsAuthenticate = serde_json::from_value(action["data"]["action"].clone()).unwrap();
 
                         // check if published note commitment belongs to one of our auth notes
-                        let index = self.unspent_notes.iter().position(|n| n.note().commitment().0.eq(&Scalar::from(a.cm.clone())));
+                        let index = self.unspent_notes.iter().position(|n| n.note().commitment().0.eq(&Scalar::try_from(a.cm.clone()).unwrap()));
                         if index.is_some()
                         {
                             if a.burn == 0

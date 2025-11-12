@@ -3,6 +3,8 @@ use bls12_381::{Bls12, G1Affine, G2Affine};
 use serde::{Serialize, Deserialize, Serializer, Deserializer, de::Visitor, de};
 use crate::eosio::{Asset, Name, PackedAction, Symbol};
 use std::fmt;
+use std::convert::TryFrom;
+use std::error::Error;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScalarBytes(pub [u8; 32]);
@@ -14,20 +16,22 @@ impl ScalarBytes
         hex::encode(self.0)
     }
 
-    pub fn from_string(str: &String) -> Option<Self>
+    pub fn from_string(s: &str) -> Result<Self, String>
     {
-        let bytes= hex::decode(str);
-        if bytes.is_err() { return None; }
-        Some(ScalarBytes(bytes.unwrap().try_into().unwrap()))
+        // 64 hex chars -> 32 bytes
+        if s.len() != 64 {
+            return Err(format!("invalid hex length: expected 64, got {}", s.len()));
+        }
+        let v = hex::decode(s).map_err(|e| format!("invalid hex: {e}"))?;
+        let arr: [u8; 32] = v.try_into().map_err(|_| "invalid byte length".to_string())?;
+        Ok(ScalarBytes(arr))
     }
 }
 
 // serde_json traits
 impl Serialize for ScalarBytes
 {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error>
     {
         serializer.serialize_str(&self.to_string())
     }
@@ -36,23 +40,17 @@ struct ScalarBytesVisitor;
 impl<'de> Visitor<'de> for ScalarBytesVisitor {
     type Value = ScalarBytes;
 
-    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a hex string with 64 characters")
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a 64-char hex string (32 bytes)")
     }
 
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(ScalarBytes::from_string(&value.to_string()).unwrap())
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        ScalarBytes::from_string(value).map_err(E::custom)
     }
 }
 impl<'de> Deserialize<'de> for ScalarBytes
 {
-    fn deserialize<D>(deserializer: D) -> Result<ScalarBytes, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<ScalarBytes, D::Error> {
         deserializer.deserialize_str(ScalarBytesVisitor)
     }
 }
@@ -63,9 +61,12 @@ impl From<bls12_381::Scalar> for ScalarBytes {
     }
 }
 
-impl From<ScalarBytes> for bls12_381::Scalar {
-    fn from(s: ScalarBytes) -> Self {
-        bls12_381::Scalar::from_bytes(&s.0).unwrap()
+impl TryFrom<ScalarBytes> for bls12_381::Scalar {
+    type Error = &'static str;
+    fn try_from(s: ScalarBytes) -> Result<Self, Self::Error> {
+        // Returns None if not canonical
+        Option::from(bls12_381::Scalar::from_bytes(&s.0))
+            .ok_or("non-canonical scalar bytes")
     }
 }
 
@@ -165,21 +166,21 @@ impl AffineProofBytesLE
         hex::encode(self.0)
     }
 
-    pub fn from_string(str: &String) -> Option<Self>
+    pub fn from_string(str: &str) -> Result<Self, String>
     {
-        let bytes= hex::decode(str);
-        if bytes.is_err() { return None; }
-        Some(AffineProofBytesLE(bytes.unwrap().try_into().unwrap()))
+        if str.len() != 768 {
+            return Err(format!("invalid hex length: expected 768, got {}", str.len()));
+        }
+        let v = hex::decode(str).map_err(|e| format!("invalid hex: {e}"))?;
+        let arr: [u8; 384] = v.try_into().map_err(|_| "invalid byte length")?;
+        Ok(AffineProofBytesLE(arr))
     }
 }
 
 // serde_json traits
 impl Serialize for AffineProofBytesLE
 {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.to_string())
     }
 }
@@ -187,112 +188,88 @@ struct AffineProofBytesVisitor;
 impl<'de> Visitor<'de> for AffineProofBytesVisitor {
     type Value = AffineProofBytesLE;
 
-    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a hex string with 64 characters")
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a 768-char hex string (384 bytes)")
     }
 
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(AffineProofBytesLE::from_string(&value.to_string()).unwrap())
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        AffineProofBytesLE::from_string(value).map_err(E::custom)
     }
 }
 impl<'de> Deserialize<'de> for AffineProofBytesLE
 {
-    fn deserialize<D>(deserializer: D) -> Result<AffineProofBytesLE, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<AffineProofBytesLE, D::Error> {
         deserializer.deserialize_str(AffineProofBytesVisitor)
     }
 }
 
-impl From<Proof<Bls12>> for AffineProofBytesLE
-{
-    //fn from(p: Proof<Bls12>) -> Self
-    //{
-    //    let a_bytes = p.a.to_uncompressed();
-    //    let a_x = Fp::from_bytes(&a_bytes[ 0..48].try_into().unwrap()).unwrap();
-    //    let a_y = Fp::from_bytes(&a_bytes[48..96].try_into().unwrap()).unwrap();
-    //    let b_bytes = p.b.to_uncompressed();
-    //    let b_x_c1 = Fp::from_bytes(&b_bytes[  0.. 48].try_into().unwrap()).unwrap();
-    //    let b_x_c0 = Fp::from_bytes(&b_bytes[ 48.. 96].try_into().unwrap()).unwrap();
-    //    let b_y_c1 = Fp::from_bytes(&b_bytes[ 96..144].try_into().unwrap()).unwrap();
-    //    let b_y_c0 = Fp::from_bytes(&b_bytes[144..192].try_into().unwrap()).unwrap();
-    //    let c_bytes = p.c.to_uncompressed();
-    //    let c_x = Fp::from_bytes(&c_bytes[ 0..48].try_into().unwrap()).unwrap();
-    //    let c_y = Fp::from_bytes(&c_bytes[48..96].try_into().unwrap()).unwrap();
-//
-    //    let mut bytes = [0; 384];
-    //    bytes[  0.. 48].copy_from_slice(&a_x.to_raw_le_bytes());
-    //    bytes[ 48.. 96].copy_from_slice(&a_y.to_raw_le_bytes());
-    //    bytes[ 96..144].copy_from_slice(&b_x_c0.to_raw_le_bytes());
-    //    bytes[144..192].copy_from_slice(&b_x_c1.to_raw_le_bytes());
-    //    bytes[192..240].copy_from_slice(&b_y_c0.to_raw_le_bytes());
-    //    bytes[240..288].copy_from_slice(&b_y_c1.to_raw_le_bytes());
-    //    bytes[288..336].copy_from_slice(&c_x.to_raw_le_bytes());
-    //    bytes[336..384].copy_from_slice(&c_y.to_raw_le_bytes());
-    //    AffineProofBytes(bytes)
-    //}
+#[derive(Debug)]
+pub enum ProofConvError {
+    InvalidG1,
+    InvalidG2,
+}
+impl fmt::Display for ProofConvError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProofConvError::InvalidG1 => f.write_str("invalid G1 point"),
+            ProofConvError::InvalidG2 => f.write_str("invalid G2 point"),
+        }
+    }
+}
+impl Error for ProofConvError {}
+impl TryFrom<Proof<Bls12>> for AffineProofBytesLE {
+    type Error = ProofConvError;
 
-    fn from(p: Proof<Bls12>) -> Self
-    {
-        // need to reverse endianess for all elements because 'to_uncompressed()' delivers big-endian byte encoding
-        let mut a_bytes = p.a.to_uncompressed();
-        a_bytes[ 0..48].reverse();      // a.x
-        a_bytes[48..96].reverse();      // a.y
-        let mut b_bytes = p.b.to_uncompressed();
-        b_bytes[  0.. 48].reverse();    // b.x.c1
-        b_bytes[ 48.. 96].reverse();    // b.x.c0
-        b_bytes[ 96..144].reverse();    // b.y.c1
-        b_bytes[144..192].reverse();    // b.y.c0
-        let mut c_bytes = p.c.to_uncompressed();
-        c_bytes[ 0..48].reverse();      // c.x
-        c_bytes[48..96].reverse();      // c.y
+    fn try_from(p: Proof<Bls12>) -> Result<Self, Self::Error> {
+        // big-endian -> little-endian reorders (unchanged logic), no fallible steps here
+        let mut a = p.a.to_uncompressed();
+        a[..48].reverse(); a[48..96].reverse();
+        let mut b = p.b.to_uncompressed();
+        b[..48].reverse(); b[48..96].reverse(); b[96..144].reverse(); b[144..192].reverse();
+        let mut c = p.c.to_uncompressed();
+        c[..48].reverse(); c[48..96].reverse();
 
-        let mut bytes = [0; 384];
-        bytes[  0.. 48].copy_from_slice(&a_bytes[  0.. 48]);    // a.x
-        bytes[ 48.. 96].copy_from_slice(&a_bytes[ 48.. 96]);    // a.y
-        bytes[ 96..144].copy_from_slice(&b_bytes[ 48.. 96]);    // b.x.c0
-        bytes[144..192].copy_from_slice(&b_bytes[  0.. 48]);    // b.x.c1
-        bytes[192..240].copy_from_slice(&b_bytes[144..192]);    // b.y.c0
-        bytes[240..288].copy_from_slice(&b_bytes[ 96..144]);    // b.y.c1
-        bytes[288..336].copy_from_slice(&c_bytes[  0.. 48]);    // c.x
-        bytes[336..384].copy_from_slice(&c_bytes[ 48.. 96]);    // c.y
-        AffineProofBytesLE(bytes)
+        let mut out = [0u8; 384];
+        out[  0.. 48].copy_from_slice(&a[  0.. 48]); // a.x (LE)
+        out[ 48.. 96].copy_from_slice(&a[ 48.. 96]); // a.y (LE)
+        out[ 96..144].copy_from_slice(&b[ 48.. 96]); // b.x.c0 (LE)
+        out[144..192].copy_from_slice(&b[  0.. 48]); // b.x.c1 (LE)
+        out[192..240].copy_from_slice(&b[144..192]); // b.y.c0 (LE)
+        out[240..288].copy_from_slice(&b[ 96..144]); // b.y.c1 (LE)
+        out[288..336].copy_from_slice(&c[  0.. 48]); // c.x (LE)
+        out[336..384].copy_from_slice(&c[ 48.. 96]); // c.y (LE)
+
+        Ok(AffineProofBytesLE(out))
     }
 }
 
-impl From<AffineProofBytesLE> for Proof<Bls12>
-{
-    fn from(p: AffineProofBytesLE) -> Self
-    {
-        // need to reverse endianess for all elements because 'from_uncompressed()' expects big-endian byte encoding
-        let mut a_bytes = [0; 96];
-        a_bytes[ 0.. 48].copy_from_slice(&p.0[ 0..48]);     // a.x
-        a_bytes[48.. 96].copy_from_slice(&p.0[48..96]);     // a.y
-        a_bytes[ 0..48].reverse();
-        a_bytes[48..96].reverse();
-        let mut b_bytes = [0; 192];
-        b_bytes[  0.. 48].copy_from_slice(&p.0[144..192]);  // b.x.c1
-        b_bytes[ 48.. 96].copy_from_slice(&p.0[ 96..144]);  // b.x.c0
-        b_bytes[ 96..144].copy_from_slice(&p.0[240..288]);  // b.y.c1
-        b_bytes[144..192].copy_from_slice(&p.0[192..240]);  // b.y.c0
-        b_bytes[  0.. 48].reverse();
-        b_bytes[ 48.. 96].reverse();
-        b_bytes[ 96..144].reverse();
-        b_bytes[144..192].reverse();
-        let mut c_bytes = [0; 96];
-        c_bytes[ 0..48].copy_from_slice(&p.0[288..336]);    // c.x
-        c_bytes[48..96].copy_from_slice(&p.0[336..384]);    // c.y
-        c_bytes[ 0..48].reverse();
-        c_bytes[48..96].reverse();
-        Proof::<Bls12>{
-            a: G1Affine::from_uncompressed(&a_bytes).unwrap(),
-            b: G2Affine::from_uncompressed(&b_bytes).unwrap(),
-            c: G1Affine::from_uncompressed(&c_bytes).unwrap()
-        }
+impl TryFrom<AffineProofBytesLE> for Proof<Bls12> {
+    type Error = ProofConvError;
+
+    fn try_from(p: AffineProofBytesLE) -> Result<Self, Self::Error> {
+        // Rebuild big-endian uncompressed encodings
+        let mut a = [0u8; 96];
+        a[  0.. 48].copy_from_slice(&p.0[ 0.. 48]); // a.x (LE)
+        a[ 48.. 96].copy_from_slice(&p.0[48.. 96]); // a.y (LE)
+        a[..48].reverse(); a[48..96].reverse();     // -> big-endian
+
+        let mut b = [0u8; 192];
+        b[  0.. 48].copy_from_slice(&p.0[144..192]); // b.x.c1 (LE)
+        b[ 48.. 96].copy_from_slice(&p.0[ 96..144]); // b.x.c0 (LE)
+        b[ 96..144].copy_from_slice(&p.0[240..288]); // b.y.c1 (LE)
+        b[144..192].copy_from_slice(&p.0[192..240]); // b.y.c0 (LE)
+        b[..48].reverse(); b[48..96].reverse(); b[96..144].reverse(); b[144..192].reverse();
+
+        let mut c = [0u8; 96];
+        c[  0.. 48].copy_from_slice(&p.0[288..336]); // c.x (LE)
+        c[ 48.. 96].copy_from_slice(&p.0[336..384]); // c.y (LE)
+        c[..48].reverse(); c[48..96].reverse();
+
+        let a = Option::from(G1Affine::from_uncompressed(&a)).ok_or(ProofConvError::InvalidG1)?;
+        let b = Option::from(G2Affine::from_uncompressed(&b)).ok_or(ProofConvError::InvalidG2)?;
+        let c = Option::from(G1Affine::from_uncompressed(&c)).ok_or(ProofConvError::InvalidG1)?;
+
+        Ok(Proof { a, b, c })
     }
 }
 
@@ -368,7 +345,7 @@ pub struct PlsMint
     pub value: u64,
     // too many wallet don't accept a value of zero for type symbol
     // that's why we change it to a u64 to avoid serialization problems
-    // with, for exampl, eosjs or wharfkit etc
+    // with, for example, eosjs or wharfkit etc
     //pub symbol: Symbol,
     #[serde(deserialize_with = "de_u64_from_str_or_int", serialize_with = "ser_u64_num_or_string")]
     pub symbol: u64,
@@ -500,9 +477,10 @@ pub struct PlsNftTransfer
 }
 
 // converts a bls12-381 scalar to its raw byte representation (i.e. montgomery form instead of canonical)
-pub fn scalar_to_raw_bytes_le(s: &bls12_381::Scalar) -> [u8; 32]
-{
-    Scalar::from_bytes(&s.to_bytes()).unwrap().to_raw_bytes()
+pub fn scalar_to_raw_bytes_le(s: &bls12_381::Scalar) -> [u8; 32] {
+    // to_bytes() is canonical; from_bytes() must succeed
+    let mont = Scalar::from_bytes(&s.to_bytes()).expect("canonical bls12_381::Scalar must convert");
+    mont.to_raw_bytes()
 }
 
 
@@ -1072,7 +1050,7 @@ mod tests
             value: note.amount(),
             symbol: note.symbol().raw(),
             contract: note.contract().clone(),
-            proof: AffineProofBytesLE::from(proof.clone())
+            proof: AffineProofBytesLE::try_from(proof.clone()).unwrap()
         };
         println!("{}", serde_json::to_string(&a).unwrap());
 
@@ -1093,8 +1071,8 @@ mod tests
         inputs.extend(inputs2_contents.clone());
         inputs.extend(inputs3_contents.clone());
 
-        let proof_serde = AffineProofBytesLE::from(proof.clone());
-        let proof_serde = Proof::<Bls12>::from(proof_serde);
+        let proof_serde = AffineProofBytesLE::try_from(proof.clone()).unwrap();
+        let proof_serde = Proof::<Bls12>::try_from(proof_serde).unwrap();
         assert!(proof.eq(&proof_serde));
 
         assert!(verify_proof(&prepare_verifying_key(&mint_params.vk), &proof, &inputs).is_ok());

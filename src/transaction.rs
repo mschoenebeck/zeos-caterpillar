@@ -1,5 +1,5 @@
-use crate::address::Address;
-use crate::eosio::{pack, Action, Asset, Authorization, ExtendedAsset, Name, PackedAction, Symbol, Transaction};
+use crate::address::{Address, AddressError};
+use crate::eosio::{pack, Action, Asset, Authorization, ExtendedAsset, Name, PackedAction, Symbol, Transaction, NameError};
 use crate::keys::{FullViewingKey, SpendingKey};
 use crate::note::nullifier::ExtractedNullifier;
 use crate::note::{Note, NoteEx, Rseed, ExtractedNoteCommitment};
@@ -16,7 +16,7 @@ use jubjub::AffinePoint;
 use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use serde_json::json;
-use std::{error::Error, fmt, cmp::min};
+use std::{fmt, cmp::min};
 use std::collections::HashMap;
 use std::ops::{Add, AddAssign};
 use rand::rngs::OsRng;
@@ -44,9 +44,22 @@ pub enum TransactionError
     SpendParams,
     OutputParams,
     InvalidNote,
-    InvalidProtocolContractOrVaultContractOrAliasAuthority
+    InvalidProtocolContractOrVaultContractOrAliasAuthority,
+    FeeSymbol,
+    SpendToZero,
+
+    // Typed wrappers for common sources:
+    Hex(hex::FromHexError),
+    Serde(serde_json::Error),
+    Groth16(bellman::SynthesisError),
+    // Missing fee key like "begin", "spend", etc.
+    MissingFee(&'static str),
+    Address(AddressError),
+    Name(NameError),
+    Synthesis(String),
+    ProofSystem(String),      // keep a string for diagnostics
+    ProofBytes,
 }
-impl Error for TransactionError {}
 impl fmt::Display for TransactionError
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result
@@ -58,7 +71,7 @@ impl fmt::Display for TransactionError
             Self::IvkWallet => write!(f, "Read-Only Wallet (spending not possible)"),
             Self::AuthTokenContractAccount => write!(f, "For Auth tokens 'from' account must equal 'contract' account"),
             Self::NFTNotFound => write!(f, "NFT not found!"),
-            Self::InsufficientFunds => write!(f, "Insufficient funds!"),
+            Self::InsufficientFunds => write!(f, "insufficient funds"),
             Self::InvalidAuthToken => write!(f, "invalid auth token"),
             Self::MintParams => write!(f, "invalid mint params"),
             Self::SpendOutputParams => write!(f, "invalid spend_output params"),
@@ -66,10 +79,35 @@ impl fmt::Display for TransactionError
             Self::OutputParams => write!(f, "invalid output params"),
             Self::InvalidNote => write!(f, "note invalid"),
             Self::InvalidProtocolContractOrVaultContractOrAliasAuthority => write!(f, "protocol contract or vault contract or alias authority invalid"),
+            Self::FeeSymbol => write!(f, "fee symbol invalid"),
+            Self::SpendToZero => write!(f, "spend sequence 'to' vector length zero"),
+            Self::Hex(e) => write!(f, "hex decode error: {}", e),
+            Self::Serde(e) => write!(f, "serde error: {}", e),
+            Self::Groth16(e) => write!(f, "groth16 synthesis error: {}", e),
+            Self::MissingFee(k) => write!(f, "missing fee for action '{}'", k),
+            Self::Address(e) => write!(f, "address error: {}", e),
+            Self::Name(e) => write!(f, "name error: {}", e),
+            Self::Synthesis(e) => write!(f, "synthesis error: {}", e),
+            Self::ProofSystem(e)  => write!(f, "proof system error: {}", e),
+            Self::ProofBytes => write!(f, "proof bytes invalid"),
         }
     }
 }
-
+impl From<hex::FromHexError> for TransactionError {
+    fn from(e: hex::FromHexError) -> Self { TransactionError::Hex(e) }
+}
+impl From<serde_json::Error> for TransactionError {
+    fn from(e: serde_json::Error) -> Self { TransactionError::Serde(e) }
+}
+impl From<bellman::SynthesisError> for TransactionError {
+    fn from(e: bellman::SynthesisError) -> Self { TransactionError::Groth16(e) }
+}
+impl From<AddressError> for TransactionError {
+    fn from(e: AddressError) -> Self { TransactionError::Address(e) }
+}
+impl From<NameError> for TransactionError {
+    fn from(e: NameError) -> Self { TransactionError::Name(e) }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ZTransaction
@@ -153,16 +191,15 @@ pub struct WithdrawDesc
 
 pub fn insert_vars(memo: &String, default_address: &String, auth_tokens: &Vec<Note>) -> String
 {
-    let mut new_memo = memo.clone();
-    // insert default address
-    new_memo = new_memo.replace(&"$SELF", &default_address);
-    // a maximum of 10 auth tokens is supported
-    let num = min(10, auth_tokens.len());
-    for i in 0..num
-    {
-        let mut pattern = "$AUTH".to_string();
-        pattern.push(char::from_digit(i as u32, 10).unwrap());
-        new_memo = new_memo.replace(&pattern, &hex::encode(&auth_tokens[i].commitment().to_bytes()));
+    let mut new_memo = memo.replace("$SELF", default_address);
+
+    // up to 10 $AUTHi placeholders (i ∈ [0..9])
+    let num = std::cmp::min(10, auth_tokens.len());
+    for i in 0..num {
+        let pat = format!("$AUTH{i}");
+        // always safe: 32-byte commitment -> hex
+        let cm_hex = hex::encode(auth_tokens[i].commitment().to_bytes());
+        new_memo = new_memo.replace(&pat, &cm_hex);
     }
     new_memo
 }
@@ -233,62 +270,83 @@ fn select_auth_note(unspent_notes: &mut Vec<NoteEx>, cm: &ExtractedNoteCommitmen
     None
 }
 
-fn select_fee_notes(unspent_notes: &mut Vec<NoteEx>, fees: &HashMap<Name, Asset>, contract: &Name, change: u64, fee: u64, num_outputs: usize) -> Option<(Vec<NoteEx>, u64, u64)>
+fn select_fee_notes(
+    unspent_notes: &mut Vec<NoteEx>,
+    fees: &HashMap<Name, Asset>,
+    contract: &Name,
+    change: u64,
+    mut fee: u64,
+    mut num_outputs: usize
+) -> Option<(Vec<NoteEx>, u64, u64)>
 {
-    if change >= fee
-    {
+    if change >= fee {
         return Some((vec![], change - fee, fee));
     }
-    // sort 'notes' by note amount, ascending order and walk backwards through them in order to be able to safely remove elements
+
+    // sort notes ascending by amount
     unspent_notes.sort_by(|a, b| a.note().amount().cmp(&b.note().amount()));
     let mut res = Vec::new();
     let mut sum = change;
-    let mut fee = fee;
-    let mut no = num_outputs;
-    for i in (0..unspent_notes.len()).rev()
-    {
-        if contract.eq(unspent_notes[i].note().contract()) &&                                       // fee contract
-            fees.values().next().unwrap().symbol().eq(unspent_notes[i].note().symbol()) &&  // fee symbol
-            !unspent_notes[i].note().quantity().is_nft()                                       // no nft or auth token
-        {
-            sum += unspent_notes[i].note().amount() as u64;
-            fee += if no > 0 { 
-                // output is being replaced with a spend_output => subtract output fee and add spend_output fee, reduce 'no' by one
-                no -= 1;
-                (fees.get(&Name::from_string(&"spendoutput".to_string()).unwrap()).unwrap().amount() - fees.get(&Name::from_string(&"output".to_string()).unwrap()).unwrap().amount()) as u64
+
+    for i in (0..unspent_notes.len()).rev() {
+        let note = &unspent_notes[i];
+        let same_contract = contract.eq(note.note().contract());
+        let fee_symbol = fees.values().next()?.symbol();
+        let same_symbol = fee_symbol.eq(note.note().symbol());
+        let not_nft = !note.note().quantity().is_nft();
+
+        if same_contract && same_symbol && not_nft {
+            sum += note.note().amount() as u64;
+
+            if num_outputs > 0 {
+                // Replace an output with a spend_output
+                num_outputs -= 1;
+
+                let spendoutput_fee = fees.get(&Name::from_string(&"spendoutput").ok()?)?.amount();
+                let output_fee = fees.get(&Name::from_string(&"output").ok()?)?.amount();
+                fee += (spendoutput_fee - output_fee) as u64;
             } else {
-                fees.get(&Name::from_string(&"spend".to_string()).unwrap()).unwrap().amount() as u64
-            };
+                let spend_fee = fees.get(&Name::from_string(&"spend").ok()?)?.amount();
+                fee += spend_fee as u64;
+            }
+
             res.push(unspent_notes.remove(i));
-            if sum >= fee
-            {
-                // collected enough fungible notes, return notes & change amount
+
+            if sum >= fee {
                 return Some((res, sum - fee, fee));
             }
         }
     }
-    // Not enough notes! Move picked notes in 'res' back to 'notes' and return 'None'.
+
+    // Not enough notes — put them back and return None
     unspent_notes.append(&mut res);
     None
 }
 
-pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &HashMap<Name, Asset>, ztx: &ZTransaction) -> Result<ResolvedZTransaction, Box<dyn Error>>
+pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &HashMap<Name, Asset>, ztx: &ZTransaction) -> Result<ResolvedZTransaction, TransactionError>
 {
     if wallet.is_ivk()
     {
         Err(TransactionError::IvkWallet)?
     }
-    if !wallet.protocol_contract().eq(&ztx.protocol_contract) || !wallet.vault_contract().eq(&ztx.vault_contract) || !wallet.alias_authority().eq(&Authorization::from_string(&ztx.alias_authority).unwrap())
+    let alias_auth = Authorization::from_string(&ztx.alias_authority)
+        .map_err(|_| TransactionError::InvalidProtocolContractOrVaultContractOrAliasAuthority)?;
+    if wallet.protocol_contract() != &ztx.protocol_contract
+        || wallet.vault_contract() != &ztx.vault_contract
+        || wallet.alias_authority() != &alias_auth
     {
-        Err(TransactionError::InvalidProtocolContractOrVaultContractOrAliasAuthority)?
+        return Err(TransactionError::InvalidProtocolContractOrVaultContractOrAliasAuthority);
     }
 
-    let mut rng = OsRng.clone();
+    let mut rng = OsRng;
+    let chain_bytes = hex::decode(ztx.chain_id.clone())?;
+    let chain_id: [u8; 32] = chain_bytes.try_into()
+        .map_err(|_v: Vec<u8>| TransactionError::InvalidChainIDLength)?;
     let mut rztx = ResolvedZTransaction{
-        chain_id: hex::decode(ztx.chain_id.clone())?.try_into().unwrap_or_else(|v: Vec<u8>| panic!("chain_id: expected a Vec of length {} but it was {}", 32, v.len())),
+        chain_id,
         protocol_contract: ztx.protocol_contract,
         vault_contract: ztx.vault_contract,
-        alias_authority: Authorization::from_string(&ztx.alias_authority).unwrap(),
+        alias_authority: alias_auth,
         rzactions: vec![]
     };
 
@@ -297,7 +355,13 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
     // get all unspent notes of this wallet
     let mut unspent_notes = wallet.unspent_notes().clone();
     // track the fee amount for this transaction
-    let mut fee = fees.get(&Name::from_string(&"begin".to_string()).unwrap()).unwrap().amount();
+    let mut fee = {
+        let name = Name::from_string(&"begin")
+            .map_err(|_| TransactionError::FeeSymbol)?;
+        fees.get(&name)
+            .ok_or(TransactionError::FeeSymbol)?
+            .amount()
+    };
 
     for za in ztx.zactions.iter()
     {
@@ -325,17 +389,31 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                         );
 
                         // check if this note is an auth token
-                        if n.quantity().eq(&Asset::from_string(&"0".to_string()).unwrap())
+                        if n.quantity().eq(&Asset::from_string(&"0").unwrap())
                         {
                             if !n.contract().eq(&n.account()) { Err(TransactionError::AuthTokenContractAccount)?; }
                             if desc.to.eq(&"$SELF") { auth_tokens.push(n.clone()); }
                             // if this auth note shall be published we need to add the 'publishnotes' fee
-                            if desc.publish_note { fee += fees.get(&Name::from_string(&"publishnotes".to_string()).unwrap()).unwrap().amount(); }
+                            if desc.publish_note {
+                                fee += {
+                                    let name = Name::from_string(&"publishnotes")
+                                        .map_err(|_| TransactionError::FeeSymbol)?;
+                                    fees.get(&name)
+                                        .ok_or(TransactionError::FeeSymbol)?
+                                        .amount()
+                                };
+                            }
                         }
                         else
                         {
                             // add mint fee
-                            fee += fees.get(&Name::from_string(&"mint".to_string()).unwrap()).unwrap().amount();
+                            fee += {
+                                let name = Name::from_string(&"mint")
+                                    .map_err(|_| TransactionError::FeeSymbol)?;
+                                fees.get(&name)
+                                    .ok_or(TransactionError::FeeSymbol)?
+                                    .amount()
+                            };
                         }
 
                         serde_json::to_value(ResolvedMintDesc{
@@ -356,7 +434,9 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                         let mut output = vec![];
 
                         // determine symbol of this 'spend' sequence from the first recipient (must have at least one)
-                        assert!(desc.to.len() > 0);
+                        if desc.to.is_empty() {
+                            return Err(TransactionError::SpendToZero);
+                        }
                         let symbol = desc.to[0].quantity.symbol();
                         if symbol.raw() == 0 // NFT case
                         {
@@ -381,7 +461,13 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                                 );
 
                                 // add fee
-                                fee += fees.get(&Name::from_string(&"spendoutput".to_string()).unwrap()).unwrap().amount();
+                                fee += {
+                                    let name = Name::from_string(&"spendoutput")
+                                        .map_err(|_| TransactionError::FeeSymbol)?;
+                                    fees.get(&name)
+                                        .ok_or(TransactionError::FeeSymbol)?
+                                        .amount()
+                                };
 
                                 spend_output.push(ResolvedSpendOutputDesc{
                                     note_a: nft.clone(),
@@ -466,9 +552,27 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                             assert!((num_spends == 0) || (num_outputs == 0), "either num_spends == 0 or num_outputs == 0 or both are zero");
 
                             // add fee
-                            fee += fees.get(&Name::from_string(&"spendoutput".to_string()).unwrap()).unwrap().amount() * num_spend_outputs as i64;
-                            fee += fees.get(&Name::from_string(&"spend".to_string()).unwrap()).unwrap().amount() * num_spends as i64;
-                            fee += fees.get(&Name::from_string(&"output".to_string()).unwrap()).unwrap().amount() * num_outputs as i64;
+                            fee += {
+                                let name = Name::from_string(&"spendoutput")
+                                    .map_err(|_| TransactionError::FeeSymbol)?;
+                                fees.get(&name)
+                                    .ok_or(TransactionError::FeeSymbol)?
+                                    .amount()
+                            } * num_spend_outputs as i64;
+                            fee += {
+                                let name = Name::from_string(&"spend")
+                                    .map_err(|_| TransactionError::FeeSymbol)?;
+                                fees.get(&name)
+                                    .ok_or(TransactionError::FeeSymbol)?
+                                    .amount()
+                            } * num_spends as i64;
+                            fee += {
+                                let name = Name::from_string(&"output")
+                                    .map_err(|_| TransactionError::FeeSymbol)?;
+                                fees.get(&name)
+                                    .ok_or(TransactionError::FeeSymbol)?
+                                    .amount()
+                            } * num_outputs as i64;
 
                             for i in 0..num_spend_outputs
                             {
@@ -513,31 +617,54 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                         let auth_token = if desc.auth_token.len() == 6 {
                             let auth_token_str_bytes = desc.auth_token.as_bytes();
                             if !auth_token_str_bytes[0..5].eq("$AUTH".as_bytes()) { Err(TransactionError::InvalidAuthToken)? }
-                            let auth_idx = (auth_token_str_bytes[5] as char).to_digit(10).unwrap() as usize;
-                            if auth_idx >= auth_tokens.len() { Err(TransactionError::InvalidAuthToken)? }
+                            let auth_idx = (auth_token_str_bytes[5] as char)
+                                .to_digit(10)
+                                .ok_or(TransactionError::InvalidAuthToken)? as usize;
+                            if auth_idx >= auth_tokens.len() { return Err(TransactionError::InvalidAuthToken); }
                             auth_tokens[auth_idx].clone()
                         } else if desc.auth_token.len() == 64 {
-                            let mut cm_bytes = [0; 32];
-                            cm_bytes.copy_from_slice(hex::decode(desc.auth_token)?.as_slice());
-                            let auth_token = select_auth_note(&mut unspent_notes, &ExtractedNoteCommitment::from_bytes(&cm_bytes).unwrap());
-                            if auth_token.is_none() { Err(TransactionError::InvalidAuthToken)? }
-                            auth_token.unwrap().note().clone()
+                            let raw = hex::decode(desc.auth_token)?;
+                            if raw.len() != 32 { return Err(TransactionError::InvalidAuthToken); }
+                            let mut cm_bytes = [0u8; 32];
+                            cm_bytes.copy_from_slice(&raw);
+                            let cm = Option::from(ExtractedNoteCommitment::from_bytes(&cm_bytes))
+                                .ok_or(TransactionError::InvalidAuthToken)?;
+                            let auth_token = select_auth_note(&mut unspent_notes, &cm)
+                                .ok_or(TransactionError::InvalidAuthToken)?;
+                            auth_token.note().clone()
                         } else {
                             Err(TransactionError::InvalidAuthToken)?
                         };
 
                         // add fee
-                        fee += fees.get(&Name::from_string(&"authenticate".to_string()).unwrap()).unwrap().amount();
+                        fee += {
+                            let name = Name::from_string(&"authenticate")
+                                .map_err(|_| TransactionError::FeeSymbol)?;
+                            fees.get(&name)
+                                .ok_or(TransactionError::FeeSymbol)?
+                                .amount()
+                        };
 
                         // TODO: proper error handling with '?' instead of 'unwrap()'
                         serde_json::to_value(ResolvedAuthenticateDesc{
                             auth_note: auth_token,
-                            actions: desc.actions.iter().map(|pad| PackedAction{
-                                account: pad.account,
-                                name: pad.name,
-                                authorization: pad.authorization.iter().map(|auth| Authorization::from_string(auth).unwrap()).collect(),
-                                data: hex::decode(pad.data.clone()).unwrap()
-                            }).collect(),
+                            actions: {
+                                let mut out = Vec::with_capacity(desc.actions.len());
+                                for pad in desc.actions.iter() {
+                                    let mut auths = Vec::with_capacity(pad.authorization.len());
+                                    for auth in pad.authorization.iter() {
+                                        auths.push(Authorization::from_string(auth)
+                                            .map_err(|_| TransactionError::InvalidProtocolContractOrVaultContractOrAliasAuthority)?);
+                                    }
+                                    out.push(PackedAction{
+                                        account: pad.account,
+                                        name: pad.name,
+                                        authorization: auths,
+                                        data: hex::decode(pad.data.clone())?,
+                                    });
+                                }
+                                out
+                            },
                             burn: desc.burn
                         })?
                     }
@@ -552,7 +679,13 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                         // TODO: perform check on all Strings reagrding correct length
 
                         // add fee
-                        fee += fees.get(&Name::from_string(&"publishnotes".to_string()).unwrap()).unwrap().amount();
+                        fee += {
+                            let name = Name::from_string(&"publishnotes")
+                                .map_err(|_| TransactionError::FeeSymbol)?;
+                            fees.get(&name)
+                                .ok_or(TransactionError::FeeSymbol)?
+                                .amount()
+                        };
 
                         serde_json::to_value(ResolvedPublishNotesDesc{
                             notes: desc.notes
@@ -567,7 +700,6 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                         let desc: WithdrawDesc = serde_json::from_value(za.data.clone())?;
 
                         // no fee for withdraw action
-                        //fee += fees.get(&Name::from_string(&"withdraw".to_string()).unwrap()).unwrap().amount();
 
                         serde_json::to_value(ResolvedWithdrawDesc{
                             contract: desc.contract,
@@ -595,7 +727,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                 let mut data: ResolvedSpendSequenceDesc = serde_json::from_value(rza.data.clone())?;
 
                 if data.spend_output[0].note_a.note().contract().eq(&fee_token_contract) &&
-                    data.spend_output[0].note_a.note().symbol().eq(fees.values().next().unwrap().symbol())
+                    data.spend_output[0].note_a.note().symbol().eq(fees.values().next().ok_or(TransactionError::FeeSymbol)?.symbol())
                 {
                     // This spend sequence has the fee token symbol => add the tx fee into it
                     found = true;
@@ -617,7 +749,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                                 0,
                                 Address::dummy(&mut rng),
                                 rztx.alias_authority.actor,
-                                ExtendedAsset::new(Asset::new(fee as i64, note_b.symbol().clone()).unwrap(), note_b.contract().clone()),
+                                ExtendedAsset::new(Asset::new(fee as i64, note_b.symbol().clone()).ok_or(TransactionError::FeeSymbol)?, note_b.contract().clone()),
                                 Rseed::new(&mut rng),
                                 [0; 512]
                             ),
@@ -698,7 +830,13 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                 data: {
                     // maximal 1 spend_output (to pay tx fee and change) and potentially more spends
                     // set initial fee amount & number of outputs to exactly one 'output' so it will automatically be replaced with one 'spend_output' by the first 'spend' note
-                    let notes_to_spend = select_fee_notes(&mut unspent_notes, &fees, &fee_token_contract, 0, (fee + fees.get(&Name::from_string(&"output".to_string()).unwrap()).unwrap().amount()) as u64, 1);
+                    let notes_to_spend = select_fee_notes(&mut unspent_notes, &fees, &fee_token_contract, 0, (fee + {
+                        let name = Name::from_string(&"output")
+                            .map_err(|_| TransactionError::FeeSymbol)?;
+                        fees.get(&name)
+                            .ok_or(TransactionError::FeeSymbol)?
+                            .amount()
+                    }) as u64, 1);
                     if notes_to_spend.is_none() { Err(TransactionError::InsufficientFunds)? }
                     let (mut notes_to_spend, change, fee) = notes_to_spend.unwrap();
 
@@ -709,7 +847,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                             0,
                             wallet.default_address().unwrap(),
                             Name(0),
-                            ExtendedAsset::new(Asset::new(change as i64, fees.values().next().unwrap().symbol().clone()).unwrap(), fee_token_contract.clone()),
+                            ExtendedAsset::new(Asset::new(change as i64, fees.values().next().ok_or(TransactionError::FeeSymbol)?.symbol().clone()).ok_or(TransactionError::FeeSymbol)?, fee_token_contract.clone()),
                             Rseed::new(&mut rng),
                             MEMO_CHANGE_NOTE
                         ),
@@ -719,7 +857,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                                 0,
                                 Address::dummy(&mut rng),
                                 rztx.alias_authority.actor,
-                                ExtendedAsset::new(Asset::new(fee as i64, fees.values().next().unwrap().symbol().clone()).unwrap(), fee_token_contract.clone()),
+                                ExtendedAsset::new(Asset::new(fee as i64, fees.values().next().ok_or(TransactionError::FeeSymbol)?.symbol().clone()).ok_or(TransactionError::FeeSymbol)?, fee_token_contract.clone()),
                                 Rseed::new(&mut rng),
                                 [0; 512]
                             ),
@@ -838,7 +976,7 @@ pub struct ResolvedWithdrawDesc
     pub to: Name
 }
 
-pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &HashMap<Name, Parameters::<Bls12>>) -> Result<(Transaction, HashMap<String, Vec<String>>), Box<dyn Error>>
+pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &HashMap<Name, Parameters::<Bls12>>) -> Result<(Transaction, HashMap<String, Vec<String>>), TransactionError>
 {
     if wallet.is_ivk()
     {
@@ -847,25 +985,25 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
     let pgk = wallet.spending_key().unwrap().proof_generation_key();
     let fvk = FullViewingKey::from_spending_key(&wallet.spending_key().unwrap());
 
-    let mint_params = params.get(&Name::from_string(&"mint".to_string()).unwrap());
+    let mint_params = params.get(&Name::from_string(&"mint").unwrap());
     if mint_params.is_none() { Err(TransactionError::MintParams)? }
     let mint_params = mint_params.unwrap();
-    let spend_output_params = params.get(&Name::from_string(&"spendoutput".to_string()).unwrap());
+    let spend_output_params = params.get(&Name::from_string(&"spendoutput").unwrap());
     if spend_output_params.is_none() { Err(TransactionError::SpendOutputParams)? }
     let spend_output_params = spend_output_params.unwrap();
-    let spend_params = params.get(&Name::from_string(&"spend".to_string()).unwrap());
+    let spend_params = params.get(&Name::from_string(&"spend").unwrap());
     if spend_params.is_none() { Err(TransactionError::SpendParams)? }
     let spend_params = spend_params.unwrap();
-    let output_params = params.get(&Name::from_string(&"output".to_string()).unwrap());
+    let output_params = params.get(&Name::from_string(&"output").unwrap());
     if output_params.is_none() { Err(TransactionError::OutputParams)? }
     let output_params = output_params.unwrap();
 
-    let mut rng = OsRng.clone();
+    let mut rng = OsRng;
     let mut tx = Transaction{
         actions: vec![
             Action {
                 account: wallet.alias_authority().actor.clone(),
-                name: Name::from_string(&format!("begin")).unwrap(),
+                name: Name::from_string(&"begin").unwrap(),
                 authorization: vec![wallet.alias_authority().clone()],
                 data: json!({})
             }
@@ -889,7 +1027,7 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                     let data: ResolvedMintDesc = serde_json::from_value(rztx.rzactions[i].data.clone())?;
 
                     // only add a mint action if this is NOT an auth note
-                    if !data.note.quantity().eq(&Asset::from_string(&"0".to_string()).unwrap())
+                    if !data.note.quantity().eq(&Asset::from_string(&"0").unwrap())
                     {
                         mints.push(PlsMint{
                             cm: crate::contract::ScalarBytes(data.note.commitment().to_bytes()),
@@ -907,7 +1045,9 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                                     rcm: Some(data.note.rcm()),
                                     proof_generation_key: Some(pgk.clone()),
                                 };
-                                AffineProofBytesLE::from(create_random_proof(instance, mint_params, &mut OsRng)?)
+                                let proof = create_random_proof(instance, mint_params, &mut OsRng)
+                                    .map_err(|e| TransactionError::ProofSystem(format!("mint: {}", e)))?;
+                                AffineProofBytesLE::try_from(proof).map_err(|_| TransactionError::ProofBytes)?
                             }
                         });
                     }
@@ -926,7 +1066,7 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
 
                     if data.publish_note
                     {
-                        if data.note.quantity().eq(&Asset::from_string(&"0".to_string()).unwrap()) { auth_note_cts.push(note_ct); }
+                        if data.note.quantity().eq(&Asset::from_string(&"0").unwrap()) { auth_note_cts.push(note_ct); }
                         else { note_cts.push(note_ct); }
                     }
                     else
@@ -1103,12 +1243,37 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                                             state.update(&uo.0.account().raw().to_le_bytes());
                                             state.update(&uo.0.memo()[0..{let len = uo.0.memo().iter().position(|&c| c == 0); if len.is_none() {512} else {len.unwrap()}}]);
                                         }
-                                        let hash: [u8; 32] = state.finalize().as_bytes().try_into()?;
-                                        let hash = [u64::from_le_bytes(hash[0..8].try_into()?), u64::from_le_bytes(hash[8..16].try_into()?), u64::from_le_bytes(hash[16..24].try_into()?), u64::from_le_bytes(hash[24..32].try_into()?)];
+                                        let digest = state.finalize();
+                                        let mut hash32 = [0u8; 32];
+                                        hash32.copy_from_slice(digest.as_bytes());
+                                        let hash = [
+                                            u64::from_le_bytes({
+                                                let mut a = [0u8; 8];
+                                                a.copy_from_slice(&hash32[0..8]);
+                                                a
+                                            }),
+                                            u64::from_le_bytes({
+                                                let mut a = [0u8; 8];
+                                                a.copy_from_slice(&hash32[8..16]);
+                                                a
+                                            }),
+                                            u64::from_le_bytes({
+                                                let mut a = [0u8; 8];
+                                                a.copy_from_slice(&hash32[16..24]);
+                                                a
+                                            }),
+                                            u64::from_le_bytes({
+                                                let mut a = [0u8; 8];
+                                                a.copy_from_slice(&hash32[24..32]);
+                                                a
+                                            }),
+                                        ];
                                         Some(hash)
                                     }
                                 };
-                                AffineProofBytesLE::from(create_random_proof(instance, spend_output_params, &mut OsRng)?)
+                                let proof = create_random_proof(instance, spend_output_params, &mut OsRng)
+                                    .map_err(|e| TransactionError::ProofSystem(format!("spend_output: {}", e)))?;
+                                AffineProofBytesLE::try_from(proof).map_err(|_| TransactionError::ProofBytes)?
                             },
                             unshielded_outputs: so.unshielded_outputs.iter().map(|uo| PlsUnshieldedRecipient{
                                 amount: uo.0.amount(),
@@ -1212,7 +1377,9 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                                     rcv: Some(rcv.inner()),
                                     rscm: Some(rscm.rcm().0),
                                 };
-                                AffineProofBytesLE::from(create_random_proof(instance, spend_params, &mut OsRng)?)
+                                let pr = create_random_proof(instance, spend_params, &mut OsRng)
+                                    .map_err(|e| TransactionError::ProofSystem(format!("spend: {}", e)))?;
+                                AffineProofBytesLE::try_from(pr).map_err(|_| TransactionError::ProofBytes)?
                             }
                         });
                     }
@@ -1230,7 +1397,9 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                                     rscm: Some(rscm.rcm().0),
                                     note_b: Some(o.note_b.clone())
                                 };
-                                AffineProofBytesLE::from(create_random_proof(instance, output_params, &mut OsRng)?)
+                                let pr = create_random_proof(instance, output_params, &mut OsRng)
+                                    .map_err(|e| TransactionError::ProofSystem(format!("output: {}", e)))?;
+                                AffineProofBytesLE::try_from(pr).map_err(|_| TransactionError::ProofBytes)?
                             }
                         });
 
@@ -1319,8 +1488,34 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                                         let mut state = Blake2s7rParams::new().hash_length(32).personal(&[0; 8]).to_state();
                                         state.update(&auth_count.to_le_bytes());
                                         state.update(&pack(data.actions));
-                                        let hash: [u8; 32] = state.finalize().as_bytes().try_into()?;
-                                        let hash = [u64::from_le_bytes(hash[0..8].try_into()?), u64::from_le_bytes(hash[8..16].try_into()?), u64::from_le_bytes(hash[16..24].try_into()?), u64::from_le_bytes(hash[24..32].try_into()?)];
+                                        let digest = state.finalize();
+                                        let mut hash32 = [0u8; 32];
+                                        hash32.copy_from_slice(digest.as_bytes());
+
+                                        let hash = [
+                                            {
+                                                let mut a = [0u8; 8];
+                                                a.copy_from_slice(&hash32[0..8]);
+                                                u64::from_le_bytes(a)
+                                            },
+                                            {
+                                                let mut a = [0u8; 8];
+                                                a.copy_from_slice(&hash32[8..16]);
+                                                u64::from_le_bytes(a)
+                                            },
+                                            {
+                                                let mut a = [0u8; 8];
+                                                a.copy_from_slice(&hash32[16..24]);
+                                                u64::from_le_bytes(a)
+                                            },
+                                            {
+                                                let mut a = [0u8; 8];
+                                                a.copy_from_slice(&hash32[24..32]);
+                                                u64::from_le_bytes(a)
+                                            },
+                                        ];
+                                        //let hash: [u8; 32] = state.finalize().as_bytes().try_into()?;
+                                        //let hash = [u64::from_le_bytes(hash[0..8].try_into()?), u64::from_le_bytes(hash[8..16].try_into()?), u64::from_le_bytes(hash[16..24].try_into()?), u64::from_le_bytes(hash[24..32].try_into()?)];
                                         //hash[3] &= !0xC000000000000000u64;
                                         Some(hash)
                                     },
@@ -1331,7 +1526,9 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                                     rcm: Some(data.auth_note.rcm()),
                                     proof_generation_key: Some(pgk.clone()),
                                 };
-                                AffineProofBytesLE::from(create_random_proof(instance, mint_params, &mut OsRng)?)
+                                let pr = create_random_proof(instance, mint_params, &mut OsRng)
+                                    .map_err(|e| TransactionError::ProofSystem(format!("authenticate: {}", e)))?;
+                                AffineProofBytesLE::try_from(pr).map_err(|_| TransactionError::ProofBytes)?
                             }
                         }
                     })?
@@ -1393,7 +1590,7 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
     // add end action
     tx.actions.push(Action{
         account: wallet.alias_authority().actor,
-        name: Name::from_string(&"end".to_string()).unwrap(),
+        name: Name::from_string(&"end").unwrap(),
         authorization: vec![wallet.alias_authority().clone()],
         data: json!({})
     });
@@ -1401,17 +1598,39 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
     Ok((tx, unpublished_notes))
 }
 
-pub fn zverify_spend_transaction(tx: &Transaction, params: &HashMap<Name, Parameters::<Bls12>>) -> bool
+#[derive(Debug)]
+pub enum VerifyError {
+    MissingParams(&'static str),          // "spend", "spendoutput", "output"
+    ScalarDecode(&'static str),           // which field: "root", "nf", "scm", "cm", etc.
+    ProofBytes,                           // AffineProofBytesLE <-> Proof conversion failed
+    ProofSystem,                          // bellman verify_proof error (synthesis/etc.)
+    ProofInvalid(&'static str),           // which circuit failed: "spend", "spendoutput", "output"
+    PedersenUnbalanced,
+}
+
+impl core::fmt::Display for VerifyError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        use VerifyError::*;
+        match self {
+            MissingParams(w)   => write!(f, "missing parameters for {}", w),
+            ScalarDecode(w)    => write!(f, "failed to decode scalar for {}", w),
+            ProofBytes         => write!(f, "invalid proof byte encoding"),
+            ProofSystem        => write!(f, "proof system error"),
+            ProofInvalid(w)    => write!(f, "invalid proof for {}", w),
+            PedersenUnbalanced => write!(f, "inputs/outputs pedersen commitments not balanced"),
+        }
+    }
+}
+impl std::error::Error for VerifyError {}
+
+pub fn zverify_spend_transaction(tx: &Transaction, params: &HashMap<Name, Parameters::<Bls12>>) -> Result<(), VerifyError>
 {
-    let spend_output_params = params.get(&Name::from_string(&"spendoutput".to_string()).unwrap());
-    assert!(spend_output_params.is_some());
-    let spend_output_params = spend_output_params.unwrap();
-    let spend_params = params.get(&Name::from_string(&"spend".to_string()).unwrap());
-    assert!(spend_params.is_some());
-    let spend_params = spend_params.unwrap();
-    let output_params = params.get(&Name::from_string(&"output".to_string()).unwrap());
-    assert!(output_params.is_some());
-    let output_params = output_params.unwrap();
+    let spend_output_params = params.get(&Name::from_string(&"spendoutput").unwrap())
+        .ok_or(VerifyError::MissingParams("spendoutput"))?;
+    let spend_params = params.get(&Name::from_string(&"spend").unwrap())
+        .ok_or(VerifyError::MissingParams("spend"))?;
+    let output_params = params.get(&Name::from_string(&"output").unwrap())
+        .ok_or(VerifyError::MissingParams("output"))?;
 
     for a in tx.actions.iter()
     {
@@ -1458,18 +1677,20 @@ pub fn zverify_spend_transaction(tx: &Transaction, params: &HashMap<Name, Parame
                         let mut inputs8 = vec![];
                         inputs8.extend(inputs8_.clone());
                         let mut inputs = vec![];
-                        inputs.push(Scalar::from(so.root.clone()));
-                        inputs.push(Scalar::from(so.nf.clone()));
-                        inputs.push(Scalar::from(a.scm.clone()));
-                        inputs.push(Scalar::from(so.cm_b.clone()));
-                        inputs.push(Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&so.cv_net_u.0).to_bytes()).unwrap());
-                        inputs.push(Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&so.cv_net_v.0).to_bytes()).unwrap());
+                        inputs.push(Scalar::try_from(so.root.clone()).map_err(|_| VerifyError::ScalarDecode("root"))?);
+                        inputs.push(Scalar::try_from(so.nf.clone()).map_err(|_| VerifyError::ScalarDecode("nf"))?);
+                        inputs.push(Scalar::try_from(a.scm.clone()).map_err(|_| VerifyError::ScalarDecode("scm"))?);
+                        inputs.push(Scalar::try_from(so.cm_b.clone()).map_err(|_| VerifyError::ScalarDecode("cm_b"))?);
+                        inputs.push(Option::from(Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&so.cv_net_u.0).to_bytes()))
+                            .ok_or(VerifyError::ScalarDecode("cv_net_u"))?);
+                        inputs.push(Option::from(Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&so.cv_net_v.0).to_bytes()))
+                            .ok_or(VerifyError::ScalarDecode("cv_net_v"))?);
                         inputs.extend(inputs7.clone());
                         inputs.extend(inputs8.clone());
 
                         let pvk = prepare_verifying_key(&spend_output_params.vk);
-                        let proof = Proof::<Bls12>::from(so.proof.clone());
-                        if !verify_proof(&pvk, &proof, &inputs).is_ok() { return false; }
+                        let proof = Proof::<Bls12>::try_from(so.proof.clone()).map_err(|_| VerifyError::ProofBytes)?;
+                        verify_proof(&pvk, &proof, &inputs).map_err(|_| VerifyError::ProofInvalid("spendoutput"))?;
 
                         if !((so.cv_eq_gt & 2) == 2)
                         {
@@ -1515,15 +1736,15 @@ pub fn zverify_spend_transaction(tx: &Transaction, params: &HashMap<Name, Parame
                     for s in a.spend.iter()
                     {
                         let mut inputs = vec![];
-                        inputs.push(Scalar::from(s.root.clone()));
-                        inputs.push(Scalar::from(s.nf.clone()));
-                        inputs.push(Scalar::from(a.scm.clone()));
+                        inputs.push(Scalar::try_from(s.root.clone()).map_err(|_| VerifyError::ScalarDecode("root"))?);
+                        inputs.push(Scalar::try_from(s.nf.clone()).map_err(|_| VerifyError::ScalarDecode("nf"))?);
+                        inputs.push(Scalar::try_from(a.scm.clone()).map_err(|_| VerifyError::ScalarDecode("scm"))?);
                         inputs.push(Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&s.cv_u.0).to_bytes()).unwrap());
                         inputs.push(Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&s.cv_v.0).to_bytes()).unwrap());
 
                         let pvk = prepare_verifying_key(&spend_params.vk);
-                        let proof = Proof::<Bls12>::from(s.proof.clone());
-                        if !verify_proof(&pvk, &proof, &inputs).is_ok() { return false; }
+                        let proof = Proof::<Bls12>::try_from(s.proof.clone()).map_err(|_| VerifyError::ProofBytes)?;
+                        verify_proof(&pvk, &proof, &inputs).map_err(|_| VerifyError::ProofInvalid("spend"))?;
 
                         if spend_sum_begin
                         {
@@ -1545,14 +1766,14 @@ pub fn zverify_spend_transaction(tx: &Transaction, params: &HashMap<Name, Parame
                     for o in a.output.iter()
                     {
                         let mut inputs = vec![];
-                        inputs.push(Scalar::from(a.scm.clone()));
-                        inputs.push(Scalar::from(o.cm.clone()));
+                        inputs.push(Scalar::try_from(a.scm.clone()).map_err(|_| VerifyError::ScalarDecode("scm"))?);
+                        inputs.push(Scalar::try_from(o.cm.clone()).map_err(|_| VerifyError::ScalarDecode("cm"))?);
                         inputs.push(Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&o.cv_u.0).to_bytes()).unwrap());
                         inputs.push(Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&o.cv_v.0).to_bytes()).unwrap());
 
                         let pvk = prepare_verifying_key(&output_params.vk);
-                        let proof = Proof::<Bls12>::from(o.proof.clone());
-                        if !verify_proof(&pvk, &proof, &inputs).is_ok() { return false; }
+                        let proof = Proof::<Bls12>::try_from(o.proof.clone()).map_err(|_| VerifyError::ProofBytes)?;
+                        verify_proof(&pvk, &proof, &inputs).map_err(|_| VerifyError::ProofInvalid("output"))?;
 
                         if output_sum_begin
                         {
@@ -1571,8 +1792,10 @@ pub fn zverify_spend_transaction(tx: &Transaction, params: &HashMap<Name, Parame
                         }
                     }
 
-                    // check pedersen sums (are tx inputs and outputs balanced?)
-                    if !spend_sum.eq(&output_sum) { return false; }
+                    // check Pedersen sums (are tx inputs and outputs balanced?)
+                    if spend_sum != output_sum {
+                        return Err(VerifyError::PedersenUnbalanced);
+                    }
                 }
             }
 
@@ -1580,7 +1803,7 @@ pub fn zverify_spend_transaction(tx: &Transaction, params: &HashMap<Name, Parame
         }
     }
 
-    true
+    Ok(())
 }
 
 pub fn zsign_transfer_and_mint_transaction(
@@ -1591,14 +1814,14 @@ pub fn zsign_transfer_and_mint_transaction(
     fee_token_contract: Name,
     fees: &HashMap<Name, Asset>,
     mint_params: &Parameters<Bls12>
-) -> Result<(Transaction, HashMap<String, Vec<String>>), Box<dyn Error>>
+) -> Result<(Transaction, HashMap<String, Vec<String>>), TransactionError>
 {
-    let mut rng = OsRng.clone();
+    let mut rng = OsRng;
     let mut tx = Transaction{
         actions: vec![
             Action {
                 account: alias_authority.actor.clone(),
-                name: Name::from_string(&format!("begin")).unwrap(),
+                name: Name::from_string(&"begin").unwrap(),
                 authorization: vec![alias_authority.clone()],
                 data: json!({})
             }
@@ -1621,7 +1844,7 @@ pub fn zsign_transfer_and_mint_transaction(
         );
 
         // skip Auth token
-        if n.quantity().eq(&Asset::from_string(&"0".to_string()).unwrap())
+        if n.quantity().eq(&Asset::from_string(&"0").unwrap())
         {
             continue;
         }
@@ -1631,7 +1854,7 @@ pub fn zsign_transfer_and_mint_transaction(
         {
             tx.actions.push(Action{
                 account: n.contract().clone(),
-                name: Name::from_string(&"transfer".to_string()).unwrap(),
+                name: Name::from_string(&"transfer").unwrap(),
                 authorization: vec![user_authority.clone()],
                 data: serde_json::to_value(PlsNftTransfer{
                     from: n.account(),
@@ -1645,7 +1868,7 @@ pub fn zsign_transfer_and_mint_transaction(
         {
             tx.actions.push(Action{
                 account: n.contract().clone(),
-                name: Name::from_string(&"transfer".to_string()).unwrap(),
+                name: Name::from_string(&"transfer").unwrap(),
                 authorization: vec![user_authority.clone()],
                 data: serde_json::to_value(PlsFtTransfer{
                     from: n.account(),
@@ -1664,17 +1887,31 @@ pub fn zsign_transfer_and_mint_transaction(
     }
 
     // calculate total fee amount and add transfer action to pay fee
-    let fee = fees.get(&Name::from_string(&"begin".to_string()).unwrap()).unwrap().amount() + fees.get(&Name::from_string(&"mint".to_string()).unwrap()).unwrap().amount() * mint_zactions.len() as i64;
+    let fee_b = {
+        let name = Name::from_string(&"begin")
+            .map_err(|_| TransactionError::FeeSymbol)?;
+        fees.get(&name)
+            .ok_or(TransactionError::FeeSymbol)?
+            .amount()
+    };
+    let fee_m = {
+        let name = Name::from_string(&"mint")
+            .map_err(|_| TransactionError::FeeSymbol)?;
+        fees.get(&name)
+            .ok_or(TransactionError::FeeSymbol)?
+            .amount()
+    };
+    let fee = fee_b + fee_m * mint_zactions.len() as i64;
     tx.actions.push(Action{
         account: fee_token_contract.clone(),
-        name: Name::from_string(&"transfer".to_string()).unwrap(),
+        name: Name::from_string(&"transfer")?,
         authorization: vec![user_authority.clone()],
         data: serde_json::to_value(PlsFtTransfer{
             from: user_authority.actor.clone(),
             to: alias_authority.actor.clone(),
-            quantity: Asset::new(fee, fees.values().next().unwrap().symbol().clone()).unwrap(),
+            quantity: Asset::new(fee, fees.values().next().ok_or(TransactionError::FeeSymbol)?.symbol().clone()).unwrap(),
             memo: "tx fee".to_string()
-        }).unwrap()
+        })?
     });
 
     // reverse mint order, zsign mint actions and encrypt notes for receiver using a dummy spending key
@@ -1701,7 +1938,10 @@ pub fn zsign_transfer_and_mint_transaction(
                     rcm: Some(rm.note.rcm()),
                     proof_generation_key: Some(sk.proof_generation_key()),
                 };
-                AffineProofBytesLE::from(create_random_proof(circuit_instance, mint_params, &mut rng)?)
+                let pr = create_random_proof(circuit_instance, mint_params, &mut rng)
+                    .map_err(|e| TransactionError::ProofSystem(format!("mint: {}", e)))?;
+                AffineProofBytesLE::try_from(pr).map_err(|_| TransactionError::ProofBytes)?
+                //AffineProofBytesLE::try_from(create_random_proof(circuit_instance, mint_params, &mut rng)?)?
             }
         });
 
@@ -1738,7 +1978,7 @@ pub fn zsign_transfer_and_mint_transaction(
     // add mint actions as one sequence to transaction
     tx.actions.push(Action{
         account: alias_authority.actor,
-        name: Name::from_string(&"mint".to_string()).unwrap(),
+        name: Name::from_string(&"mint").unwrap(),
         authorization: vec![alias_authority.clone()],
         data: serde_json::to_value(PlsMintAction{
             actions: mints,
@@ -1749,7 +1989,7 @@ pub fn zsign_transfer_and_mint_transaction(
     // add end action
     tx.actions.push(Action{
         account: alias_authority.actor,
-        name: Name::from_string(&"end".to_string()).unwrap(),
+        name: Name::from_string(&"end").unwrap(),
         authorization: vec![alias_authority.clone()],
         data: json!({})
     });
@@ -1757,19 +1997,19 @@ pub fn zsign_transfer_and_mint_transaction(
     Ok((tx, unpublished_notes))
 }
 
-pub fn create_auth_token(wallet: &Wallet, seed: String, contract: Name, recipient: Address) -> Result<HashMap<String, Vec<String>>, Box<dyn Error>>
+pub fn create_auth_token(wallet: &Wallet, seed: String, contract: Name, recipient: Address) -> Result<HashMap<String, Vec<String>>, TransactionError>
 {
     if wallet.is_ivk()
     {
         Err(TransactionError::IvkWallet)?
     }
     let fvk = FullViewingKey::from_spending_key(&wallet.spending_key().unwrap());
-    let mut rng = OsRng.clone();
+    let mut rng = OsRng;
     let n = Note::from_parts(
         0,
         recipient,
         contract, // in AUTH mode the Mint circuit enforces account == contract
-        ExtendedAsset::new(Asset::from_string(&"0".to_string()).unwrap(), contract),
+        ExtendedAsset::new(Asset::from_string(&"0").unwrap(), contract),
         Rseed::from_seed(seed.as_bytes()),
         [0; 512]
     );
@@ -1826,18 +2066,18 @@ mod tests
     #[test]
     fn test_insert_auth_into_memo()
     {
-        let mut rng = OsRng.clone();
+        let mut rng = OsRng;
         let memo = "AUTH:$AUTH0 This is a sample memo string with random $AUTH2 values $AUTH1 inserted into it $AUTH0$AUTH plus the default address: $SELF".to_string();
         let auth_tokens = vec![
-            Note::from_parts(0, Address::dummy(&mut rng), Name(0), ExtendedAsset::new(Asset::from_string(&"0".to_string()).unwrap(), Name(9999)), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, Address::dummy(&mut rng), Name(0), ExtendedAsset::new(Asset::from_string(&"0".to_string()).unwrap(), Name(9999)), Rseed::new(&mut rng), [0; 512])
+            Note::from_parts(0, Address::dummy(&mut rng), Name(0), ExtendedAsset::new(Asset::from_string(&"0").unwrap(), Name(9999)), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, Address::dummy(&mut rng), Name(0), ExtendedAsset::new(Asset::from_string(&"0").unwrap(), Name(9999)), Rseed::new(&mut rng), [0; 512])
         ];
         let new_memo = insert_vars(&memo, &"<default_address>".to_string(), &auth_tokens);
         println!("{}", new_memo);
 
         let mut m = HashMap::new();
-        m.insert(Name::from_string(&"begin".to_string()).unwrap(), Asset::from_string(&"5.0000 ZEOS".to_string()).unwrap());
-        m.insert(Name::from_string(&"mint".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        m.insert(Name::from_string(&"begin").unwrap(), Asset::from_string(&"5.0000 ZEOS").unwrap());
+        m.insert(Name::from_string(&"mint").unwrap(), Asset::from_string(&"1.0000 ZEOS").unwrap());
         println!("{}", serde_json::to_string(&m).unwrap());
     }
 
@@ -1848,9 +2088,9 @@ mod tests
             b"this is a sample seed which should be at least 32 bytes long...",
             false,
             [0; 32],
-            Name::from_string(&format!("zeos4privacy")).unwrap(),
-            Name::from_string(&format!("thezeosvault")).unwrap(),
-            Authorization::from_string(&format!("thezeosalias@public")).unwrap()
+            Name::from_string(&"zeos4privacy").unwrap(),
+            Name::from_string(&"thezeosvault").unwrap(),
+            Authorization::from_string(&"thezeosalias@public").unwrap()
         ).unwrap();
 
         let json = r#"{
@@ -1930,16 +2170,15 @@ mod tests
             ]
         }"#;
 
-        let fee_token_contract = Name::from_string(&"thezeostoken".to_string()).unwrap();
+        let fee_token_contract = Name::from_string(&"thezeostoken").unwrap();
         let mut fees = HashMap::new();
-        fees.insert(Name::from_string(&"begin".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        fees.insert(Name::from_string(&"mint".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        fees.insert(Name::from_string(&"spendoutput".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        fees.insert(Name::from_string(&"spend".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        fees.insert(Name::from_string(&"output".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        fees.insert(Name::from_string(&"authenticate".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        fees.insert(Name::from_string(&"publishnotes".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        //fees.insert(Name::from_string(&"withdraw".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"begin").unwrap(), Asset::from_string(&"1.0000 ZEOS").unwrap());
+        fees.insert(Name::from_string(&"mint").unwrap(), Asset::from_string(&"1.0000 ZEOS").unwrap());
+        fees.insert(Name::from_string(&"spendoutput").unwrap(), Asset::from_string(&"1.0000 ZEOS").unwrap());
+        fees.insert(Name::from_string(&"spend").unwrap(), Asset::from_string(&"1.0000 ZEOS").unwrap());
+        fees.insert(Name::from_string(&"output").unwrap(), Asset::from_string(&"1.0000 ZEOS").unwrap());
+        fees.insert(Name::from_string(&"authenticate").unwrap(), Asset::from_string(&"1.0000 ZEOS").unwrap());
+        fees.insert(Name::from_string(&"publishnotes").unwrap(), Asset::from_string(&"1.0000 ZEOS").unwrap());
         println!("{}", serde_json::to_string_pretty(&fees).unwrap());
 
         let ztx: ZTransaction = serde_json::from_str(&json).unwrap();
@@ -1954,32 +2193,32 @@ mod tests
     #[test]
     fn test_spend()
     {
-        let mut rng = OsRng.clone();
+        let mut rng = OsRng;
         let seed = b"this is a sample seed which should be at least 32 bytes long...";
         let fvk = FullViewingKey::from_spending_key(&SpendingKey::from_seed(seed));
         let mut w = Wallet::create(
             seed,
             false,
             [0; 32],
-            Name::from_string(&format!("zeos4privacy")).unwrap(),
-            Name::from_string(&format!("thezeosvault")).unwrap(),
-            Authorization::from_string(&format!("thezeosalias@public")).unwrap()
+            Name::from_string(&"zeos4privacy").unwrap(),
+            Name::from_string(&"thezeosvault").unwrap(),
+            Authorization::from_string(&"thezeosalias@public").unwrap()
         ).unwrap();
 
         let notes = vec![
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"7.0000 ZEOS@thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"7.0000 ZEOS@thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"10.0000 EOS@thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"5.0000 EOS@thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"4.0000 EOS@thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"4.0000 EOS@thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"3.0000 EOS@thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"3.0000 EOS@thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"2.0000 EOS@thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"2.0000 EOS@thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"2.0000 EOS@thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"2.0000 EOS@thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"12345678987654321@atomicassets".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512])
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"7.0000 ZEOS@thezeostoken").unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"7.0000 ZEOS@thezeostoken").unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"10.0000 EOS@thezeostoken").unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"5.0000 EOS@thezeostoken").unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"4.0000 EOS@thezeostoken").unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"4.0000 EOS@thezeostoken").unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"3.0000 EOS@thezeostoken").unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"3.0000 EOS@thezeostoken").unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"2.0000 EOS@thezeostoken").unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"2.0000 EOS@thezeostoken").unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"2.0000 EOS@thezeostoken").unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"2.0000 EOS@thezeostoken").unwrap(), Rseed::new(&mut rng), [0; 512]),
+            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"12345678987654321@atomicassets").unwrap(), Rseed::new(&mut rng), [0; 512])
         ];
 
         for n in notes.iter()
@@ -2063,16 +2302,15 @@ mod tests
             ]
         }"#;
 
-        let fee_token_contract = Name::from_string(&"thezeostoken".to_string()).unwrap();
+        let fee_token_contract = Name::from_string(&"thezeostoken").unwrap();
         let mut fees = HashMap::new();
-        fees.insert(Name::from_string(&"begin".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        fees.insert(Name::from_string(&"mint".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        fees.insert(Name::from_string(&"spendoutput".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        fees.insert(Name::from_string(&"spend".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        fees.insert(Name::from_string(&"output".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        fees.insert(Name::from_string(&"authenticate".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        fees.insert(Name::from_string(&"publishnotes".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        //fees.insert(Name::from_string(&"withdraw".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"begin").unwrap(), Asset::from_string(&"1.0000 ZEOS").unwrap());
+        fees.insert(Name::from_string(&"mint").unwrap(), Asset::from_string(&"1.0000 ZEOS").unwrap());
+        fees.insert(Name::from_string(&"spendoutput").unwrap(), Asset::from_string(&"1.0000 ZEOS").unwrap());
+        fees.insert(Name::from_string(&"spend").unwrap(), Asset::from_string(&"1.0000 ZEOS").unwrap());
+        fees.insert(Name::from_string(&"output").unwrap(), Asset::from_string(&"1.0000 ZEOS").unwrap());
+        fees.insert(Name::from_string(&"authenticate").unwrap(), Asset::from_string(&"1.0000 ZEOS").unwrap());
+        fees.insert(Name::from_string(&"publishnotes").unwrap(), Asset::from_string(&"1.0000 ZEOS").unwrap());
 
         let ztx: ZTransaction = serde_json::from_str(&json).unwrap();
         let rztx = resolve_ztransaction(&w, &fee_token_contract, &fees, &ztx);
@@ -2085,13 +2323,13 @@ mod tests
         println!("read params...");
         let mut params = HashMap::new();
         let f = File::open("params_mint.bin").unwrap();
-        params.insert(Name::from_string(&"mint".to_string()).unwrap(), Parameters::<Bls12>::read(f, false).unwrap());
+        params.insert(Name::from_string(&"mint").unwrap(), Parameters::<Bls12>::read(f, false).unwrap());
         let f = File::open("params_spendoutput.bin").unwrap();
-        params.insert(Name::from_string(&"spendoutput".to_string()).unwrap(), Parameters::<Bls12>::read(f, false).unwrap());
+        params.insert(Name::from_string(&"spendoutput").unwrap(), Parameters::<Bls12>::read(f, false).unwrap());
         let f = File::open("params_spend.bin").unwrap();
-        params.insert(Name::from_string(&"spend".to_string()).unwrap(), Parameters::<Bls12>::read(f, false).unwrap());
+        params.insert(Name::from_string(&"spend").unwrap(), Parameters::<Bls12>::read(f, false).unwrap());
         let f = File::open("params_output.bin").unwrap();
-        params.insert(Name::from_string(&"output".to_string()).unwrap(), Parameters::<Bls12>::read(f, false).unwrap());
+        params.insert(Name::from_string(&"output").unwrap(), Parameters::<Bls12>::read(f, false).unwrap());
 
         println!("zsign...");
         let tx = zsign_transaction(&w, &rztx, &params);
@@ -2102,7 +2340,7 @@ mod tests
         println!("{}", serde_json::to_string_pretty(&tx).unwrap());
 
         println!("zverify...");
-        assert!(zverify_spend_transaction(&tx.0, &params));
+        assert!(zverify_spend_transaction(&tx.0, &params).is_ok());
     }
 
     use crate::transaction::Blake2s7rParams;
@@ -2111,7 +2349,7 @@ mod tests
     #[test]
     fn test_hash()
     {
-        let mut rng = OsRng.clone();
+        let mut rng = OsRng;
         let note = Note::from_parts(0, Address::dummy(&mut rng), Name(0), ExtendedAsset::new(Asset::new(0, Symbol(0)).unwrap(), Name(0)), Rseed::new(&mut rng), {
             let memo = "this is a memo string".to_string();
             let mut memo_bytes = [0; 512];
@@ -2165,18 +2403,18 @@ mod tests
         let mint_zactions: Vec<MintDesc> = serde_json::from_str(json).unwrap();
 
         let mut fees = HashMap::new();
-        fees.insert(Name::from_string(&"begin".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
-        fees.insert(Name::from_string(&"mint".to_string()).unwrap(), Asset::from_string(&"1.0000 ZEOS".to_string()).unwrap());
+        fees.insert(Name::from_string(&"begin").unwrap(), Asset::from_string(&"1.0000 ZEOS").unwrap());
+        fees.insert(Name::from_string(&"mint").unwrap(), Asset::from_string(&"1.0000 ZEOS").unwrap());
 
         let f = File::open("params_mint.bin").unwrap();
         let mint_params = Parameters::<Bls12>::read(f, false).unwrap();
 
         let x = zsign_transfer_and_mint_transaction(
             &mint_zactions,
-            &Authorization { actor: Name::from_string(&"thezeosalias".to_string()).unwrap(), permission: Name::from_string(&"public".to_string()).unwrap() },
-            &Authorization { actor: Name::from_string(&"mschoenebeck".to_string()).unwrap(), permission: Name::from_string(&"active".to_string()).unwrap() },
-            Name::from_string(&"zeos4privacy".to_string()).unwrap(),
-            Name::from_string(&"thezeostoken".to_string()).unwrap(),
+            &Authorization { actor: Name::from_string(&"thezeosalias").unwrap(), permission: Name::from_string(&"public").unwrap() },
+            &Authorization { actor: Name::from_string(&"mschoenebeck").unwrap(), permission: Name::from_string(&"active").unwrap() },
+            Name::from_string(&"zeos4privacy").unwrap(),
+            Name::from_string(&"thezeostoken").unwrap(),
             &fees,
             &mint_params
         ).unwrap();
