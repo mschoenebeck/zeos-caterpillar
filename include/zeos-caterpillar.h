@@ -9,6 +9,7 @@ extern const char* wallet_last_error();
 extern void free_string(const char* ptr);
 extern bool wallet_create(const char* seed, bool is_ivk, const char* chain_id, const char* protocol_contract, const char* vault_contract, const char* alias_authority, wallet_t*& out_p_wallet);
 extern void wallet_close(wallet_t* p_wallet);
+extern bool wallet_seed_hex(wallet_t* p_wallet, const char** out_seed_hex);
 extern bool wallet_size(wallet_t* p_wallet, uint64_t* out_size);
 extern bool wallet_is_ivk(wallet_t* p_wallet, bool* out_is_ivk);
 extern bool wallet_chain_id(wallet_t* p_wallet, const char** out_chain_id);
@@ -26,7 +27,7 @@ extern bool wallet_balances_json(wallet_t* p_wallet, bool pretty, const char** o
 extern bool wallet_unspent_notes_json(wallet_t* p_wallet, bool pretty, const char** out_json);
 extern bool wallet_fungible_tokens_json(wallet_t* p_wallet, uint64_t symbol, uint64_t contract, bool pretty, const char** out_json);
 extern bool wallet_non_fungible_tokens_json(wallet_t* p_wallet, uint64_t contract, bool pretty, const char** out_json);
-extern bool wallet_authentication_tokens_json(wallet_t* p_wallet, uint64_t contract, bool spent, bool pretty, const char** out_json);
+extern bool wallet_authentication_tokens_json(wallet_t* p_wallet, uint64_t contract, bool spent, bool seed, bool pretty, const char** out_json);
 extern bool wallet_unpublished_notes_json(wallet_t* p_wallet, bool pretty, const char** out_json);
 extern bool wallet_transaction_history_json(wallet_t* p_wallet, bool pretty, const char** out_json);
 extern bool wallet_addresses_json(wallet_t* p_wallet, bool pretty, const char** out_json);

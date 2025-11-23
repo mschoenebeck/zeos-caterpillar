@@ -841,7 +841,7 @@ mod tests
 
         let f = File::create("proof_transfer.bin").unwrap();
         proof.write(f).unwrap();
-        println!("{}", AffineProofBytesLE::from(proof.clone()).to_string());
+        println!("{}", AffineProofBytesLE::try_from(proof.clone()).unwrap().to_string());
 
         println!("pack inputs");
         let mut inputs = vec![];

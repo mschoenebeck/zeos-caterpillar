@@ -50,7 +50,7 @@ pub struct Wallet
     seed: Vec<u8>,
     ivk: IncomingViewingKey, // READ-ONLY WALLET: only valid if seed == ""
     diversifiers: Vec<u64>,
-    
+
     // wallet metadata
     chain_id: [u8; 32],
     protocol_contract: Name,
@@ -310,6 +310,11 @@ impl Wallet
         //let mut v = vec![];
         //assert!(self.write(&mut v).is_ok());
         //v.len()
+    }
+
+    pub fn seed(&self) -> Vec<u8>
+    {
+        self.seed.to_vec()
     }
 
     pub fn chain_id(&self) -> [u8; 32]
@@ -666,9 +671,21 @@ impl Wallet
 
             for n in tx.iter()
             {
+                // edge case: when notes are sent to blockchain accounts (i.e. when n.note().account() != Name(0))
+                // it could happen that in the same transaction the contract responds by sending tokens (including ATs)
+                // back into the wallet and since privacy wallets mint both - outgoing and incoming notes - themselves
+                // we filter out all outgoing notes for which we have an incoming one so they don't appear twice in the
+                // wallet history (i.e. as both under "Sent" and "Received").
+                if htx.tx_type == "Sent" && n.note().account() != Name(0)
+                {
+                    let cm = n.note().commitment();
+                    if received.iter().any(|m|
+                        m.block_ts() == n.block_ts() && m.note().commitment() == cm
+                    ) { continue; }
+                }
                 if !n.note().memo().eq(&MEMO_CHANGE_NOTE)
                 {
-                    if n.note().account().eq(&self.alias_authority.actor)
+                    if n.note().account().eq(&self.alias_authority.actor) && n.note().memo_string().contains("fee")
                     {
                         htx.tx_fee = n.note().asset().quantity().to_string();
                     }
@@ -676,7 +693,7 @@ impl Wallet
                     {
                         htx.account_asset_memo.push((
                             n.note().account().to_string(),
-                            n.note().asset().to_string() + &if htx.tx_type.eq("Received") { " (@".to_owned() + &n.note().address().to_bech32m().unwrap() + ")" } else { "".to_string() },
+                            if n.note().is_auth_token() { hex::encode(n.note().commitment().to_bytes()) } else { n.note().asset().to_string() + &if htx.tx_type.eq("Received") { " (@".to_owned() + &n.note().address().to_bech32m().unwrap() + ")" } else { "".to_string() } },
                             String::from_utf8(n.note().memo()[0..{let len = n.note().memo().iter().position(|&c| c == 0); if len.is_none() {512} else {len.unwrap()}}].to_vec()).unwrap()
                         ));
                     }

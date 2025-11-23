@@ -357,6 +357,32 @@ pub extern "C" fn wallet_close(
 
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 #[no_mangle]
+pub extern "C" fn wallet_seed_hex(
+    p_wallet: *mut Wallet,
+    out_seed_hex: &mut *const libc::c_char,
+) -> bool {
+    if p_wallet.is_null() {
+        set_last_error("wallet_seed_hex: p_wallet is null");
+        return false;
+    }
+    let wallet = unsafe { &mut *p_wallet };
+    let encoded = hex::encode(wallet.seed());
+
+    match CString::new(encoded) {
+        Ok(c_string) => {
+            *out_seed_hex = c_string.into_raw(); // transfer ownership to caller
+            true
+        }
+        Err(_) => {
+            set_last_error("wallet_seed_hex: CString::new failed (unexpected null byte)");
+            *out_seed_hex = std::ptr::null();
+            false
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[no_mangle]
 pub extern "C" fn wallet_size(
     p_wallet: *mut Wallet,
     out_size: &mut u64,
@@ -876,6 +902,7 @@ pub extern "C" fn wallet_authentication_tokens_json(
     p_wallet: *mut Wallet,
     contract: u64,
     spent: bool,
+    seed: bool,
     pretty: bool,
     out_json: &mut *const libc::c_char,
 ) -> bool {
@@ -891,12 +918,22 @@ pub extern "C" fn wallet_authentication_tokens_json(
         .authentication_tokens(&Name(contract), spent)
         .iter()
         .map(|n| {
+            // "<commitment_hex>@<contract_name>|<seed_phrase>"
+            if seed {
+                format!(
+                    "{}@{}|{}",
+                    hex::encode(n.note().commitment().to_bytes()),
+                    n.note().contract().to_string(),
+                    n.note().memo_string()
+                )
             // "<commitment_hex>@<contract_name>"
-            format!(
-                "{}@{}",
-                hex::encode(n.note().commitment().to_bytes()),
-                n.note().contract().to_string()
-            )
+            } else {
+                format!(
+                    "{}@{}",
+                    hex::encode(n.note().commitment().to_bytes()),
+                    n.note().contract().to_string()
+                )
+            }
         })
         .collect::<Vec<String>>();
     let json_result = if pretty {

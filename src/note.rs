@@ -55,6 +55,14 @@ impl Rseed
     }
 }
 
+pub fn memo_to_bytes<S: AsRef<str>>(memo: S) -> [u8; 512] {
+    let mut buf = [0u8; 512];
+    let bytes = memo.as_ref().as_bytes();
+    let len = bytes.len().min(512);
+    buf[..len].copy_from_slice(&bytes[..len]);
+    buf
+}
+
 /// A discrete amount of funds or an NFT received by an address.
 #[derive(Clone, Debug)]
 pub struct Note
@@ -251,6 +259,13 @@ impl Note {
     /// Returns the memo field of this note.
     pub fn memo(&self) -> &[u8; 512] {
         &self.memo
+    }
+
+    pub fn memo_string(&self) -> String {
+        let bytes = self.memo();
+        // find first zero byte = terminating character
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        String::from_utf8_lossy(&bytes[..end]).to_string()
     }
 
     /// Is this note an NFT
@@ -553,7 +568,7 @@ mod tests
 {
     use super::Note;
     use rand::rngs::OsRng;
-    use crate::eosio::ExtendedAsset;
+    use crate::{eosio::ExtendedAsset, note::memo_to_bytes};
 
     #[test]
     fn test_serde()
@@ -574,5 +589,7 @@ mod tests
         println!("{}", encoded);
         let decoded: Note = serde_json::from_str(&encoded).unwrap();
         assert_eq!(n, decoded);
+
+        println!("{:?}", memo_to_bytes("fee"));
     }
 }

@@ -2,7 +2,7 @@ use crate::address::{Address, AddressError};
 use crate::eosio::{pack, Action, Asset, Authorization, ExtendedAsset, Name, PackedAction, Symbol, Transaction, NameError};
 use crate::keys::{FullViewingKey, SpendingKey};
 use crate::note::nullifier::ExtractedNullifier;
-use crate::note::{Note, NoteEx, Rseed, ExtractedNoteCommitment};
+use crate::note::{ExtractedNoteCommitment, Note, NoteEx, Rseed, memo_to_bytes};
 use crate::wallet::Wallet;
 use crate::contract::{PlsMint, PlsMintAction, PlsSpendSequence, PlsSpendOutput, PlsSpend, PlsOutput, PlsSpendAction, AffineProofBytesLE, ScalarBytes, scalar_to_raw_bytes_le, PlsUnshieldedRecipient, PlsAuthenticateAction, PlsPublishNotesAction, PlsWithdrawAction, PlsAuthenticate, PlsWithdraw, self, PlsNftTransfer, PlsFtTransfer};
 use crate::circuit::{mint::Mint, spend_output::SpendOutput, spend::Spend, output::Output};
@@ -28,6 +28,7 @@ use group::Curve;
 use bellman::groth16::{Proof, verify_proof, prepare_verifying_key};
 use bellman::gadgets::multipack;
 use bls12_381::Scalar;
+use bip39::{Mnemonic, Language};
 
 #[derive(Debug)]
 pub enum TransactionError
@@ -59,6 +60,7 @@ pub enum TransactionError
     Synthesis(String),
     ProofSystem(String),      // keep a string for diagnostics
     ProofBytes,
+    Bip39(bip39::Error),
 }
 impl fmt::Display for TransactionError
 {
@@ -90,6 +92,7 @@ impl fmt::Display for TransactionError
             Self::Synthesis(e) => write!(f, "synthesis error: {}", e),
             Self::ProofSystem(e)  => write!(f, "proof system error: {}", e),
             Self::ProofBytes => write!(f, "proof bytes invalid"),
+            Self::Bip39(e) => write!(f, "bip39 error: {}", e),
         }
     }
 }
@@ -107,6 +110,9 @@ impl From<AddressError> for TransactionError {
 }
 impl From<NameError> for TransactionError {
     fn from(e: NameError) -> Self { TransactionError::Name(e) }
+}
+impl From<bip39::Error> for TransactionError {
+    fn from(e: bip39::Error) -> Self { TransactionError::Bip39(e) }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -374,7 +380,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                     data: {
                         let desc: MintDesc = serde_json::from_value(za.data.clone())?;
 
-                        let n = Note::from_parts(
+                        let mut n = Note::from_parts(
                             0,
                             if desc.to.eq(&"$SELF") { wallet.default_address().unwrap() } else { Address::from_bech32m(&desc.to)? },
                             desc.from,
@@ -392,6 +398,22 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                         if n.quantity().eq(&Asset::from_string(&"0").unwrap())
                         {
                             if !n.contract().eq(&n.account()) { Err(TransactionError::AuthTokenContractAccount)?; }
+                            // in case of auth note we re-create the Rseed based on a 24-word BIP-39 seed phrase which is placed into the memo of the auth note
+                            let mnemonic = Mnemonic::generate_in_with(&mut rng, Language::English, 24)?;
+                            let memo = mnemonic.to_string();
+                            n = Note::from_parts(
+                                n.header(),
+                                n.address(),
+                                n.account(),
+                                n.asset().clone(),
+                                Rseed::from_seed(memo.as_bytes()),
+                                {
+                                    let mut memo_bytes = [0; 512];
+                                    memo_bytes[0..min(512, memo.len())].copy_from_slice(&memo.as_bytes()[0..min(512, memo.len())]);
+                                    memo_bytes
+                                }
+                            );
+                            // if this is our auth note we buffer it to be able to insert it's hash if needed further in this current transaction
                             if desc.to.eq(&"$SELF") { auth_tokens.push(n.clone()); }
                             // if this auth note shall be published we need to add the 'publishnotes' fee
                             if desc.publish_note {
@@ -427,7 +449,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                 Name(14219329122852667392) => Ok(ResolvedZAction{
                     name: za.name,
                     data: {
-                        let desc: SpendSequenceDesc = serde_json::from_value(za.data.clone())?;
+                        let mut desc: SpendSequenceDesc = serde_json::from_value(za.data.clone())?;
 
                         let mut spend_output = vec![];
                         let mut spend = vec![];
@@ -436,6 +458,16 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                         // determine symbol of this 'spend' sequence from the first recipient (must have at least one)
                         if desc.to.is_empty() {
                             return Err(TransactionError::SpendToZero);
+                        }
+                        // convert all vault recipients to eosio recipients
+                        for srd in desc.to.iter_mut()
+                        {
+                            if srd.to.len() == 64
+                            {
+                                let auth_hash = srd.to.clone();
+                                srd.to = ztx.vault_contract.to_string();
+                                srd.memo = format!("AUTH:{}|{}", auth_hash, srd.memo);
+                            }
                         }
                         let symbol = desc.to[0].quantity.symbol();
                         if symbol.raw() == 0 // NFT case
@@ -751,7 +783,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                                 rztx.alias_authority.actor,
                                 ExtendedAsset::new(Asset::new(fee as i64, note_b.symbol().clone()).ok_or(TransactionError::FeeSymbol)?, note_b.contract().clone()),
                                 Rseed::new(&mut rng),
-                                [0; 512]
+                                memo_to_bytes("fee")
                             ),
                             ztx.publish_fee_note
                         ));
@@ -786,7 +818,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                                 rztx.alias_authority.actor,
                                 ExtendedAsset::new(Asset::new(fee as i64, note_b.symbol().clone()).unwrap(), note_b.contract().clone()),
                                 Rseed::new(&mut rng),
-                                [0; 512]
+                                memo_to_bytes("fee")
                             ),
                             ztx.publish_fee_note
                         ));
@@ -859,7 +891,7 @@ pub fn resolve_ztransaction(wallet: &Wallet, fee_token_contract: &Name, fees: &H
                                 rztx.alias_authority.actor,
                                 ExtendedAsset::new(Asset::new(fee as i64, fees.values().next().ok_or(TransactionError::FeeSymbol)?.symbol().clone()).ok_or(TransactionError::FeeSymbol)?, fee_token_contract.clone()),
                                 Rseed::new(&mut rng),
-                                [0; 512]
+                                memo_to_bytes("fee")
                             ),
                             ztx.publish_fee_note
                         )]
@@ -2011,7 +2043,11 @@ pub fn create_auth_token(wallet: &Wallet, seed: String, contract: Name, recipien
         contract, // in AUTH mode the Mint circuit enforces account == contract
         ExtendedAsset::new(Asset::from_string(&"0").unwrap(), contract),
         Rseed::from_seed(seed.as_bytes()),
-        [0; 512]
+        {
+            let mut memo_bytes = [0; 512];
+            memo_bytes[0..min(512, seed.len())].copy_from_slice(&seed.as_bytes()[0..min(512, seed.len())]);
+            memo_bytes
+        }
     );
 
     let note_ct = {
@@ -2027,27 +2063,22 @@ pub fn create_auth_token(wallet: &Wallet, seed: String, contract: Name, recipien
     };
 
     let mut unpublished_notes: HashMap<String, Vec<String>> = HashMap::new();
-    let recipient = recipient.to_bech32m()?;
-    // check if recipient == self in order to not add this note twice: 1) as recipient note and 2) as "self" note below
-    if recipient != wallet.default_address().unwrap().to_bech32m()?
-    {
-        if unpublished_notes.contains_key(&recipient)
-        {
-            unpublished_notes.get_mut(&recipient).unwrap().push(note_ct.clone());
-        }
-        else
-        {
-            unpublished_notes.insert(recipient, vec![note_ct.clone()]);
-        }
+    let recipient_str = recipient.to_bech32m()?;
+    let self_str = wallet.default_address().unwrap().to_bech32m()?;
+
+    // if recipient is not self, add note under recipient
+    if recipient_str != self_str {
+        unpublished_notes
+            .entry(recipient_str)
+            .or_default()
+            .push(note_ct.clone());
     }
-    if unpublished_notes.contains_key(&"self".to_string())
-    {
-        unpublished_notes.get_mut(&"self".to_string()).unwrap().push(note_ct);
-    }
-    else
-    {
-        unpublished_notes.insert("self".to_string(), vec![note_ct]);
-    }
+
+    // always add under "self"
+    unpublished_notes
+        .entry("self".to_string())
+        .or_default()
+        .push(note_ct);
 
     Ok(unpublished_notes)
 }
