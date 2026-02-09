@@ -17,7 +17,7 @@ use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use serde_json::json;
 use std::{fmt, cmp::min};
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeSet};
 use std::ops::{Add, AddAssign};
 use rand::rngs::OsRng;
 use bellman::groth16::{Parameters, create_random_proof};
@@ -1008,7 +1008,19 @@ pub struct ResolvedWithdrawDesc
     pub to: Name
 }
 
-pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &HashMap<Name, Parameters::<Bls12>>) -> Result<(Transaction, HashMap<String, Vec<String>>), TransactionError>
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AuthTokensMeta {
+    pub unspent: Vec<String>,
+    pub spent: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TxMeta {
+    pub unpublished_notes: HashMap<String, Vec<String>>,
+    pub auth_tokens: AuthTokensMeta,
+}
+
+pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &HashMap<Name, Parameters::<Bls12>>) -> Result<(Transaction, TxMeta), TransactionError>
 {
     if wallet.is_ivk()
     {
@@ -1041,7 +1053,14 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
             }
         ]
     };
-    let mut unpublished_notes: HashMap<String, Vec<String>> = HashMap::new();
+    let mut meta = TxMeta {
+        unpublished_notes: HashMap::new(),
+        auth_tokens: AuthTokensMeta::default(),
+    };
+    // collect auth tokens minted/spent in this transaction
+    let mut minted_auth: BTreeSet<String> = BTreeSet::new();
+    let mut spent_auth:  BTreeSet<String> = BTreeSet::new();
+
     let mut auth_count = wallet.auth_count();
     let mut i = 0;
     while i < rztx.rzactions.len()
@@ -1096,9 +1115,20 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                         encrypted_note.to_base64()
                     };
 
+                    // is this note an auth token?
+                    let is_auth_note = data.note.quantity().eq(&Asset::from_string(&"0").unwrap());
+
+                    if is_auth_note {
+                        // collect minted auth token id "<cm>@<contract>"
+                        let cm_hex = ScalarBytes(data.note.commitment().to_bytes()).to_string();
+                        let token_id = format!("{}@{}", cm_hex, data.note.contract().to_string());
+                        minted_auth.insert(token_id);
+                    }
+
+                    // shall this note get published on chain?
                     if data.publish_note
                     {
-                        if data.note.quantity().eq(&Asset::from_string(&"0").unwrap()) { auth_note_cts.push(note_ct); }
+                        if is_auth_note { auth_note_cts.push(note_ct); }
                         else { note_cts.push(note_ct); }
                     }
                     else
@@ -1107,22 +1137,22 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                         // check if recipient == self in order to not add this note twice: 1) as recipient note and 2) as "self" note below
                         if recipient != wallet.default_address().unwrap().to_bech32m()?
                         {
-                            if unpublished_notes.contains_key(&recipient)
+                            if meta.unpublished_notes.contains_key(&recipient)
                             {
-                                unpublished_notes.get_mut(&recipient).unwrap().push(note_ct.clone());
+                                meta.unpublished_notes.get_mut(&recipient).unwrap().push(note_ct.clone());
                             }
                             else
                             {
-                                unpublished_notes.insert(recipient, vec![note_ct.clone()]);
+                                meta.unpublished_notes.insert(recipient, vec![note_ct.clone()]);
                             }
                         }
-                        if unpublished_notes.contains_key(&"self".to_string())
+                        if meta.unpublished_notes.contains_key(&"self".to_string())
                         {
-                            unpublished_notes.get_mut(&"self".to_string()).unwrap().push(note_ct);
+                            meta.unpublished_notes.get_mut(&"self".to_string()).unwrap().push(note_ct);
                         }
                         else
                         {
-                            unpublished_notes.insert("self".to_string(), vec![note_ct]);
+                            meta.unpublished_notes.insert("self".to_string(), vec![note_ct]);
                         }
                     }
 
@@ -1338,22 +1368,22 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                                 // check if recipient == self in order to not add this note twice: 1) as recipient note and 2) as "self" note below
                                 if recipient != wallet.default_address().unwrap().to_bech32m()?
                                 {
-                                    if unpublished_notes.contains_key(&recipient)
+                                    if meta.unpublished_notes.contains_key(&recipient)
                                     {
-                                        unpublished_notes.get_mut(&recipient).unwrap().push(note_b_ct.clone());
+                                        meta.unpublished_notes.get_mut(&recipient).unwrap().push(note_b_ct.clone());
                                     }
                                     else
                                     {
-                                        unpublished_notes.insert(recipient, vec![note_b_ct.clone()]);
+                                        meta.unpublished_notes.insert(recipient, vec![note_b_ct.clone()]);
                                     }
                                 }
-                                if unpublished_notes.contains_key(&"self".to_string())
+                                if meta.unpublished_notes.contains_key(&"self".to_string())
                                 {
-                                    unpublished_notes.get_mut(&"self".to_string()).unwrap().push(note_b_ct);
+                                    meta.unpublished_notes.get_mut(&"self".to_string()).unwrap().push(note_b_ct);
                                 }
                                 else
                                 {
-                                    unpublished_notes.insert("self".to_string(), vec![note_b_ct]);
+                                    meta.unpublished_notes.insert("self".to_string(), vec![note_b_ct]);
                                 }
                             }
                         }
@@ -1377,13 +1407,13 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                             }
                             else
                             {
-                                if unpublished_notes.contains_key(&"self".to_string())
+                                if meta.unpublished_notes.contains_key(&"self".to_string())
                                 {
-                                    unpublished_notes.get_mut(&"self".to_string()).unwrap().push(note_ct);
+                                    meta.unpublished_notes.get_mut(&"self".to_string()).unwrap().push(note_ct);
                                 }
                                 else
                                 {
-                                    unpublished_notes.insert("self".to_string(), vec![note_ct]);
+                                    meta.unpublished_notes.insert("self".to_string(), vec![note_ct]);
                                 }
                             }
                         }
@@ -1457,22 +1487,22 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                             // check if recipient == self in order to not add this note twice: 1) as recipient note and 2) as "self" note below
                             if recipient != wallet.default_address().unwrap().to_bech32m()?
                             {
-                                if unpublished_notes.contains_key(&recipient)
+                                if meta.unpublished_notes.contains_key(&recipient)
                                 {
-                                    unpublished_notes.get_mut(&recipient).unwrap().push(note_ct.clone());
+                                    meta.unpublished_notes.get_mut(&recipient).unwrap().push(note_ct.clone());
                                 }
                                 else
                                 {
-                                    unpublished_notes.insert(recipient, vec![note_ct.clone()]);
+                                    meta.unpublished_notes.insert(recipient, vec![note_ct.clone()]);
                                 }
                             }
-                            if unpublished_notes.contains_key(&"self".to_string())
+                            if meta.unpublished_notes.contains_key(&"self".to_string())
                             {
-                                unpublished_notes.get_mut(&"self".to_string()).unwrap().push(note_ct);
+                                meta.unpublished_notes.get_mut(&"self".to_string()).unwrap().push(note_ct);
                             }
                             else
                             {
-                                unpublished_notes.insert("self".to_string(), vec![note_ct]);
+                                meta.unpublished_notes.insert("self".to_string(), vec![note_ct]);
                             }
                         }
                     }
@@ -1502,6 +1532,14 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
             Name(3941447159957795488) => {
 
                 let data: ResolvedAuthenticateDesc = serde_json::from_value(rztx.rzactions[i].data.clone())?;
+
+                // collect spent auth token only if burn flag set
+                if data.burn {
+                    // collect spent auth token id "<cm>@<contract>"
+                    let cm_hex = ScalarBytes(data.auth_note.commitment().to_bytes()).to_string();
+                    let token_id = format!("{}@{}", cm_hex, data.auth_note.contract().to_string());
+                    spent_auth.insert(token_id);
+                }
 
                 tx.actions.push(Action{
                     account: rztx.alias_authority.actor,
@@ -1627,7 +1665,11 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
         data: json!({})
     });
 
-    Ok((tx, unpublished_notes))
+    // filter out spent auth tokens from mint (if minted and burned within same transaction)
+    meta.auth_tokens.spent = spent_auth.iter().cloned().collect();
+    meta.auth_tokens.unspent = minted_auth.difference(&spent_auth).cloned().collect();
+
+    Ok((tx, meta))
 }
 
 #[derive(Debug)]
