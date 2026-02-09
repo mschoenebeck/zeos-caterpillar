@@ -586,6 +586,13 @@ impl Wallet
             // test sender decryption
             match try_output_recovery_with_ovk(&fvk.ovk, &encrypted_note) {
                 Some(note) => {
+                    // Auth tokens can be "self-minted" (receiver decrypt succeeds too),
+                    // in which case sender recovery would create a duplicate "Sent" entry for the mint.
+                    // We only want the incoming mint + (optional) later synthetic burn.
+                    if note.is_auth_token() && (self.note_exist_in_unspent(&note) || self.note_exist_in_spent(&note)) {
+                        continue;
+                    }
+
                     let note_ex = NoteEx::from_parts(
                         block_num,
                         block_ts,
@@ -671,18 +678,42 @@ impl Wallet
 
             for n in tx.iter()
             {
-                // edge case: when notes are sent to blockchain accounts (i.e. when n.note().account() != Name(0))
-                // it could happen that in the same transaction the contract responds by sending tokens (including ATs)
-                // back into the wallet and since privacy wallets mint both - outgoing and incoming notes - themselves
-                // we filter out all outgoing notes for which we have an incoming one so they don't appear twice in the
-                // wallet history (i.e. as both under "Sent" and "Received").
-                if htx.tx_type == "Sent" && n.note().account() != Name(0)
+                // Special-case (AT UX): if an auth token is minted and burned within the same block timestamp,
+                // hide it entirely (suppress both mint and burn). This situation is usually an internal
+                // one-shot token and showing it clutters/confuses history.
+                //
+                // This works because when timestamps are equal we process "Sent" first, so the matching
+                // "Received" AT is still in `received` and can be removed here.
+                if htx.tx_type == "Sent" && n.note().is_auth_token() {
+                    let cm = n.note().commitment();
+                    if let Some(idx) = received.iter().position(|m|
+                        m.block_ts() == n.block_ts() && m.note().is_auth_token() && m.note().commitment() == cm
+                    ) {
+                        // Remove the mint (Received) entry so it won't show later
+                        received.remove(idx);
+                        // Skip showing the burn (Sent) entry
+                        continue;
+                    }
+                }
+
+                // Edge case: when notes are sent to *blockchain accounts* (i.e. n.note().account() != Name(0)),
+                // the same transaction may cause the contract to send assets back into the privacy wallet
+                // (e.g. refunds, change, contract-side responses).
+                //
+                // Since privacy wallets mint both outgoing *and* incoming notes themselves, this would otherwise
+                // produce duplicate history entries for the same commitment at the same block timestamp
+                // (one "Sent" and one "Received").
+                //
+                // To avoid showing such duplicates in the wallet history, we suppress outgoing notes that have
+                // a matching incoming note (same commitment, same block_ts).
+                if htx.tx_type == "Sent" && n.note().account() != Name(0) && !n.note().is_auth_token()
                 {
                     let cm = n.note().commitment();
                     if received.iter().any(|m|
                         m.block_ts() == n.block_ts() && m.note().commitment() == cm
                     ) { continue; }
                 }
+
                 if !n.note().memo().eq(&MEMO_CHANGE_NOTE)
                 {
                     if n.note().account().eq(&self.alias_authority.actor) && n.note().memo_string().contains("fee")
@@ -797,8 +828,22 @@ impl Wallet
                             else
                             {
                                 // auth note was burned
-                                self.spent_notes.push(self.unspent_notes.remove(index.unwrap()));
+                                let burned = self.unspent_notes.remove(index.unwrap());
+
+                                // keep existing behavior: mark it spent
+                                self.spent_notes.push(burned.clone());
                                 ats_spent += 1;
+
+                                // add a synthetic outgoing entry timestamped at the burn block,
+                                // so it appears in history as "Sent" at the time it was burned.
+                                let burn_ex = NoteEx::from_parts(
+                                    block_num,
+                                    block_ts,
+                                    block_ts, // wallet_ts: use burn time as well
+                                    0,        // leaf_idx_arr: not applicable (same as other outgoing notes you store)
+                                    burned.note().clone(),
+                                );
+                                self.outgoing_notes.push(burn_ex);
                             }
                         }
                     }
