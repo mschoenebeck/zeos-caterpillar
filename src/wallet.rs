@@ -19,12 +19,12 @@ use crate::{
     note_encryption::{try_note_decryption, try_output_recovery_with_ovk, TransmittedNoteCiphertext},
     log
 };
-use bls12_381::Scalar;
+use crate::engine::{scalar_one, scalar_to_canonical_bytes};
 
 // empty merkle tree roots
 lazy_static! {
     static ref EMPTY_ROOTS: Vec<ScalarBytes> = {
-        let mut v = vec![ScalarBytes(bls12_381::Scalar::one().to_bytes())];
+        let mut v = vec![ScalarBytes(scalar_to_canonical_bytes(&scalar_one()))];
         for d in 0..MERKLE_TREE_DEPTH
         {
             let next = Blake2s7rParams::new()
@@ -790,7 +790,7 @@ impl Wallet
                             for so in seq.spend_output.iter()
                             {
                                 // check if published nullifier belongs to one of our notes
-                                let index = self.unspent_notes.iter().position(|n| n.note().nullifier(&fvk.nk, n.position()).extract().0.eq(&Scalar::try_from(so.nf.clone()).unwrap()));
+                                let index = self.unspent_notes.iter().position(|n| n.note().nullifier(&fvk.nk, n.position()).extract().0.eq(&crate::engine::Scalar::try_from(so.nf.clone()).unwrap()));
                                 if index.is_some()
                                 {
                                     let note = self.unspent_notes.remove(index.unwrap());
@@ -802,7 +802,7 @@ impl Wallet
                             for s in seq.spend.iter()
                             {
                                 // check if published nullifier belongs to one of our notes
-                                let index = self.unspent_notes.iter().position(|n| n.note().nullifier(&fvk.nk, n.position()).extract().0.eq(&Scalar::try_from(s.nf.clone()).unwrap()));
+                                let index = self.unspent_notes.iter().position(|n| n.note().nullifier(&fvk.nk, n.position()).extract().0.eq(&crate::engine::Scalar::try_from(s.nf.clone()).unwrap()));
                                 if index.is_some()
                                 {
                                     let note = self.unspent_notes.remove(index.unwrap());
@@ -817,7 +817,7 @@ impl Wallet
                         let a: PlsAuthenticate = serde_json::from_value(action["data"]["action"].clone()).unwrap();
 
                         // check if published note commitment belongs to one of our auth notes
-                        let index = self.unspent_notes.iter().position(|n| n.note().commitment().0.eq(&Scalar::try_from(a.cm.clone()).unwrap()));
+                        let index = self.unspent_notes.iter().position(|n| n.note().commitment().0.eq(&crate::engine::Scalar::try_from(a.cm.clone()).unwrap()));
                         if index.is_some()
                         {
                             if a.burn == 0

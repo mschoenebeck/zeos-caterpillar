@@ -115,7 +115,7 @@ impl SpendingKey {
 
     pub fn proof_generation_key(&self) -> ProofGenerationKey {
         ProofGenerationKey {
-            ak: SPENDING_KEY_GENERATOR * self.ask,
+            ak: *SPENDING_KEY_GENERATOR * self.ask,
             nsk: self.nsk,
         }
     }
@@ -207,8 +207,8 @@ impl FullViewingKey {
     pub fn from_spending_key(sk: &SpendingKey) -> Self {
         FullViewingKey {
             dk:  sk.dk,
-            ak: SPENDING_KEY_GENERATOR * sk.ask,
-            nk: NullifierDerivingKey(PROOF_GENERATION_KEY_GENERATOR * sk.nsk),
+            ak: *SPENDING_KEY_GENERATOR * sk.ask,
+            nk: NullifierDerivingKey(*PROOF_GENERATION_KEY_GENERATOR * sk.nsk),
             ovk: sk.ovk,
         }
     }
@@ -909,7 +909,7 @@ mod tests {
         );
 
         // Set ak to a basepoint.
-        let basepoint = SPENDING_KEY_GENERATOR;
+        let basepoint = *SPENDING_KEY_GENERATOR;
         buf[0..32].copy_from_slice(&basepoint.to_bytes());
 
         // nk is allowed to be the identity.

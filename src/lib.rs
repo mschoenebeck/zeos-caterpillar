@@ -10,6 +10,7 @@ macro_rules! MT_NUM_LEAVES {
     ($d:expr) => (1<<($d))
 }
 
+mod engine;
 mod address;
 pub mod value;
 pub mod circuit;
@@ -36,12 +37,9 @@ use transaction::{ZTransaction, ResolvedZTransaction, resolve_ztransaction, zsig
 use keys::IncomingViewingKey;
 use std::collections::HashMap;
 use bellman::groth16::Parameters;
-use bls12_381::Bls12;
+use crate::engine::Bls12;
 #[cfg(target_arch = "wasm32")]
-use crate::{
-    eosio::Asset,
-    transaction::{MintDesc, zsign_transfer_and_mint_transaction},
-};
+use crate::transaction::{MintDesc, zsign_transfer_and_mint_transaction};
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 use std::slice;
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]

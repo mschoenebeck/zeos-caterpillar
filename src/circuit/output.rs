@@ -10,6 +10,8 @@ use crate::circuit::constants::{
     VALUE_COMMITMENT_RANDOMNESS_GENERATOR,
     VALUE_COMMITMENT_VALUE_GENERATOR,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use ff::Field;
 
 /// This is an instance of the `Spend` circuit.
 pub struct Output
@@ -23,9 +25,9 @@ pub struct Output
     pub note_b: Option<Note>,
 }
 
-impl Circuit<bls12_381::Scalar> for Output
+impl Circuit<crate::engine::Scalar> for Output
 {
-    fn synthesize<CS: ConstraintSystem<bls12_381::Scalar>>(
+    fn synthesize<CS: ConstraintSystem<crate::engine::Scalar>>(
         self,
         cs: &mut CS,
     ) -> Result<(), SynthesisError>
@@ -39,7 +41,7 @@ impl Circuit<bls12_381::Scalar> for Output
         )?;
         // Compute accounts's value as a linear combination of the bits.
         let mut account_b_num = Num::zero();
-        let mut coeff = bls12_381::Scalar::one();
+        let mut coeff = crate::engine::scalar_one();
         for bit in &account_b_bits
         {
             account_b_num = account_b_num.add_bool_with_coeff(CS::one(), bit, coeff);
@@ -49,7 +51,7 @@ impl Circuit<bls12_381::Scalar> for Output
         cs.enforce(
             || "conditionally enforce 0 = account_b * 1",
             |lc| lc + CS::one(),
-            |lc| lc + &account_b_num.lc(bls12_381::Scalar::one()),
+            |lc| lc + &account_b_num.lc(crate::engine::scalar_one()),
             |lc| lc,
         );
 
@@ -111,7 +113,7 @@ impl Circuit<bls12_381::Scalar> for Output
         )?;
         // Compute note b's value as a linear combination of the bits.
         let mut value_b_num = num::Num::zero();
-        let mut coeff = bls12_381::Scalar::one();
+        let mut coeff = crate::engine::scalar_one();
         for bit in &value_b_bits
         {
             value_b_num = value_b_num.add_bool_with_coeff(CS::one(), bit, coeff);
@@ -236,7 +238,7 @@ mod tests
     use bellman::gadgets::test::TestConstraintSystem;
     use bellman::Circuit;
     use bellman::groth16::generate_random_parameters;
-    use bls12_381::Bls12;
+    use crate::engine::{Bls12, fq_to_engine_scalar, scalar_to_canonical_bytes};
     use crate::address::Address;
     use crate::eosio::ExtendedAsset;
     use crate::eosio::Name;
@@ -291,14 +293,23 @@ mod tests
         instance.synthesize(&mut cs).unwrap();
         println!("num constraints: {}", cs.num_constraints());
         println!("cs hash: {}", cs.hash());
-        
+
         assert!(cs.is_satisfied());
         assert_eq!(cs.get("randomization of note commitment b/u3/num").to_repr(), note_b.commitment().to_bytes());
-        assert_eq!(cs.get_input(0, "ONE"), bls12_381::Scalar::one());
-        assert_eq!(cs.get_input(1, "symbol commitment/input variable").to_repr(), scm.to_bytes());
+        assert_eq!(cs.get_input(0, "ONE"), crate::engine::scalar_one());
+        assert_eq!(
+            cs.get_input(1, "symbol commitment/input variable").to_repr(),
+            scalar_to_canonical_bytes(&scm)
+        );
         assert_eq!(cs.get_input(2, "commitment b/input variable").to_repr(), note_b.commitment().to_bytes());
-        assert_eq!(cs.get_input(3, "commitment point/u/input variable"), cv.as_inner().to_affine().get_u());
-        assert_eq!(cs.get_input(4, "commitment point/v/input variable"), cv.as_inner().to_affine().get_v());
+        assert_eq!(
+            cs.get_input(3, "commitment point/u/input variable"),
+            fq_to_engine_scalar(cv.as_inner().to_affine().get_u())
+        );
+        assert_eq!(
+            cs.get_input(4, "commitment point/v/input variable"),
+            fq_to_engine_scalar(cv.as_inner().to_affine().get_v())
+        );
     }
 
     #[test]

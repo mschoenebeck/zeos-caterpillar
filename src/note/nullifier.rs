@@ -46,7 +46,7 @@ impl Nullifier
 
 /// The u-coordinate of the nullifier to a note.
 #[derive(Copy, Clone, Debug)]
-pub struct ExtractedNullifier(pub bls12_381::Scalar);
+pub struct ExtractedNullifier(pub crate::engine::Scalar);
 
 impl ExtractedNullifier {
     /// Deserialize the extracted nullifier from a byte array.
@@ -56,7 +56,7 @@ impl ExtractedNullifier {
     ///
     /// [cmucanon]: https://zips.z.cash/protocol/protocol.pdf#outputencodingandconsensus
     pub fn from_bytes(bytes: &[u8; 32]) -> CtOption<Self> {
-        bls12_381::Scalar::from_repr(*bytes).map(ExtractedNullifier)
+        crate::engine::Scalar::from_repr(*bytes).map(ExtractedNullifier)
     }
 
     /// Serialize the extracted nullifier to its canonical byte representation.

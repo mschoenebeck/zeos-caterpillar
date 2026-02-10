@@ -1,5 +1,5 @@
 use bellman::groth16::{Proof, VerifyingKey};
-use bls12_381::{Bls12, G1Affine, G2Affine};
+use crate::engine::{Bls12, G1Affine, G2Affine};
 use serde::{Serialize, Deserialize, Serializer, Deserializer, de::Visitor, de};
 use crate::eosio::{Asset, Name, PackedAction, Symbol};
 use std::fmt;
@@ -55,20 +55,20 @@ impl<'de> Deserialize<'de> for ScalarBytes
     }
 }
 
-impl From<bls12_381::Scalar> for ScalarBytes {
-    fn from(s: bls12_381::Scalar) -> Self {
-        ScalarBytes(s.to_bytes())
+impl From<crate::engine::Scalar> for ScalarBytes {
+    fn from(s: crate::engine::Scalar) -> Self {
+        ScalarBytes(crate::engine::scalar_to_canonical_bytes(&s))
     }
 }
 
-impl TryFrom<ScalarBytes> for bls12_381::Scalar {
+impl TryFrom<ScalarBytes> for crate::engine::Scalar {
     type Error = &'static str;
     fn try_from(s: ScalarBytes) -> Result<Self, Self::Error> {
-        // Returns None if not canonical
-        Option::from(bls12_381::Scalar::from_bytes(&s.0))
+        crate::engine::scalar_from_canonical_bytes(&s.0)
             .ok_or("non-canonical scalar bytes")
     }
 }
+
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AffineVerifyingKeyBytesLE(pub Vec<u8>);
@@ -477,9 +477,9 @@ pub struct PlsNftTransfer
 }
 
 // converts a bls12-381 scalar to its raw byte representation (i.e. montgomery form instead of canonical)
-pub fn scalar_to_raw_bytes_le(s: &bls12_381::Scalar) -> [u8; 32] {
-    // to_bytes() is canonical; from_bytes() must succeed
-    let mont = Scalar::from_bytes(&s.to_bytes()).expect("canonical bls12_381::Scalar must convert");
+pub fn scalar_to_raw_bytes_le(s: &crate::engine::Scalar) -> [u8; 32] {
+    let canon = crate::engine::scalar_to_canonical_bytes(s);
+    let mont = Scalar::from_bytes(&canon).expect("canonical crate::engine::Scalar must convert");
     mont.to_raw_bytes()
 }
 
@@ -1001,8 +1001,8 @@ mod tests
     use std::io::Read;
     use bellman::groth16::{verify_proof, prepare_verifying_key, create_random_proof};
     use bellman::gadgets::multipack;
-    use bls12_381::Scalar;
-    use bls12_381::Bls12;
+    use crate::engine::Scalar;
+    use crate::engine::Bls12;
     use crate::circuit::mint::Mint;
     use rand::rngs::OsRng;
     use crate::keys::{SpendingKey, FullViewingKey};

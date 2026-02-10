@@ -10,6 +10,7 @@ use crate::{
     group_hash::group_hash,
     pedersen_hash::{pedersen_hash, Personalization},
 };
+use jubjub::Fq;
 
 const PREPARED_WINDOW_SIZE: usize = 4;
 pub(crate) type PreparedBase = WnafBase<jubjub::ExtendedPoint, PREPARED_WINDOW_SIZE>;
@@ -55,7 +56,7 @@ pub(crate) fn mixing_pedersen_hash(
     cm: jubjub::SubgroupPoint,
     position: u64,
 ) -> jubjub::SubgroupPoint {
-    cm + (NULLIFIER_POSITION_GENERATOR * jubjub::Fr::from(position))
+    cm + (*NULLIFIER_POSITION_GENERATOR * jubjub::Fr::from(position))
 }
 
 /// Defined in [Zcash Protocol Spec § 5.4.5.3: Sapling Key Agreement][concretesaplingkeyagreement].
@@ -129,7 +130,7 @@ pub(crate) fn windowed_pedersen_commit<I>(
 where
     I: IntoIterator<Item = bool>,
 {
-    pedersen_hash(personalization, s) + (NOTE_COMMITMENT_RANDOMNESS_GENERATOR * r)
+    pedersen_hash(personalization, s) + (*NOTE_COMMITMENT_RANDOMNESS_GENERATOR * r)
 }
 
 /// Coordinate extractor for Jubjub.
@@ -137,10 +138,16 @@ where
 /// Defined in [Zcash Protocol Spec § 5.4.9.4: Coordinate Extractor for Jubjub][concreteextractorjubjub].
 ///
 /// [concreteextractorjubjub]: https://zips.z.cash/protocol/protocol.pdf#concreteextractorjubjub
-pub(crate) fn extract_p(point: &jubjub::SubgroupPoint) -> bls12_381::Scalar {
+pub(crate) fn extract_p(point: &jubjub::SubgroupPoint) -> crate::engine::Scalar {
     // The commitment is in the prime order subgroup, so mapping the
     // commitment to the u-coordinate is an injective encoding.
-    Into::<&jubjub::ExtendedPoint>::into(point)
+    let fq: Fq = Into::<&jubjub::ExtendedPoint>::into(point)
         .to_affine()
-        .get_u()
+        .get_u();
+
+    let repr = fq.to_repr();
+    let mut b = [0u8; 32];
+    b.copy_from_slice(repr.as_ref());
+    crate::engine::scalar_from_canonical_bytes(&b)
+        .expect("jubjub::Fq must decode into engine::Scalar (same field)")
 }

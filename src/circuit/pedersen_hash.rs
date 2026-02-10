@@ -22,7 +22,7 @@ pub fn pedersen_hash<CS>(
     bits: &[Boolean],
 ) -> Result<EdwardsPoint, SynthesisError>
 where
-    CS: ConstraintSystem<bls12_381::Scalar>,
+    CS: ConstraintSystem<crate::engine::Scalar>,
 {
     let personalization = get_constant_bools(&personalization);
     assert_eq!(personalization.len(), 6);
@@ -111,6 +111,14 @@ mod test {
     use rand_core::{RngCore, SeedableRng};
     use rand_xorshift::XorShiftRng;
     use crate::pedersen_hash;
+
+    fn fq_to_engine_scalar(fq: jubjub::Fq) -> crate::engine::Scalar {
+        let repr = fq.to_repr();
+        let mut b = [0u8; 32];
+        b.copy_from_slice(repr.as_ref());
+        crate::engine::scalar_from_canonical_bytes(&b)
+            .expect("jubjub::Fq must decode into engine::Scalar")
+    }
 
     /// Predict the number of constraints of a Pedersen hash
     fn ph_num_constraints(input_bits: usize) -> usize {
@@ -233,8 +241,14 @@ mod test {
                 ))
                 .to_affine();
 
-                assert_eq!(res.get_u().get_value().unwrap(), expected.get_u());
-                assert_eq!(res.get_v().get_value().unwrap(), expected.get_v());
+                assert_eq!(
+                    res.get_u().get_value().unwrap(),
+                    fq_to_engine_scalar(expected.get_u())
+                );
+                assert_eq!(
+                    res.get_v().get_value().unwrap(),
+                    fq_to_engine_scalar(expected.get_v())
+                );
 
                 // Test against the output of a different personalization
                 let unexpected = jubjub::ExtendedPoint::from(pedersen_hash::pedersen_hash(
@@ -243,8 +257,12 @@ mod test {
                 ))
                 .to_affine();
 
-                assert!(res.get_u().get_value().unwrap() != unexpected.get_u());
-                assert!(res.get_v().get_value().unwrap() != unexpected.get_v());
+                assert!(
+                    res.get_u().get_value().unwrap() != fq_to_engine_scalar(unexpected.get_u())
+                );
+                assert!(
+                    res.get_v().get_value().unwrap() != fq_to_engine_scalar(unexpected.get_v())
+                );
             }
         }
     }
@@ -291,11 +309,11 @@ mod test {
 
             assert_eq!(
                 res.get_u().get_value().unwrap(),
-                bls12_381::Scalar::from_str_vartime(expected_us[length - 300]).unwrap()
+                crate::engine::Scalar::from_str_vartime(expected_us[length - 300]).unwrap()
             );
             assert_eq!(
                 res.get_v().get_value().unwrap(),
-                bls12_381::Scalar::from_str_vartime(expected_vs[length - 300]).unwrap()
+                crate::engine::Scalar::from_str_vartime(expected_vs[length - 300]).unwrap()
             );
         }
     }

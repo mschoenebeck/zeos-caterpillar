@@ -1,6 +1,8 @@
 use bellman::{Circuit, ConstraintSystem, SynthesisError};
 use bellman::gadgets::{blake2s, boolean, boolean::Boolean, boolean::AllocatedBit, multipack, num::Num};
 use ff::PrimeField;
+#[cfg(not(target_arch = "wasm32"))]
+use ff::Field;
 use crate::circuit::conditionally_swap_u256;
 use crate::circuit::u256_into_boolean_vec_le;
 use crate::{address::Address, keys::ProofGenerationKey};
@@ -30,9 +32,9 @@ pub struct Mint
     pub proof_generation_key: Option<ProofGenerationKey>,
 }
 
-impl Circuit<bls12_381::Scalar> for Mint
+impl Circuit<crate::engine::Scalar> for Mint
 {
-    fn synthesize<CS: ConstraintSystem<bls12_381::Scalar>>(
+    fn synthesize<CS: ConstraintSystem<crate::engine::Scalar>>(
         self,
         cs: &mut CS,
     ) -> Result<(), SynthesisError>
@@ -161,13 +163,13 @@ impl Circuit<bls12_381::Scalar> for Mint
         cs.enforce(
             || "conditionally enforce 0 = AUTH * (pk_d - pk_d_)",
             |lc| lc + pk_d.get_v().get_variable() - pk_d_.get_v().get_variable(),
-            |lc| lc + &auth.lc(CS::one(), bls12_381::Scalar::one()),
+            |lc| lc + &auth.lc(CS::one(), crate::engine::scalar_one()),
             |lc| lc,
         );
 
         // Compute accounts's value as a linear combination of the bits.
         let mut account_num = Num::zero();
-        let mut coeff = bls12_381::Scalar::one();
+        let mut coeff = crate::engine::scalar_one();
         for bit in &account_bits
         {
             account_num = account_num.add_bool_with_coeff(CS::one(), bit, coeff);
@@ -175,7 +177,7 @@ impl Circuit<bls12_381::Scalar> for Mint
         }
         // Compute contract's value as a linear combination of the bits.
         let mut contract_num = Num::zero();
-        let mut coeff = bls12_381::Scalar::one();
+        let mut coeff = crate::engine::scalar_one();
         for bit in &contract_bits
         {
             contract_num = contract_num.add_bool_with_coeff(CS::one(), bit, coeff);
@@ -184,8 +186,8 @@ impl Circuit<bls12_381::Scalar> for Mint
         // enforce: AUTH * (contract - account) = 0
         cs.enforce(
             || "conditionally enforce 0 = AUTH * (contract - account)",
-            |lc| lc + &account_num.lc(bls12_381::Scalar::one()) - &contract_num.lc(bls12_381::Scalar::one()),
-            |lc| lc + &auth.lc(CS::one(), bls12_381::Scalar::one()),
+            |lc| lc + &account_num.lc(crate::engine::scalar_one()) - &contract_num.lc(crate::engine::scalar_one()),
+            |lc| lc + &auth.lc(CS::one(), crate::engine::scalar_one()),
             |lc| lc,
         );
 
@@ -271,8 +273,7 @@ mod tests
     use crate::keys::{SpendingKey, FullViewingKey};
     use crate::eosio::{Asset, Name, Symbol, ExtendedAsset};
     use crate::contract::AffineVerifyingKeyBytesLE;
-    use bls12_381::Scalar;
-    use bls12_381::Bls12;
+    use crate::engine::{Bls12, Scalar, scalar_to_canonical_bytes};
     use rand::rngs::OsRng;
     use bellman::gadgets::test::TestConstraintSystem;
     use super::Mint;
@@ -284,6 +285,7 @@ mod tests
     use ff::PrimeField;
     use std::fs;
     use std::fs::File;
+    use std::time::Instant;
 
     #[test]
     fn test_mint_circuit_utxo()
@@ -332,7 +334,7 @@ mod tests
         );
 
         assert_eq!(cs.num_inputs(), 4);
-        assert_eq!(cs.get_input(0, "ONE"), bls12_381::Scalar::one());
+        assert_eq!(cs.get_input(0, "ONE"), crate::engine::scalar_one());
         assert_eq!(cs.get_input(1, "commitment/input variable").to_repr(), n.commitment().to_bytes());
         assert_eq!(cs.get_input(2, "pack inputs2 contents/input 0"), inputs2_contents[0]);
         assert_eq!(cs.get_input(3, "pack inputs3 contents/input 0"), inputs3_contents[0]);
@@ -391,7 +393,7 @@ mod tests
         );
 
         assert_eq!(cs.num_inputs(), 4);
-        assert_eq!(cs.get_input(0, "ONE"), bls12_381::Scalar::one());
+        assert_eq!(cs.get_input(0, "ONE"), crate::engine::scalar_one());
         assert_eq!(cs.get_input(1, "commitment/input variable").to_repr(), n.commitment().to_bytes());
         assert_eq!(cs.get_input(2, "pack inputs2 contents/input 0"), inputs2_contents[0]);
         assert_eq!(cs.get_input(3, "pack inputs3 contents/input 0"), inputs3_contents[0]);
@@ -454,7 +456,10 @@ mod tests
             rcm: Some(n.rcm()),
             proof_generation_key: Some(sk_dummy.proof_generation_key()),
         };
+        let start = Instant::now();
         let proof = create_random_proof(instance, &params, &mut OsRng).unwrap();
+        let duration = start.elapsed();
+        println!("Proof generation took (ms): {}", duration.as_millis());
 
         let f = File::create("proof_mint.bin").unwrap();
         proof.write(f).unwrap();
@@ -477,9 +482,9 @@ mod tests
         inputs.extend(inputs2_contents.clone());
         inputs.extend(inputs3_contents.clone());
         // print public inputs
-        println!("{}", hex::encode(n.commitment().0.to_bytes()));
-        println!("{}", hex::encode(inputs2_contents[0].to_bytes()));
-        println!("{}", hex::encode(inputs3_contents[0].to_bytes()));
+        println!("{}", hex::encode(scalar_to_canonical_bytes(&n.commitment().0)));
+        println!("{}", hex::encode(scalar_to_canonical_bytes(&inputs2_contents[0])));
+        println!("{}", hex::encode(scalar_to_canonical_bytes(&inputs3_contents[0])));
 
         println!("verify proof");
         let f = File::open("vk_mint.bin").unwrap();
@@ -542,14 +547,80 @@ mod tests
         inputs.extend(inputs2_contents.clone());
         inputs.extend(inputs3_contents.clone());
         // print public inputs
-        println!("{}", hex::encode(note.commitment().0.to_bytes()));
-        println!("{}", hex::encode(inputs2_contents[0].to_bytes()));
-        println!("{}", hex::encode(inputs3_contents[0].to_bytes()));
+        println!("{}", hex::encode(scalar_to_canonical_bytes(&note.commitment().0)));
+        println!("{}", hex::encode(scalar_to_canonical_bytes(&inputs2_contents[0])));
+        println!("{}", hex::encode(scalar_to_canonical_bytes(&inputs3_contents[0])));
 
         println!("verify proof");
         let f = File::open("vk_mint.bin").unwrap();
         let vk = VerifyingKey::<Bls12>::read(f).unwrap();
         let pvk = prepare_verifying_key(&vk);
         assert!(verify_proof(&pvk, &proof, &inputs).is_ok());
+    }
+
+    #[test]
+    fn bench_proofgen_mint()
+    {
+        use bellman::groth16::{create_random_proof, Parameters};
+        use std::time::Instant;
+
+        // ---- CONFIG ----
+        const N_PROOFS: usize = 10;
+        const PARAMS_PATH: &str = "params_mint.bin";
+        // Optional: set true if you want to write proofs (slow + noisy)
+        const WRITE_PROOFS: bool = false;
+
+        // ---- LOAD PARAMS ----
+        let f = File::open(PARAMS_PATH).unwrap();
+        let params = Parameters::<Bls12>::read(f, false).unwrap();
+
+        // ---- SETUP (one dummy note, reused) ----
+        let mut rng = OsRng.clone();
+        let (_sk, _, n) = Note::dummy(
+            &mut rng,
+            Some(Name(42)),
+            Some(ExtendedAsset::new(Asset::new(0, Symbol(12)).unwrap(), Name(0))),
+        );
+        let (sk_dummy, _, _) = Note::dummy(&mut rng, None, None);
+
+        // ---- BENCH ----
+        println!("Mint proofgen benchmark: N_PROOFS = {}", N_PROOFS);
+        let total_start = Instant::now();
+
+        let mut ms: Vec<u128> = Vec::with_capacity(N_PROOFS);
+
+        for i in 0..N_PROOFS {
+            let instance = Mint {
+                account: Some(n.account().raw()),
+                auth_hash: Some([0; 4]),
+                value: Some(n.amount()),
+                symbol: Some(n.symbol().raw()),
+                contract: Some(n.contract().raw()),
+                address: Some(n.address()),
+                rcm: Some(n.rcm()),
+                proof_generation_key: Some(sk_dummy.proof_generation_key()),
+            };
+
+            let start = Instant::now();
+            let proof = create_random_proof(instance, &params, &mut OsRng).unwrap();
+            let d = start.elapsed().as_millis();
+            ms.push(d);
+
+            if WRITE_PROOFS {
+                let f = File::create(format!("proof_mint_{:03}.bin", i)).unwrap();
+                proof.write(f).unwrap();
+            }
+
+            println!("  proof {:>3}/{:>3}: {} ms", i + 1, N_PROOFS, d);
+        }
+
+        let total_ms = total_start.elapsed().as_millis();
+        let min = *ms.iter().min().unwrap_or(&0);
+        let max = *ms.iter().max().unwrap_or(&0);
+        let sum: u128 = ms.iter().sum();
+        let avg = if N_PROOFS > 0 { sum / (N_PROOFS as u128) } else { 0 };
+
+        println!("Mint proofgen total: {} ms", total_ms);
+        println!("Mint proofgen stats: min={} ms, avg={} ms, max={} ms", min, avg, max);
     }
 }

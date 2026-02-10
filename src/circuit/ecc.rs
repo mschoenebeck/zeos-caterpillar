@@ -4,12 +4,16 @@ use std::ops::{AddAssign, MulAssign, Neg, SubAssign};
 use bellman::{ConstraintSystem, SynthesisError};
 use bellman::gadgets::{Assignment, num::{AllocatedNum, Num}, lookup::lookup3_xy, boolean::Boolean};
 use group::Curve;
-use super::constants::{FixedGenerator, EDWARDS_D, MONTGOMERY_A, MONTGOMERY_SCALE};
+use super::constants::{FixedGenerator, edwards_d, montgomery_a, montgomery_scale};
+use crate::engine::{scalar_one, scalar_zero};
+#[cfg(not(target_arch = "wasm32"))]
+use ff::Field;
+use crate::engine::fq_to_engine_scalar;
 
 #[derive(Clone)]
 pub struct EdwardsPoint {
-    u: AllocatedNum<bls12_381::Scalar>,
-    v: AllocatedNum<bls12_381::Scalar>,
+    u: AllocatedNum<crate::engine::Scalar>,
+    v: AllocatedNum<crate::engine::Scalar>,
 }
 
 /// Perform a fixed-base scalar multiplication with
@@ -20,7 +24,7 @@ pub fn fixed_base_multiplication<CS>(
     by: &[Boolean],
 ) -> Result<EdwardsPoint, SynthesisError>
 where
-    CS: ConstraintSystem<bls12_381::Scalar>,
+    CS: ConstraintSystem<crate::engine::Scalar>,
 {
     // Represents the result of the multiplication
     let mut result = None;
@@ -63,17 +67,17 @@ where
 }
 
 impl EdwardsPoint {
-    pub fn get_u(&self) -> &AllocatedNum<bls12_381::Scalar> {
+    pub fn get_u(&self) -> &AllocatedNum<crate::engine::Scalar> {
         &self.u
     }
 
-    pub fn get_v(&self) -> &AllocatedNum<bls12_381::Scalar> {
+    pub fn get_v(&self) -> &AllocatedNum<crate::engine::Scalar> {
         &self.v
     }
 
     pub fn assert_not_small_order<CS>(&self, mut cs: CS) -> Result<(), SynthesisError>
     where
-        CS: ConstraintSystem<bls12_381::Scalar>,
+        CS: ConstraintSystem<crate::engine::Scalar>,
     {
         let tmp = self.double(cs.namespace(|| "first doubling"))?;
         let tmp = tmp.double(cs.namespace(|| "second doubling"))?;
@@ -91,7 +95,7 @@ impl EdwardsPoint {
     #[allow(dead_code)]
     pub fn inputize<CS>(&self, mut cs: CS) -> Result<(), SynthesisError>
     where
-        CS: ConstraintSystem<bls12_381::Scalar>,
+        CS: ConstraintSystem<crate::engine::Scalar>,
     {
         self.u.inputize(cs.namespace(|| "u"))?;
         self.v.inputize(cs.namespace(|| "v"))?;
@@ -102,7 +106,7 @@ impl EdwardsPoint {
     /// This converts the point into a representation.
     pub fn repr<CS>(&self, mut cs: CS) -> Result<Vec<Boolean>, SynthesisError>
     where
-        CS: ConstraintSystem<bls12_381::Scalar>,
+        CS: ConstraintSystem<crate::engine::Scalar>,
     {
         let mut tmp = vec![];
 
@@ -120,15 +124,19 @@ impl EdwardsPoint {
     /// It guarantees the point is on the curve.
     pub fn witness<CS>(mut cs: CS, p: Option<jubjub::ExtendedPoint>) -> Result<Self, SynthesisError>
     where
-        CS: ConstraintSystem<bls12_381::Scalar>,
+        CS: ConstraintSystem<crate::engine::Scalar>,
     {
         let p = p.map(|p| p.to_affine());
 
         // Allocate u
-        let u = AllocatedNum::alloc(cs.namespace(|| "u"), || Ok(p.get()?.get_u()))?;
+        let u = AllocatedNum::alloc(cs.namespace(|| "u"), || {
+            Ok(fq_to_engine_scalar(p.get()?.get_u()))
+        })?;
 
         // Allocate v
-        let v = AllocatedNum::alloc(cs.namespace(|| "v"), || Ok(p.get()?.get_v()))?;
+        let v = AllocatedNum::alloc(cs.namespace(|| "v"), || {
+            Ok(fq_to_engine_scalar(p.get()?.get_v()))
+        })?;
 
         Self::interpret(cs.namespace(|| "point interpretation"), &u, &v)
     }
@@ -141,14 +149,14 @@ impl EdwardsPoint {
         condition: &Boolean,
     ) -> Result<Self, SynthesisError>
     where
-        CS: ConstraintSystem<bls12_381::Scalar>,
+        CS: ConstraintSystem<crate::engine::Scalar>,
     {
         // Compute u' = self.u if condition, and 0 otherwise
         let u_prime = AllocatedNum::alloc(cs.namespace(|| "u'"), || {
             if *condition.get_value().get()? {
                 Ok(*self.u.get_value().get()?)
             } else {
-                Ok(bls12_381::Scalar::zero())
+                Ok(scalar_zero())
             }
         })?;
 
@@ -159,7 +167,7 @@ impl EdwardsPoint {
         cs.enforce(
             || "u' computation",
             |lc| lc + self.u.get_variable(),
-            |_| condition.lc(one, bls12_381::Scalar::one()),
+            |_| condition.lc(one, scalar_one()),
             |lc| lc + u_prime.get_variable(),
         );
 
@@ -168,7 +176,7 @@ impl EdwardsPoint {
             if *condition.get_value().get()? {
                 Ok(*self.v.get_value().get()?)
             } else {
-                Ok(bls12_381::Scalar::one())
+                Ok(scalar_one())
             }
         })?;
 
@@ -178,8 +186,8 @@ impl EdwardsPoint {
         cs.enforce(
             || "v' computation",
             |lc| lc + self.v.get_variable(),
-            |_| condition.lc(one, bls12_381::Scalar::one()),
-            |lc| lc + v_prime.get_variable() - &condition.not().lc(one, bls12_381::Scalar::one()),
+            |_| condition.lc(one, scalar_one()),
+            |lc| lc + v_prime.get_variable() - &condition.not().lc(one, scalar_one()),
         );
 
         Ok(EdwardsPoint {
@@ -193,7 +201,7 @@ impl EdwardsPoint {
     /// in little-endian bit order.
     pub fn mul<CS>(&self, mut cs: CS, by: &[Boolean]) -> Result<Self, SynthesisError>
     where
-        CS: ConstraintSystem<bls12_381::Scalar>,
+        CS: ConstraintSystem<crate::engine::Scalar>,
     {
         // Represents the current "magnitude" of the base
         // that we're operating over. Starts at self,
@@ -240,11 +248,11 @@ impl EdwardsPoint {
 
     pub fn interpret<CS>(
         mut cs: CS,
-        u: &AllocatedNum<bls12_381::Scalar>,
-        v: &AllocatedNum<bls12_381::Scalar>,
+        u: &AllocatedNum<crate::engine::Scalar>,
+        v: &AllocatedNum<crate::engine::Scalar>,
     ) -> Result<Self, SynthesisError>
     where
-        CS: ConstraintSystem<bls12_381::Scalar>,
+        CS: ConstraintSystem<crate::engine::Scalar>,
     {
         // -u^2 + v^2 = 1 + du^2v^2
 
@@ -257,7 +265,7 @@ impl EdwardsPoint {
             || "on curve check",
             |lc| lc - u2.get_variable() + v2.get_variable(),
             |lc| lc + one,
-            |lc| lc + one + (EDWARDS_D, u2v2.get_variable()),
+            |lc| lc + one + (edwards_d(), u2v2.get_variable()),
         );
 
         Ok(EdwardsPoint {
@@ -268,7 +276,7 @@ impl EdwardsPoint {
 
     pub fn double<CS>(&self, mut cs: CS) -> Result<Self, SynthesisError>
     where
-        CS: ConstraintSystem<bls12_381::Scalar>,
+        CS: ConstraintSystem<crate::engine::Scalar>,
     {
         // Compute T = (u + v) * (v - EDWARDS_A*u)
         //           = (u + v) * (u + v)
@@ -297,14 +305,14 @@ impl EdwardsPoint {
         // Compute C = d*A*A
         let c = AllocatedNum::alloc(cs.namespace(|| "C"), || {
             let mut t0 = a.get_value().get()?.square();
-            t0.mul_assign(EDWARDS_D);
+            t0.mul_assign(&edwards_d());
 
             Ok(t0)
         })?;
 
         cs.enforce(
             || "C computation",
-            |lc| lc + (EDWARDS_D, a.get_variable()),
+            |lc| lc + (edwards_d(), a.get_variable()),
             |lc| lc + a.get_variable(),
             |lc| lc + c.get_variable(),
         );
@@ -314,7 +322,7 @@ impl EdwardsPoint {
             let mut t0 = *a.get_value().get()?;
             t0 = t0.double();
 
-            let mut t1 = bls12_381::Scalar::one();
+            let mut t1 = scalar_one();
             t1.add_assign(c.get_value().get()?);
 
             let res = t1.invert().map(|t1| t0 * t1);
@@ -340,7 +348,7 @@ impl EdwardsPoint {
             t0 = t0.double().neg();
             t0.add_assign(t.get_value().get()?);
 
-            let mut t1 = bls12_381::Scalar::one();
+            let mut t1 = scalar_one();
             t1.sub_assign(c.get_value().get()?);
 
             let res = t1.invert().map(|t1| t0 * t1);
@@ -364,7 +372,7 @@ impl EdwardsPoint {
     /// Perform addition between any two points
     pub fn add<CS>(&self, mut cs: CS, other: &Self) -> Result<Self, SynthesisError>
     where
-        CS: ConstraintSystem<bls12_381::Scalar>,
+        CS: ConstraintSystem<crate::engine::Scalar>,
     {
         // Compute U = (u1 + v1) * (v2 - EDWARDS_A*u2)
         //           = (u1 + v1) * (u2 + v2)
@@ -398,14 +406,14 @@ impl EdwardsPoint {
         let c = AllocatedNum::alloc(cs.namespace(|| "C"), || {
             let mut t0 = *a.get_value().get()?;
             t0.mul_assign(b.get_value().get()?);
-            t0.mul_assign(EDWARDS_D);
+            t0.mul_assign(&edwards_d());
 
             Ok(t0)
         })?;
 
         cs.enforce(
             || "C computation",
-            |lc| lc + (EDWARDS_D, a.get_variable()),
+            |lc| lc + (edwards_d(), a.get_variable()),
             |lc| lc + b.get_variable(),
             |lc| lc + c.get_variable(),
         );
@@ -415,7 +423,7 @@ impl EdwardsPoint {
             let mut t0 = *a.get_value().get()?;
             t0.add_assign(b.get_value().get()?);
 
-            let mut t1 = bls12_381::Scalar::one();
+            let mut t1 = scalar_one();
             t1.add_assign(c.get_value().get()?);
 
             let ret = t1.invert().map(|t1| t0 * t1);
@@ -440,7 +448,7 @@ impl EdwardsPoint {
             t0.sub_assign(a.get_value().get()?);
             t0.sub_assign(b.get_value().get()?);
 
-            let mut t1 = bls12_381::Scalar::one();
+            let mut t1 = scalar_one();
             t1.sub_assign(c.get_value().get()?);
 
             let ret = t1.invert().map(|t1| t0 * t1);
@@ -463,8 +471,8 @@ impl EdwardsPoint {
 }
 
 pub struct MontgomeryPoint {
-    x: Num<bls12_381::Scalar>,
-    y: Num<bls12_381::Scalar>,
+    x: Num<crate::engine::Scalar>,
+    y: Num<crate::engine::Scalar>,
 }
 
 impl MontgomeryPoint {
@@ -473,12 +481,12 @@ impl MontgomeryPoint {
     /// Edwards curve.
     pub fn into_edwards<CS>(self, mut cs: CS) -> Result<EdwardsPoint, SynthesisError>
     where
-        CS: ConstraintSystem<bls12_381::Scalar>,
+        CS: ConstraintSystem<crate::engine::Scalar>,
     {
         // Compute u = (scale*x) / y
         let u = AllocatedNum::alloc(cs.namespace(|| "u"), || {
             let mut t0 = *self.x.get_value().get()?;
-            t0.mul_assign(MONTGOMERY_SCALE);
+            t0.mul_assign(&montgomery_scale());
 
             let ret = self.y.get_value().get()?.invert().map(|invy| t0 * invy);
             if bool::from(ret.is_some()) {
@@ -490,17 +498,17 @@ impl MontgomeryPoint {
 
         cs.enforce(
             || "u computation",
-            |lc| lc + &self.y.lc(bls12_381::Scalar::one()),
+            |lc| lc + &self.y.lc(scalar_one()),
             |lc| lc + u.get_variable(),
-            |lc| lc + &self.x.lc(MONTGOMERY_SCALE),
+            |lc| lc + &self.x.lc(montgomery_scale()),
         );
 
         // Compute v = (x - 1) / (x + 1)
         let v = AllocatedNum::alloc(cs.namespace(|| "v"), || {
             let mut t0 = *self.x.get_value().get()?;
             let mut t1 = t0;
-            t0.sub_assign(&bls12_381::Scalar::one());
-            t1.add_assign(&bls12_381::Scalar::one());
+            t0.sub_assign(&scalar_one());
+            t1.add_assign(&scalar_one());
 
             let ret = t1.invert().map(|t1| t0 * t1);
             if bool::from(ret.is_some()) {
@@ -513,9 +521,9 @@ impl MontgomeryPoint {
         let one = CS::one();
         cs.enforce(
             || "v computation",
-            |lc| lc + &self.x.lc(bls12_381::Scalar::one()) + one,
+            |lc| lc + &self.x.lc(scalar_one()) + one,
             |lc| lc + v.get_variable(),
-            |lc| lc + &self.x.lc(bls12_381::Scalar::one()) - one,
+            |lc| lc + &self.x.lc(scalar_one()) - one,
         );
 
         Ok(EdwardsPoint { u, v })
@@ -525,7 +533,7 @@ impl MontgomeryPoint {
     /// in Montgomery, does not check that it's
     /// on the curve. Useful for constants and
     /// window table lookups.
-    pub fn interpret_unchecked(x: Num<bls12_381::Scalar>, y: Num<bls12_381::Scalar>) -> Self {
+    pub fn interpret_unchecked(x: Num<crate::engine::Scalar>, y: Num<crate::engine::Scalar>) -> Self {
         MontgomeryPoint { x, y }
     }
 
@@ -533,7 +541,7 @@ impl MontgomeryPoint {
     /// points with the same x-coordinate.
     pub fn add<CS>(&self, mut cs: CS, other: &Self) -> Result<Self, SynthesisError>
     where
-        CS: ConstraintSystem<bls12_381::Scalar>,
+        CS: ConstraintSystem<crate::engine::Scalar>,
     {
         // Compute lambda = (y' - y) / (x' - x)
         let lambda = AllocatedNum::alloc(cs.namespace(|| "lambda"), || {
@@ -553,15 +561,15 @@ impl MontgomeryPoint {
 
         cs.enforce(
             || "evaluate lambda",
-            |lc| lc + &other.x.lc(bls12_381::Scalar::one()) - &self.x.lc(bls12_381::Scalar::one()),
+            |lc| lc + &other.x.lc(scalar_one()) - &self.x.lc(scalar_one()),
             |lc| lc + lambda.get_variable(),
-            |lc| lc + &other.y.lc(bls12_381::Scalar::one()) - &self.y.lc(bls12_381::Scalar::one()),
+            |lc| lc + &other.y.lc(scalar_one()) - &self.y.lc(scalar_one()),
         );
 
         // Compute x'' = lambda^2 - A - x - x'
         let xprime = AllocatedNum::alloc(cs.namespace(|| "xprime"), || {
             let mut t0 = lambda.get_value().get()?.square();
-            t0.sub_assign(MONTGOMERY_A);
+            t0.sub_assign(&montgomery_a());
             t0.sub_assign(self.x.get_value().get()?);
             t0.sub_assign(other.x.get_value().get()?);
 
@@ -575,9 +583,9 @@ impl MontgomeryPoint {
             |lc| lc + lambda.get_variable(),
             |lc| lc + lambda.get_variable(),
             |lc| {
-                lc + (MONTGOMERY_A, one)
-                    + &self.x.lc(bls12_381::Scalar::one())
-                    + &other.x.lc(bls12_381::Scalar::one())
+                lc + (montgomery_a(), one)
+                    + &self.x.lc(scalar_one())
+                    + &other.x.lc(scalar_one())
                     + xprime.get_variable()
             },
         );
@@ -596,9 +604,9 @@ impl MontgomeryPoint {
         // y' + y = lambda(x - x')
         cs.enforce(
             || "evaluate yprime",
-            |lc| lc + &self.x.lc(bls12_381::Scalar::one()) - xprime.get_variable(),
+            |lc| lc + &self.x.lc(scalar_one()) - xprime.get_variable(),
             |lc| lc + lambda.get_variable(),
-            |lc| lc + yprime.get_variable() + &self.y.lc(bls12_381::Scalar::one()),
+            |lc| lc + yprime.get_variable() + &self.y.lc(scalar_one()),
         );
 
         Ok(MontgomeryPoint {
@@ -621,8 +629,9 @@ mod test {
     use bellman::gadgets::test::*;
 
     use super::{fixed_base_multiplication, AllocatedNum, EdwardsPoint, MontgomeryPoint};
-    use super::super::constants::{to_montgomery_coords, NOTE_COMMITMENT_RANDOMNESS_GENERATOR};
+    use super::super::constants::{to_montgomery_coords, NOTE_COMMITMENT_RANDOMNESS_GENERATOR as NOTE_CM_R_WINDOW};
     use bellman::gadgets::boolean::{AllocatedBit, Boolean};
+    use crate::engine::{scalar_zero, scalar_one, fq_to_engine_scalar, engine_scalar_to_fq};
 
     #[test]
     #[allow(clippy::many_single_char_names)]
@@ -633,12 +642,12 @@ mod test {
         ]);
 
         for _ in 0..100 {
-            let mut cs = TestConstraintSystem::new();
+            let mut cs = TestConstraintSystem::<crate::engine::Scalar>::new();
 
             let p = jubjub::ExtendedPoint::random(&mut rng);
             let (x, y) = to_montgomery_coords(p).unwrap();
             let p = p.to_affine();
-            let (u, v) = (p.get_u(), p.get_v());
+            let (u, v) = (fq_to_engine_scalar(p.get_u()), fq_to_engine_scalar(p.get_v()));
 
             let numx = AllocatedNum::alloc(cs.namespace(|| "mont x"), || Ok(x)).unwrap();
             let numy = AllocatedNum::alloc(cs.namespace(|| "mont y"), || Ok(y)).unwrap();
@@ -651,12 +660,12 @@ mod test {
             assert!(q.u.get_value().unwrap() == u);
             assert!(q.v.get_value().unwrap() == v);
 
-            cs.set("u/num", bls12_381::Scalar::random(&mut rng));
+            cs.set("u/num", crate::engine::Scalar::random(&mut rng));
             assert_eq!(cs.which_is_unsatisfied().unwrap(), "u computation");
             cs.set("u/num", u);
             assert!(cs.is_satisfied());
 
-            cs.set("v/num", bls12_381::Scalar::random(&mut rng));
+            cs.set("v/num", crate::engine::Scalar::random(&mut rng));
             assert_eq!(cs.which_is_unsatisfied().unwrap(), "v computation");
             cs.set("v/num", v);
             assert!(cs.is_satisfied());
@@ -673,21 +682,21 @@ mod test {
         for _ in 0..100 {
             let p = jubjub::ExtendedPoint::random(&mut rng);
 
-            let mut cs = TestConstraintSystem::new();
+            let mut cs = TestConstraintSystem::<crate::engine::Scalar>::new();
             let q = EdwardsPoint::witness(&mut cs, Some(p)).unwrap();
 
             let p = p.to_affine();
 
             assert!(cs.is_satisfied());
-            assert_eq!(q.u.get_value().unwrap(), p.get_u());
-            assert_eq!(q.v.get_value().unwrap(), p.get_v());
+            assert_eq!(q.u.get_value().unwrap(), fq_to_engine_scalar(p.get_u()));
+            assert_eq!(q.v.get_value().unwrap(), fq_to_engine_scalar(p.get_v()));
         }
 
         for _ in 0..100 {
             let p = jubjub::ExtendedPoint::random(&mut rng).to_affine();
-            let (u, v) = (p.get_u(), p.get_v());
+            let (u, v) = (fq_to_engine_scalar(p.get_u()), fq_to_engine_scalar(p.get_v()));
 
-            let mut cs = TestConstraintSystem::new();
+            let mut cs = TestConstraintSystem::<crate::engine::Scalar>::new();
             let numu = AllocatedNum::alloc(cs.namespace(|| "u"), || Ok(u)).unwrap();
             let numv = AllocatedNum::alloc(cs.namespace(|| "v"), || Ok(v)).unwrap();
 
@@ -700,10 +709,10 @@ mod test {
 
         // Random (u, v) are unlikely to be on the curve.
         for _ in 0..100 {
-            let u = bls12_381::Scalar::random(&mut rng);
-            let v = bls12_381::Scalar::random(&mut rng);
+            let u = crate::engine::Scalar::random(&mut rng);
+            let v = crate::engine::Scalar::random(&mut rng);
 
-            let mut cs = TestConstraintSystem::new();
+            let mut cs = TestConstraintSystem::<crate::engine::Scalar>::new();
             let numu = AllocatedNum::alloc(cs.namespace(|| "u"), || Ok(u)).unwrap();
             let numv = AllocatedNum::alloc(cs.namespace(|| "v"), || Ok(v)).unwrap();
 
@@ -721,12 +730,12 @@ mod test {
         ]);
 
         for _ in 0..100 {
-            let mut cs = TestConstraintSystem::<bls12_381::Scalar>::new();
+            let mut cs = TestConstraintSystem::<crate::engine::Scalar>::new();
 
-            let p = crate::constants::NOTE_COMMITMENT_RANDOMNESS_GENERATOR;
+            let p = *crate::constants::NOTE_COMMITMENT_RANDOMNESS_GENERATOR;
             let s = jubjub::Fr::random(&mut rng);
             let q = jubjub::ExtendedPoint::from(p * s).to_affine();
-            let (u1, v1) = (q.get_u(), q.get_v());
+            let (u1, v1) = (fq_to_engine_scalar(q.get_u()), fq_to_engine_scalar(q.get_v()));
 
             let s_bits = s
                 .to_le_bits()
@@ -743,7 +752,7 @@ mod test {
 
             let q = fixed_base_multiplication(
                 cs.namespace(|| "multiplication"),
-                &NOTE_COMMITMENT_RANDOMNESS_GENERATOR,
+                &NOTE_CM_R_WINDOW,
                 &s_bits,
             )
             .unwrap();
@@ -761,15 +770,15 @@ mod test {
         ]);
 
         for _ in 0..100 {
-            let mut cs = TestConstraintSystem::new();
+            let mut cs = TestConstraintSystem::<crate::engine::Scalar>::new();
 
             let p = jubjub::ExtendedPoint::random(&mut rng);
             let s = jubjub::Fr::random(&mut rng);
             let q = (p * s).to_affine();
             let p = p.to_affine();
 
-            let (u0, v0) = (p.get_u(), p.get_v());
-            let (u1, v1) = (q.get_u(), q.get_v());
+            let (u0, v0) = (fq_to_engine_scalar(p.get_u()), fq_to_engine_scalar(p.get_v()));
+            let (u1, v1) = (fq_to_engine_scalar(q.get_u()), fq_to_engine_scalar(q.get_v()));
 
             let num_u0 = AllocatedNum::alloc(cs.namespace(|| "u0"), || Ok(u0)).unwrap();
             let num_v0 = AllocatedNum::alloc(cs.namespace(|| "v0"), || Ok(v0)).unwrap();
@@ -810,11 +819,11 @@ mod test {
         ]);
 
         for _ in 0..1000 {
-            let mut cs = TestConstraintSystem::new();
+            let mut cs = TestConstraintSystem::<crate::engine::Scalar>::new();
 
             let p = jubjub::ExtendedPoint::random(&mut rng).to_affine();
 
-            let (u0, v0) = (p.get_u(), p.get_v());
+            let (u0, v0) = (fq_to_engine_scalar(p.get_u()), fq_to_engine_scalar(p.get_v()));
 
             let num_u0 = AllocatedNum::alloc(cs.namespace(|| "u0"), || Ok(u0)).unwrap();
             let num_v0 = AllocatedNum::alloc(cs.namespace(|| "v0"), || Ok(v0)).unwrap();
@@ -853,13 +862,13 @@ mod test {
                 assert_eq!(q.u.get_value().unwrap(), u0);
                 assert_eq!(q.v.get_value().unwrap(), v0);
 
-                cs.set("select/v'/num", bls12_381::Scalar::one());
+                cs.set("select/v'/num", scalar_one());
                 assert_eq!(cs.which_is_unsatisfied().unwrap(), "select/v' computation");
-                cs.set("select/u'/num", bls12_381::Scalar::zero());
+                cs.set("select/u'/num", scalar_zero());
                 assert_eq!(cs.which_is_unsatisfied().unwrap(), "select/u' computation");
             } else {
-                assert_eq!(q.u.get_value().unwrap(), bls12_381::Scalar::zero());
-                assert_eq!(q.v.get_value().unwrap(), bls12_381::Scalar::one());
+                assert_eq!(q.u.get_value().unwrap(), scalar_zero());
+                assert_eq!(q.v.get_value().unwrap(), scalar_one());
 
                 cs.set("select/v'/num", u0);
                 assert_eq!(cs.which_is_unsatisfied().unwrap(), "select/v' computation");
@@ -886,11 +895,11 @@ mod test {
             let p2 = p2.to_affine();
             let p3 = p3.to_affine();
 
-            let (u0, v0) = (p1.get_u(), p1.get_v());
-            let (u1, v1) = (p2.get_u(), p2.get_v());
-            let (u2, v2) = (p3.get_u(), p3.get_v());
+            let (u0, v0) = (fq_to_engine_scalar(p1.get_u()), fq_to_engine_scalar(p1.get_v()));
+            let (u1, v1) = (fq_to_engine_scalar(p2.get_u()), fq_to_engine_scalar(p2.get_v()));
+            let (u2, v2) = (fq_to_engine_scalar(p3.get_u()), fq_to_engine_scalar(p3.get_v()));
 
-            let mut cs = TestConstraintSystem::new();
+            let mut cs = TestConstraintSystem::<crate::engine::Scalar>::new();
 
             let num_u0 = AllocatedNum::alloc(cs.namespace(|| "u0"), || Ok(u0)).unwrap();
             let num_v0 = AllocatedNum::alloc(cs.namespace(|| "v0"), || Ok(v0)).unwrap();
@@ -916,19 +925,19 @@ mod test {
             assert!(p3.v.get_value().unwrap() == v2);
 
             let uppercase_u = cs.get("addition/U/num");
-            cs.set("addition/U/num", bls12_381::Scalar::random(&mut rng));
+            cs.set("addition/U/num", crate::engine::Scalar::random(&mut rng));
             assert_eq!(cs.which_is_unsatisfied(), Some("addition/U computation"));
             cs.set("addition/U/num", uppercase_u);
             assert!(cs.is_satisfied());
 
             let u3 = cs.get("addition/u3/num");
-            cs.set("addition/u3/num", bls12_381::Scalar::random(&mut rng));
+            cs.set("addition/u3/num", crate::engine::Scalar::random(&mut rng));
             assert_eq!(cs.which_is_unsatisfied(), Some("addition/u3 computation"));
             cs.set("addition/u3/num", u3);
             assert!(cs.is_satisfied());
 
             let v3 = cs.get("addition/v3/num");
-            cs.set("addition/v3/num", bls12_381::Scalar::random(&mut rng));
+            cs.set("addition/v3/num", crate::engine::Scalar::random(&mut rng));
             assert_eq!(cs.which_is_unsatisfied(), Some("addition/v3 computation"));
             cs.set("addition/v3/num", v3);
             assert!(cs.is_satisfied());
@@ -949,10 +958,10 @@ mod test {
             let p1 = p1.to_affine();
             let p2 = p2.to_affine();
 
-            let (u0, v0) = (p1.get_u(), p1.get_v());
-            let (u1, v1) = (p2.get_u(), p2.get_v());
+            let (u0, v0) = (fq_to_engine_scalar(p1.get_u()), fq_to_engine_scalar(p1.get_v()));
+            let (u1, v1) = (fq_to_engine_scalar(p2.get_u()), fq_to_engine_scalar(p2.get_v()));
 
-            let mut cs = TestConstraintSystem::new();
+            let mut cs = TestConstraintSystem::<crate::engine::Scalar>::new();
 
             let num_u0 = AllocatedNum::alloc(cs.namespace(|| "u0"), || Ok(u0)).unwrap();
             let num_v0 = AllocatedNum::alloc(cs.namespace(|| "v0"), || Ok(v0)).unwrap();
@@ -987,7 +996,7 @@ mod test {
             let (x1, y1) = to_montgomery_coords(p2).unwrap();
             let (x2, y2) = to_montgomery_coords(p3).unwrap();
 
-            let mut cs = TestConstraintSystem::new();
+            let mut cs = TestConstraintSystem::<crate::engine::Scalar>::new();
 
             let num_x0 = AllocatedNum::alloc(cs.namespace(|| "x0"), || Ok(x0)).unwrap();
             let num_y0 = AllocatedNum::alloc(cs.namespace(|| "y0"), || Ok(y0)).unwrap();
@@ -1012,17 +1021,17 @@ mod test {
             assert!(p3.x.get_value().unwrap() == x2);
             assert!(p3.y.get_value().unwrap() == y2);
 
-            cs.set("addition/yprime/num", bls12_381::Scalar::random(&mut rng));
+            cs.set("addition/yprime/num", crate::engine::Scalar::random(&mut rng));
             assert_eq!(cs.which_is_unsatisfied(), Some("addition/evaluate yprime"));
             cs.set("addition/yprime/num", y2);
             assert!(cs.is_satisfied());
 
-            cs.set("addition/xprime/num", bls12_381::Scalar::random(&mut rng));
+            cs.set("addition/xprime/num", crate::engine::Scalar::random(&mut rng));
             assert_eq!(cs.which_is_unsatisfied(), Some("addition/evaluate xprime"));
             cs.set("addition/xprime/num", x2);
             assert!(cs.is_satisfied());
 
-            cs.set("addition/lambda/num", bls12_381::Scalar::random(&mut rng));
+            cs.set("addition/lambda/num", crate::engine::Scalar::random(&mut rng));
             assert_eq!(cs.which_is_unsatisfied(), Some("addition/evaluate lambda"));
         }
     }
@@ -1030,7 +1039,7 @@ mod test {
     #[test]
     fn test_assert_not_small_order() {
         let check_small_order_from_p = |p: jubjub::ExtendedPoint, is_small_order| {
-            let mut cs = TestConstraintSystem::new();
+            let mut cs = TestConstraintSystem::<crate::engine::Scalar>::new();
 
             let p = EdwardsPoint::witness(&mut cs, Some(p)).unwrap();
             assert!(cs.is_satisfied());
@@ -1038,7 +1047,7 @@ mod test {
         };
 
         let check_small_order_from_u64s = |u, v| {
-            let (u, v) = (bls12_381::Scalar::from(u), bls12_381::Scalar::from(v));
+            let (u, v) = (engine_scalar_to_fq(crate::engine::Scalar::from(u)), engine_scalar_to_fq(crate::engine::Scalar::from(v)));
             let p = jubjub::AffinePoint::from_raw_unchecked(u, v);
 
             check_small_order_from_p(p.into(), true);
@@ -1054,18 +1063,18 @@ mod test {
         .unwrap();
         let largest_small_subgroup_order = jubjub::Fr::from(8);
 
-        let (zero_u, zero_v) = (bls12_381::Scalar::zero(), bls12_381::Scalar::one());
+        let (zero_u, zero_v) = (engine_scalar_to_fq(scalar_zero()), engine_scalar_to_fq(scalar_one()));
 
         // generator for jubjub
         let (u, v) = (
-            bls12_381::Scalar::from_str_vartime(
+            engine_scalar_to_fq(crate::engine::Scalar::from_str_vartime(
                 "11076627216317271660298050606127911965867021807910416450833192264015104452986",
             )
-            .unwrap(),
-            bls12_381::Scalar::from_str_vartime(
+            .unwrap()),
+            engine_scalar_to_fq(crate::engine::Scalar::from_str_vartime(
                 "44412834903739585386157632289020980010620626017712148233229312325549216099227",
             )
-            .unwrap(),
+            .unwrap()),
         );
         let g = jubjub::AffinePoint::from_raw_unchecked(u, v).into();
         check_small_order_from_p(g, false);

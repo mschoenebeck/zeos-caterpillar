@@ -33,9 +33,9 @@ pub struct Burn
     pub rcm_d: Option<jubjub::Fr>,
 }
 
-impl Circuit<bls12_381::Scalar> for Burn
+impl Circuit<crate::engine::Scalar> for Burn
 {
-    fn synthesize<CS: ConstraintSystem<bls12_381::Scalar>>(
+    fn synthesize<CS: ConstraintSystem<crate::engine::Scalar>>(
         self,
         cs: &mut CS,
     ) -> Result<(), SynthesisError>
@@ -140,7 +140,7 @@ impl Circuit<bls12_381::Scalar> for Burn
         
         // Compute note a's value as a linear combination of the bits.
         let mut value_a_num = num::Num::zero();
-        let mut coeff = bls12_381::Scalar::one();
+        let mut coeff = crate::engine::Scalar::one();
         for bit in &value_a_bits
         {
             value_a_num = value_a_num.add_bool_with_coeff(CS::one(), bit, coeff);
@@ -315,7 +315,7 @@ impl Circuit<bls12_381::Scalar> for Burn
         )?;
         // Compute note b's value as a linear combination of the bits.
         let mut value_b_num = num::Num::zero();
-        let mut coeff = bls12_381::Scalar::one();
+        let mut coeff = crate::engine::Scalar::one();
         for bit in &value_b_bits
         {
             value_b_num = value_b_num.add_bool_with_coeff(CS::one(), bit, coeff);
@@ -329,7 +329,7 @@ impl Circuit<bls12_381::Scalar> for Burn
         )?;
         // Compute note c's value as a linear combination of the bits.
         let mut value_c_num = num::Num::zero();
-        let mut coeff = bls12_381::Scalar::one();
+        let mut coeff = crate::engine::Scalar::one();
         for bit in &value_c_bits
         {
             value_c_num = value_c_num.add_bool_with_coeff(CS::one(), bit, coeff);
@@ -343,7 +343,7 @@ impl Circuit<bls12_381::Scalar> for Burn
         )?;
         // Compute note d's value as a linear combination of the bits.
         let mut value_d_num = num::Num::zero();
-        let mut coeff = bls12_381::Scalar::one();
+        let mut coeff = crate::engine::Scalar::one();
         for bit in &value_d_bits
         {
             value_d_num = value_d_num.add_bool_with_coeff(CS::one(), bit, coeff);
@@ -353,16 +353,16 @@ impl Circuit<bls12_381::Scalar> for Burn
         // Enforce: A = B + C + D
         cs.enforce(
             || "conditionally enforce A = B + C + D",
-            |lc| lc + &value_b_num.lc(bls12_381::Scalar::one()) + &value_c_num.lc(bls12_381::Scalar::one()) + &value_d_num.lc(bls12_381::Scalar::one()),
+            |lc| lc + &value_b_num.lc(crate::engine::Scalar::one()) + &value_c_num.lc(crate::engine::Scalar::one()) + &value_d_num.lc(crate::engine::Scalar::one()),
             |lc| lc + CS::one(),
-            |lc| lc + &value_a_num.lc(bls12_381::Scalar::one()),
+            |lc| lc + &value_a_num.lc(crate::engine::Scalar::one()),
         );
 
         // To prevent NFTs from being 'split', enforce: 0 = NFT * (C + D)
         cs.enforce(
             || "conditionally enforce 0 = NFT * (C + D)",
-            |lc| lc + &value_c_num.lc(bls12_381::Scalar::one()) + &value_d_num.lc(bls12_381::Scalar::one()),
-            |lc| lc + &nft.lc(CS::one(), bls12_381::Scalar::one()),
+            |lc| lc + &value_c_num.lc(crate::engine::Scalar::one()) + &value_d_num.lc(crate::engine::Scalar::one()),
+            |lc| lc + &nft.lc(CS::one(), crate::engine::Scalar::one()),
             |lc| lc,
         );
 
@@ -471,8 +471,8 @@ mod tests
     use crate::keys::{SpendingKey, FullViewingKey};
     use crate::eosio::{ExtendedAsset, Name, Symbol};
     use crate::constants::MERKLE_TREE_DEPTH;
-    use bls12_381::Scalar;
-    use bls12_381::Bls12;
+    use crate::engine::Scalar;
+    use crate::engine::Bls12;
     use rand::rngs::OsRng;
     use rand_core::RngCore;
     use bellman::gadgets::test::TestConstraintSystem;
@@ -590,7 +590,7 @@ mod tests
         assert_eq!(cs.get("randomization of note commitment a/u3/num").to_repr(), note_a.commitment().to_bytes());
 
         assert_eq!(cs.num_inputs(), 6);
-        assert_eq!(cs.get_input(0, "ONE"), bls12_381::Scalar::one());
+        assert_eq!(cs.get_input(0, "ONE"), crate::engine::Scalar::one());
         assert_eq!(cs.get_input(1, "anchor/input 0"), anchor[0]);
         assert_eq!(cs.get_input(2, "nullifier/input variable").to_repr(), nf.to_bytes());
         assert_eq!(cs.get_input(3, "commitment d/input variable").to_repr(), note_d.commitment().to_bytes());

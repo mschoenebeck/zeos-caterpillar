@@ -4,7 +4,7 @@ mod tests
     use crate::{transaction::{ZTransaction, resolve_ztransaction, zsign_transaction, zverify_spend_transaction}, note::{Note, Rseed}, eosio::{Name, ExtendedAsset, Asset, Authorization}, wallet::Wallet, keys::{SpendingKey, FullViewingKey}, note_encryption::{NoteEncryption, derive_esk, ka_derive_public, TransmittedNoteCiphertext}};
     use rand::rngs::OsRng;
     use bellman::groth16::Parameters;
-    use bls12_381::Bls12;
+    use crate::engine::Bls12;
     use std::fs::File;
     use std::collections::HashMap;
 

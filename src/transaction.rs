@@ -21,14 +21,53 @@ use std::collections::{HashMap, BTreeSet};
 use std::ops::{Add, AddAssign};
 use rand::rngs::OsRng;
 use bellman::groth16::{Parameters, create_random_proof};
-use bls12_381::Bls12;
+use crate::engine::Bls12;
 use core::iter;
 use bitvec::{array::BitArray, order::Lsb0};
 use group::Curve;
 use bellman::groth16::{Proof, verify_proof, prepare_verifying_key};
 use bellman::gadgets::multipack;
-use bls12_381::Scalar;
+use crate::engine::Scalar;
 use bip39::{Mnemonic, Language};
+
+use ff::PrimeField;
+use jubjub::Fq;
+
+#[inline]
+fn fq_to_scalarbytes_le(fq: &Fq) -> ScalarBytes {
+    let repr = fq.to_repr();
+    let mut b = [0u8; 32];
+    b.copy_from_slice(repr.as_ref());
+
+    let s = crate::engine::scalar_from_canonical_bytes(&b)
+        .expect("jubjub::Fq must decode into engine::Scalar");
+    ScalarBytes(scalar_to_raw_bytes_le(&s))
+}
+#[inline]
+fn fq_from_contract_raw_le(b_le: &[u8; 32], what: &'static str) -> Result<Fq, VerifyError> {
+    let bytes = crate::contract::Scalar::from_raw_bytes(b_le).to_bytes();
+
+    let mut repr = <Fq as PrimeField>::Repr::default();
+    repr.as_mut().copy_from_slice(&bytes);
+
+    Option::from(Fq::from_repr(repr))
+        .ok_or(VerifyError::ScalarDecode(what))
+}
+#[inline]
+fn affine_from_contract_raw_point_le(
+    u_le: &[u8; 32],
+    v_le: &[u8; 32],
+    what: &'static str,
+) -> Result<jubjub::AffinePoint, VerifyError> {
+    let u = fq_from_contract_raw_le(u_le, what)?;
+    let v = fq_from_contract_raw_le(v_le, what)?;
+    Ok(jubjub::AffinePoint::from_raw_unchecked(u, v))
+}
+#[inline]
+fn fq_zero() -> Fq {
+    let repr = <Fq as PrimeField>::Repr::default(); // all-zero
+    Option::from(Fq::from_repr(repr)).unwrap()
+}
 
 #[derive(Debug)]
 pub enum TransactionError
@@ -1205,7 +1244,10 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                                 .chain(BitArray::<_, Lsb0>::new(data.spend_output[0].note_a.note().contract().raw().to_le_bytes()).iter().by_vals()),
                                 rscm.rcm().0
                         );
-                        ScalarBytes(extract_p(&scm).to_bytes())
+                        {
+                            let p = extract_p(&scm); // p: crate::engine::Scalar
+                            ScalarBytes(crate::engine::scalar_to_canonical_bytes(&p))
+                        }
                     };
 
                     // define blinding factor for pedersen commitments of this spend sequence and the multipliers for all spend_outputs
@@ -1281,8 +1323,8 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                             root,
                             nf: ScalarBytes(ExtractedNullifier::from(so.note_a.note().nullifier(&fvk.nk, so.note_a.position())).to_bytes()),
                             cm_b: ScalarBytes(so.note_b.commitment().to_bytes()),
-                            cv_net_u: ScalarBytes(scalar_to_raw_bytes_le(&cv_net.as_inner().to_affine().get_u())),
-                            cv_net_v: ScalarBytes(scalar_to_raw_bytes_le(&cv_net.as_inner().to_affine().get_v())),
+                            cv_net_u: fq_to_scalarbytes_le(&cv_net.as_inner().to_affine().get_u()),
+                            cv_net_v: fq_to_scalarbytes_le(&cv_net.as_inner().to_affine().get_v()),
                             value_c,
                             symbol: if value_c == 0 { Symbol(0) } else { so.note_a.note().symbol().clone() },
                             contract: if value_c == 0 { Name(0) } else { so.note_a.note().contract().clone() },
@@ -1429,8 +1471,8 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
                         spend.push(PlsSpend{
                             root,
                             nf: ScalarBytes(ExtractedNullifier::from(s.note_a.note().nullifier(&fvk.nk, s.note_a.position())).to_bytes()),
-                            cv_u: ScalarBytes(scalar_to_raw_bytes_le(&cv.as_inner().to_affine().get_u())),
-                            cv_v: ScalarBytes(scalar_to_raw_bytes_le(&cv.as_inner().to_affine().get_v())),
+                            cv_u: fq_to_scalarbytes_le(&cv.as_inner().to_affine().get_u()),
+                            cv_v: fq_to_scalarbytes_le(&cv.as_inner().to_affine().get_v()),
                             proof: {
                                 let instance = Spend {
                                     note_a: Some(s.note_a.note().clone()),
@@ -1451,8 +1493,8 @@ pub fn zsign_transaction(wallet: &Wallet, rztx: &ResolvedZTransaction, params: &
 
                         output.push(PlsOutput{
                             cm: ScalarBytes(o.note_b.commitment().to_bytes()),
-                            cv_u: ScalarBytes(scalar_to_raw_bytes_le(&cv.as_inner().to_affine().get_u())),
-                            cv_v: ScalarBytes(scalar_to_raw_bytes_le(&cv.as_inner().to_affine().get_v())),
+                            cv_u: fq_to_scalarbytes_le(&cv.as_inner().to_affine().get_u()),
+                            cv_v: fq_to_scalarbytes_le(&cv.as_inner().to_affine().get_v()),
                             proof: {
                                 let instance = Output {
                                     rcv: Some(rcv.inner()),
@@ -1697,6 +1739,24 @@ impl core::fmt::Display for VerifyError {
 }
 impl std::error::Error for VerifyError {}
 
+#[inline]
+fn eng_scalar_from_contract_raw_le(raw_le: &[u8; 32], what: &'static str) -> Result<Scalar, VerifyError> {
+    // contract::Scalar::from_raw_bytes expects the "raw" encoding your protocol uses (LE/montgomery-ish).
+    // It returns contract::Scalar, then .to_bytes() gives canonical 32 bytes.
+    let canon: [u8; 32] = contract::Scalar::from_raw_bytes(raw_le).to_bytes();
+    crate::engine::scalar_from_canonical_bytes(&canon)
+        .ok_or(VerifyError::ScalarDecode(what))
+}
+
+#[inline]
+fn eng_scalar_from_contract_raw_point_le(
+    u_le: &[u8; 32],
+    v_le: &[u8; 32],
+    what: &'static str,
+) -> Result<AffinePoint, VerifyError> {
+    Ok(affine_from_contract_raw_point_le(u_le, v_le, what)?)
+}
+
 pub fn zverify_spend_transaction(tx: &Transaction, params: &HashMap<Name, Parameters::<Bls12>>) -> Result<(), VerifyError>
 {
     let spend_output_params = params.get(&Name::from_string(&"spendoutput").unwrap())
@@ -1714,9 +1774,10 @@ pub fn zverify_spend_transaction(tx: &Transaction, params: &HashMap<Name, Parame
             Name(14219329122852667392) => {
                 let data: PlsSpendAction = serde_json::from_value(a.data.clone()).unwrap();
 
-                let mut spend_sum = AffinePoint::from_raw_unchecked(Scalar::zero(), Scalar::zero()).to_extended();
+                let z = fq_zero();
+                let mut spend_sum = jubjub::AffinePoint::from_raw_unchecked(z, z).to_extended();
                 let mut spend_sum_begin = true;
-                let mut output_sum = AffinePoint::from_raw_unchecked(Scalar::zero(), Scalar::zero()).to_extended();
+                let mut output_sum = jubjub::AffinePoint::from_raw_unchecked(z, z).to_extended();
                 let mut output_sum_begin = true;
 
                 for a in data.actions.iter()
@@ -1755,10 +1816,8 @@ pub fn zverify_spend_transaction(tx: &Transaction, params: &HashMap<Name, Parame
                         inputs.push(Scalar::try_from(so.nf.clone()).map_err(|_| VerifyError::ScalarDecode("nf"))?);
                         inputs.push(Scalar::try_from(a.scm.clone()).map_err(|_| VerifyError::ScalarDecode("scm"))?);
                         inputs.push(Scalar::try_from(so.cm_b.clone()).map_err(|_| VerifyError::ScalarDecode("cm_b"))?);
-                        inputs.push(Option::from(Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&so.cv_net_u.0).to_bytes()))
-                            .ok_or(VerifyError::ScalarDecode("cv_net_u"))?);
-                        inputs.push(Option::from(Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&so.cv_net_v.0).to_bytes()))
-                            .ok_or(VerifyError::ScalarDecode("cv_net_v"))?);
+                        inputs.push(eng_scalar_from_contract_raw_le(&so.cv_net_u.0, "cv_net_u")?);
+                        inputs.push(eng_scalar_from_contract_raw_le(&so.cv_net_v.0, "cv_net_v")?);
                         inputs.extend(inputs7.clone());
                         inputs.extend(inputs8.clone());
 
@@ -1772,36 +1831,26 @@ pub fn zverify_spend_transaction(tx: &Transaction, params: &HashMap<Name, Parame
                             {
                                 if spend_sum_begin
                                 {
-                                    spend_sum = AffinePoint::from_raw_unchecked(
-                                        Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&so.cv_net_u.0).to_bytes()).unwrap(),
-                                        Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&so.cv_net_v.0).to_bytes()).unwrap()
-                                    ).to_extended();
+                                    spend_sum = eng_scalar_from_contract_raw_point_le(&so.cv_net_u.0, &so.cv_net_v.0, "cv_net_(u/v)")?
+                                        .to_extended();
                                     spend_sum_begin = false;
                                 }
                                 else
                                 {
-                                    spend_sum.add_assign(AffinePoint::from_raw_unchecked(
-                                        Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&so.cv_net_u.0).to_bytes()).unwrap(),
-                                        Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&so.cv_net_v.0).to_bytes()).unwrap()
-                                    ));
+                                    spend_sum.add_assign(eng_scalar_from_contract_raw_point_le(&so.cv_net_u.0, &so.cv_net_v.0, "cv_net_(u/v)")?);
                                 }
                             }
                             else
                             {
                                 if output_sum_begin
                                 {
-                                    output_sum = AffinePoint::from_raw_unchecked(
-                                        Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&so.cv_net_u.0).to_bytes()).unwrap(),
-                                        Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&so.cv_net_v.0).to_bytes()).unwrap()
-                                    ).to_extended();
+                                    output_sum = eng_scalar_from_contract_raw_point_le(&so.cv_net_u.0, &so.cv_net_v.0, "cv_net_(u/v)")?
+                                        .to_extended();
                                     output_sum_begin = false;
                                 }
                                 else
                                 {
-                                    output_sum.add_assign(AffinePoint::from_raw_unchecked(
-                                        Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&so.cv_net_u.0).to_bytes()).unwrap(),
-                                        Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&so.cv_net_v.0).to_bytes()).unwrap()
-                                    ));
+                                    output_sum.add_assign(eng_scalar_from_contract_raw_point_le(&so.cv_net_u.0, &so.cv_net_v.0, "cv_net_(u/v)")?);
                                 }
                             }
                         }
@@ -1813,27 +1862,19 @@ pub fn zverify_spend_transaction(tx: &Transaction, params: &HashMap<Name, Parame
                         inputs.push(Scalar::try_from(s.root.clone()).map_err(|_| VerifyError::ScalarDecode("root"))?);
                         inputs.push(Scalar::try_from(s.nf.clone()).map_err(|_| VerifyError::ScalarDecode("nf"))?);
                         inputs.push(Scalar::try_from(a.scm.clone()).map_err(|_| VerifyError::ScalarDecode("scm"))?);
-                        inputs.push(Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&s.cv_u.0).to_bytes()).unwrap());
-                        inputs.push(Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&s.cv_v.0).to_bytes()).unwrap());
+                        inputs.push(eng_scalar_from_contract_raw_le(&s.cv_u.0, "cv_u")?);
+                        inputs.push(eng_scalar_from_contract_raw_le(&s.cv_v.0, "cv_v")?);
 
                         let pvk = prepare_verifying_key(&spend_params.vk);
                         let proof = Proof::<Bls12>::try_from(s.proof.clone()).map_err(|_| VerifyError::ProofBytes)?;
                         verify_proof(&pvk, &proof, &inputs).map_err(|_| VerifyError::ProofInvalid("spend"))?;
 
-                        if spend_sum_begin
-                        {
-                            spend_sum = AffinePoint::from_raw_unchecked(
-                                Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&s.cv_u.0).to_bytes()).unwrap(),
-                                Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&s.cv_v.0).to_bytes()).unwrap()
-                            ).to_extended();
+                        let p = eng_scalar_from_contract_raw_point_le(&s.cv_u.0, &s.cv_v.0, "cv_(u/v)")?;
+                        if spend_sum_begin {
+                            spend_sum = p.to_extended();
                             spend_sum_begin = false;
-                        }
-                        else
-                        {
-                            spend_sum.add_assign(AffinePoint::from_raw_unchecked(
-                                Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&s.cv_u.0).to_bytes()).unwrap(),
-                                Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&s.cv_v.0).to_bytes()).unwrap()
-                            ));
+                        } else {
+                            spend_sum.add_assign(p);
                         }
                     }
 
@@ -1842,27 +1883,19 @@ pub fn zverify_spend_transaction(tx: &Transaction, params: &HashMap<Name, Parame
                         let mut inputs = vec![];
                         inputs.push(Scalar::try_from(a.scm.clone()).map_err(|_| VerifyError::ScalarDecode("scm"))?);
                         inputs.push(Scalar::try_from(o.cm.clone()).map_err(|_| VerifyError::ScalarDecode("cm"))?);
-                        inputs.push(Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&o.cv_u.0).to_bytes()).unwrap());
-                        inputs.push(Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&o.cv_v.0).to_bytes()).unwrap());
+                        inputs.push(eng_scalar_from_contract_raw_le(&o.cv_u.0, "cv_u")?);
+                        inputs.push(eng_scalar_from_contract_raw_le(&o.cv_v.0, "cv_v")?);
 
                         let pvk = prepare_verifying_key(&output_params.vk);
                         let proof = Proof::<Bls12>::try_from(o.proof.clone()).map_err(|_| VerifyError::ProofBytes)?;
                         verify_proof(&pvk, &proof, &inputs).map_err(|_| VerifyError::ProofInvalid("output"))?;
 
-                        if output_sum_begin
-                        {
-                            output_sum = AffinePoint::from_raw_unchecked(
-                                Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&o.cv_u.0).to_bytes()).unwrap(),
-                                Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&o.cv_v.0).to_bytes()).unwrap()
-                            ).to_extended();
+                        let p = eng_scalar_from_contract_raw_point_le(&o.cv_u.0, &o.cv_v.0, "cv_(u/v)")?;
+                        if output_sum_begin {
+                            output_sum = p.to_extended();
                             output_sum_begin = false;
-                        }
-                        else
-                        {
-                            output_sum.add_assign(AffinePoint::from_raw_unchecked(
-                                Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&o.cv_u.0).to_bytes()).unwrap(),
-                                Scalar::from_bytes(&contract::Scalar::from_raw_bytes(&o.cv_v.0).to_bytes()).unwrap()
-                            ));
+                        } else {
+                            output_sum.add_assign(p);
                         }
                     }
 
@@ -2132,7 +2165,7 @@ mod tests
     use super::{Name, insert_vars, zsign_transaction};
     use rand::rngs::OsRng;
     use bellman::groth16::Parameters;
-    use bls12_381::Bls12;
+    use crate::engine::Bls12;
     use std::fs::File;
     use std::collections::HashMap;
 

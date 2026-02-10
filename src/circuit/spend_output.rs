@@ -1,6 +1,8 @@
 use bellman::gadgets::boolean::{Boolean, AllocatedBit};
 use bellman::{Circuit, ConstraintSystem, SynthesisError};
 use ff::PrimeField;
+#[cfg(not(target_arch = "wasm32"))]
+use ff::Field;
 use crate::note::Note;
 use crate::keys::ProofGenerationKey;
 use super::{conditionally_swap_u256, conditionally_swap_u128, u8_vec_into_boolean_vec_le, u8_into_boolean_vec_le, u256_into_boolean_vec_le};
@@ -46,8 +48,8 @@ pub struct SpendOutput
     pub unshielded_outputs_hash: Option<[u64; 4]>
 }
 
-impl Circuit<bls12_381::Scalar> for SpendOutput {
-    fn synthesize<CS: ConstraintSystem<bls12_381::Scalar>>(
+impl Circuit<crate::engine::Scalar> for SpendOutput {
+    fn synthesize<CS: ConstraintSystem<crate::engine::Scalar>>(
         self,
         cs: &mut CS,
     ) -> Result<(), SynthesisError>
@@ -152,7 +154,7 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
         note_a_preimage.extend(value_a_bits.clone());
         // Compute note a's value as a linear combination of the bits.
         let mut value_a_num = num::Num::zero();
-        let mut coeff = bls12_381::Scalar::one();
+        let mut coeff = crate::engine::scalar_one();
         for bit in &value_a_bits
         {
             value_a_num = value_a_num.add_bool_with_coeff(CS::one(), bit, coeff);
@@ -335,7 +337,7 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
         )?;
         // Compute note b's account as a linear combination of the bits.
         let mut account_b_num = num::Num::zero();
-        let mut coeff = bls12_381::Scalar::one();
+        let mut coeff = crate::engine::scalar_one();
         for bit in &account_b_bits
         {
             account_b_num = account_b_num.add_bool_with_coeff(CS::one(), bit, coeff);
@@ -345,7 +347,7 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
         cs.enforce(
             || "conditionally enforce 0 = account_b * 1",
             |lc| lc + CS::one(),
-            |lc| lc + &account_b_num.lc(bls12_381::Scalar::one()),
+            |lc| lc + &account_b_num.lc(crate::engine::scalar_one()),
             |lc| lc,
         );
         // note b value to boolean bit vector
@@ -357,7 +359,7 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
         )?;
         // Compute note b's value as a linear combination of the bits.
         let mut value_b_num = num::Num::zero();
-        let mut coeff = bls12_381::Scalar::one();
+        let mut coeff = crate::engine::scalar_one();
         for bit in &value_b_bits
         {
             value_b_num = value_b_num.add_bool_with_coeff(CS::one(), bit, coeff);
@@ -371,7 +373,7 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
         )?;
         // Compute note c's value as a linear combination of the bits.
         let mut value_c_num = num::Num::zero();
-        let mut coeff = bls12_381::Scalar::one();
+        let mut coeff = crate::engine::scalar_one();
         for bit in &value_c_bits
         {
             value_c_num = value_c_num.add_bool_with_coeff(CS::one(), bit, coeff);
@@ -536,7 +538,7 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
         cv_net.inputize(cs.namespace(|| "cv_net"))?;
 
         let is_nft_bit = AllocatedBit::alloc(cs.namespace(|| "is_nft bit"), is_nft)?;
-        let is_nft_num = num::Num::zero().add_bool_with_coeff(CS::one(), &Boolean::from(is_nft_bit.clone()), bls12_381::Scalar::one());
+        let is_nft_num = num::Num::zero().add_bool_with_coeff(CS::one(), &Boolean::from(is_nft_bit.clone()), crate::engine::scalar_one());
         let is_equal_bit = AllocatedBit::alloc(cs.namespace(|| "is_equal bit"), is_equal)?;
         let is_greater_bit = AllocatedBit::alloc(cs.namespace(|| "is_greater bit"), is_greater)?;
         let expose_symbol_contract_bit = AllocatedBit::alloc(cs.namespace(|| "expose_symbol_contract bit"), expose_symbol_contract)?;
@@ -604,14 +606,14 @@ impl Circuit<bls12_381::Scalar> for SpendOutput {
 #[cfg(test)]
 mod tests
 {
-    use bls12_381::Scalar;
+    use crate::engine::Scalar;
     use group::Curve;
     use rand::rngs::OsRng;
     use bellman::gadgets::test::TestConstraintSystem;
     use bellman::gadgets::multipack;
     use bellman::Circuit;
     use bellman::groth16::generate_random_parameters;
-    use bls12_381::Bls12;
+    use crate::engine::{Bls12, scalar_to_canonical_bytes, fq_to_engine_scalar};
     use crate::contract::AffineVerifyingKeyBytesLE;
     use crate::eosio::ExtendedAsset;
     use crate::eosio::Name;
@@ -770,16 +772,38 @@ mod tests
 
         instance.synthesize(&mut cs).unwrap();
         println!("num constraints: {}", cs.num_constraints());
-        
+
         assert!(cs.is_satisfied());
         assert_eq!(cs.get("randomization of note commitment a/u3/num").to_repr(), note_a.commitment().to_bytes());
-        assert_eq!(cs.get_input(0, "ONE"), bls12_381::Scalar::one());
+        assert_eq!(
+            scalar_to_canonical_bytes(&cs.get("randomization of note commitment a/u3/num")),
+            note_a.commitment().to_bytes()
+        ); // should replace the previous check for clarity
+
+        assert_eq!(cs.get_input(0, "ONE"), crate::engine::scalar_one());
         assert_eq!(cs.get_input(1, "anchor/input 0"), anchor[0]);
         assert_eq!(cs.get_input(2, "nullifier/input variable").to_repr(), nf.to_bytes());
-        assert_eq!(cs.get_input(3, "symbol commitment/input variable").to_repr(), scm.to_bytes());
+        assert_eq!(
+            scalar_to_canonical_bytes(&cs.get_input(2, "nullifier/input variable")),
+            scalar_to_canonical_bytes(&nf.0)
+        ); // should replace the previous check for clarity
+        assert_eq!(
+            scalar_to_canonical_bytes(&cs.get_input(3, "symbol commitment/input variable")),
+            scalar_to_canonical_bytes(&scm)
+        );
         assert_eq!(cs.get_input(4, "commitment b/input variable").to_repr(), note_b.commitment().to_bytes());
-        assert_eq!(cs.get_input(5, "cv_net/u/input variable"), cv_net.as_inner().to_affine().get_u());
-        assert_eq!(cs.get_input(6, "cv_net/v/input variable"), cv_net.as_inner().to_affine().get_v());
+        assert_eq!(
+            scalar_to_canonical_bytes(&cs.get_input(4, "commitment b/input variable")),
+            note_b.commitment().to_bytes()
+        ); // should replace the previous check for clarity
+        assert_eq!(
+            cs.get_input(5, "cv_net/u/input variable"),
+            fq_to_engine_scalar(cv_net.as_inner().to_affine().get_u())
+        );
+        assert_eq!(
+            cs.get_input(6, "cv_net/v/input variable"),
+            fq_to_engine_scalar(cv_net.as_inner().to_affine().get_v())
+        );
         assert_eq!(cs.get_input(7, "pack inputs7 contents/input 0"), inputs7[0]);
         assert_eq!(cs.get_input(8, "pack inputs8 contents/input 0"), inputs8[0]);
     }
@@ -821,6 +845,330 @@ mod tests
         let vk_affine_bytes = AffineVerifyingKeyBytesLE::from(params.vk);
         let res = fs::write("vk_spendoutput.hex", hex::encode(vk_affine_bytes.0));
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn prove_and_verify()
+    {
+        use bellman::groth16::{
+            create_random_proof, prepare_verifying_key, verify_proof, VerifyingKey, Parameters
+        };
+        use std::time::Instant;
+
+        // --- load proving params ---
+        let f = File::open("params_spendoutput.bin").unwrap();
+        let params = Parameters::<Bls12>::read(f, false).unwrap();
+
+        let mut rng = OsRng.clone();
+
+        // --- witness construction (copied from test_spendoutput_circuit) ---
+
+        // Alice key material
+        let sk_alice = SpendingKey::from_seed(b"This is Alice seed string! Usually this is just a listing of words. Here we just use sentences.");
+        let fvk_alice = FullViewingKey::from_spending_key(&sk_alice);
+        let sender = fvk_alice.default_address().1;
+
+        let note_a = Note::from_parts(
+            0,
+            sender,
+            Name(0),
+            ExtendedAsset::from_string(&"10.0000 EOS@eosio.token".to_string()).unwrap(),
+            Rseed([42; 32]),
+            [0; 512]
+        );
+
+        let auth_path = vec![
+            Some((hex::decode("0100000000000000000000000000000000000000000000000000000000000000").unwrap().try_into().unwrap(), false)),
+            Some((hex::decode("322eb027eb8aee02f2c996a31912d1ae05e251c597ae9bbd5c819b71f080bce9").unwrap().try_into().unwrap(), false)),
+            Some((hex::decode("d492e18b60152bd5001335141d8ff86912c9ccd988a8409fec5316ba36df98cc").unwrap().try_into().unwrap(), false))
+        ];
+
+        let mut position = 0u64;
+        let mut cur = note_a.commitment().to_bytes();
+
+        for (i, val) in auth_path.clone().into_iter().enumerate() {
+            let (uncle, b) = val.unwrap();
+
+            let mut lhs = cur;
+            let mut rhs = uncle;
+
+            if b {
+                ::std::mem::swap(&mut lhs, &mut rhs);
+            }
+
+            cur = Blake2s7rParams::new()
+                .hash_length(32)
+                .personal(crate::constants::MERKLE_TREE_PERSONALIZATION)
+                .to_state()
+                .update(&lhs)
+                .update(&rhs)
+                .finalize()
+                .as_bytes()
+                .try_into()
+                .expect("output length is correct");
+
+            if b {
+                position |= 1 << i;
+            }
+        }
+
+        // anchor scalar = multipack( blake2s7r_root_bytes truncated to 254 bits )
+        let mut anchor_bits = multipack::bytes_to_bits_le(&cur);
+        anchor_bits.truncate(254);
+        let anchor = multipack::compute_multipacking(&anchor_bits);
+        assert_eq!(anchor.len(), 1);
+
+        let nf = note_a.nullifier(&fvk_alice.nk, position);
+        let nf = ExtractedNullifier::from(nf);
+
+        let value_c = 50000u64;
+        let unshielded_outputs_hash = [0; 4];
+
+        let note_b = Note::from_parts(
+            0,
+            sender,
+            Name(0),
+            ExtendedAsset::from_string(&"11.0000 EOS@eosio.token".to_string()).unwrap(),
+            Rseed([42; 32]),
+            [0; 512]
+        );
+
+        // symbol commitment (scm)
+        let rscm = Rseed([21; 32]);
+        let scm = windowed_pedersen_commit(
+            Personalization::SymbolCommitment,
+            iter::empty()
+                .chain(BitArray::<_, Lsb0>::new(note_a.symbol().raw().to_le_bytes()).iter().by_vals())
+                .chain(BitArray::<_, Lsb0>::new(note_a.contract().raw().to_le_bytes()).iter().by_vals()),
+            rscm.rcm().0
+        );
+        let scm = extract_p(&scm); // jubjub::Fq
+
+        // net value commitment (cv_net)
+        let rcv = ValueCommitTrapdoor::random(&mut rng);
+        let value_spend = note_b.amount() + value_c;
+        let net_value = if note_a.amount() > value_spend {
+            note_a.amount() - value_spend
+        } else {
+            value_spend - note_a.amount()
+        };
+
+        // keep your "mul by 5" test exactly as-is
+        let cv_net = ValueCommitment::derive(net_value, rcv.clone())
+            .add(&ValueCommitment::derive(0, rcv.clone()))
+            .add(&ValueCommitment::derive(0, rcv.clone()))
+            .add(&ValueCommitment::derive(0, rcv.clone()))
+            .add(&ValueCommitment::derive(0, rcv.clone()));
+
+        let cv_gt = note_a.amount() > value_spend;
+        let cv_eq = note_a.amount() == value_spend;
+
+        // circuit instance
+        let instance = SpendOutput {
+            note_a: Some(note_a.clone()),
+            proof_generation_key: Some(sk_alice.proof_generation_key()),
+            auth_path: auth_path.clone(),
+            rcv: Some(rcv.inner()),
+            rcv_mul: Some(5),
+            rscm: Some(rscm.rcm().0),
+            note_b: Some(note_b.clone()),
+            value_c: Some(value_c),
+            unshielded_outputs_hash: Some(unshielded_outputs_hash),
+        };
+
+        // --- create proof (timed) ---
+        println!("create proof");
+        let start = Instant::now();
+        let proof = create_random_proof(instance, &params, &mut OsRng).unwrap();
+        let duration = start.elapsed();
+        println!("Proof generation took (ms): {}", duration.as_millis());
+
+        // optional: persist proof for debugging
+        let f = File::create("proof_spendoutput.bin").unwrap();
+        proof.write(f).unwrap();
+
+        // --- pack public inputs in EXACT circuit order ---
+
+        // inputs7: [value_c (8 bytes)] [symbol+contract (16 bytes, or 0s)] [flags byte]
+        let mut symbol_contract = [0u8; 16];
+        if value_c > 0 {
+            symbol_contract[0..8].copy_from_slice(&note_a.symbol().raw().to_le_bytes());
+            symbol_contract[8..16].copy_from_slice(&note_a.contract().raw().to_le_bytes());
+        }
+
+        let mut inputs7_bytes = [0u8; 25];
+        inputs7_bytes[0..8].copy_from_slice(&value_c.to_le_bytes());
+        inputs7_bytes[8..24].copy_from_slice(&symbol_contract);
+        inputs7_bytes[24] = (if cv_gt { 1 } else { 0 }) | ((if cv_eq { 1 } else { 0 }) << 1);
+
+        let inputs7_bits = multipack::bytes_to_bits_le(&inputs7_bytes);
+        let inputs7_packed: Vec<Scalar> = multipack::compute_multipacking(&inputs7_bits);
+        assert_eq!(inputs7_packed.len(), 1);
+
+        // inputs8: unshielded_outputs_hash packed into 254 bits
+        let mut inputs8_bytes = [0u8; 32];
+        inputs8_bytes[0..8].copy_from_slice(&unshielded_outputs_hash[0].to_le_bytes());
+        inputs8_bytes[8..16].copy_from_slice(&unshielded_outputs_hash[1].to_le_bytes());
+        inputs8_bytes[16..24].copy_from_slice(&unshielded_outputs_hash[2].to_le_bytes());
+        inputs8_bytes[24..32].copy_from_slice(&unshielded_outputs_hash[3].to_le_bytes());
+
+        let mut inputs8_bits = multipack::bytes_to_bits_le(&inputs8_bytes);
+        inputs8_bits.truncate(254);
+        let inputs8_packed: Vec<Scalar> = multipack::compute_multipacking(&inputs8_bits);
+        assert_eq!(inputs8_packed.len(), 1);
+
+        // Groth16 public inputs (NO leading ONE)
+        let mut inputs: Vec<Scalar> = vec![];
+        inputs.push(anchor[0]);                          // input 1: anchor
+        inputs.push(nf.0);                               // input 2: nullifier
+        inputs.push(scm);                  // input 3: symbol commitment
+        inputs.push(note_b.commitment().0);              // input 4: cm_b
+        inputs.push(fq_to_engine_scalar(cv_net.as_inner().to_affine().get_u())); // input 5: cv_net.u
+        inputs.push(fq_to_engine_scalar(cv_net.as_inner().to_affine().get_v())); // input 6: cv_net.v
+        inputs.push(inputs7_packed[0]);                  // input 7: packed inputs7
+        inputs.push(inputs8_packed[0]);                  // input 8: packed inputs8
+
+        // print public inputs (handy when debugging mismatches)
+        for (i, x) in inputs.iter().enumerate() {
+            println!("input[{}] = {}", i, hex::encode(scalar_to_canonical_bytes(x)));
+        }
+
+        // --- verify proof ---
+        println!("verify proof");
+        let f = File::open("vk_spendoutput.bin").unwrap();
+        let vk = VerifyingKey::<Bls12>::read(f).unwrap();
+        let pvk = prepare_verifying_key(&vk);
+        assert!(verify_proof(&pvk, &proof, &inputs).is_ok());
+    }
+
+    #[test]
+    fn bench_proofgen_spend_output()
+    {
+        use bellman::groth16::{create_random_proof, Parameters};
+        use std::time::Instant;
+
+        // ---- CONFIG ----
+        const N_PROOFS: usize = 10;
+        const PARAMS_PATH: &str = "params_spendoutput.bin";
+        const WRITE_PROOFS: bool = false;
+
+        // ---- LOAD PARAMS ----
+        let f = File::open(PARAMS_PATH).unwrap();
+        let params = Parameters::<Bls12>::read(f, false).unwrap();
+
+        let mut rng = OsRng.clone();
+
+        // ---- WITNESS SETUP (copied from your test_spendoutput_circuit) ----
+        let sk_alice = SpendingKey::from_seed(b"This is Alice seed string! Usually this is just a listing of words. Here we just use sentences.");
+        let fvk_alice = FullViewingKey::from_spending_key(&sk_alice);
+        let sender = fvk_alice.default_address().1;
+
+        let note_a = Note::from_parts(
+            0,
+            sender,
+            Name(0),
+            ExtendedAsset::from_string(&"10.0000 EOS@eosio.token".to_string()).unwrap(),
+            Rseed([42; 32]),
+            [0; 512]
+        );
+
+        let auth_path = vec![
+            Some((hex::decode("0100000000000000000000000000000000000000000000000000000000000000").unwrap().try_into().unwrap(), false)),
+            Some((hex::decode("322eb027eb8aee02f2c996a31912d1ae05e251c597ae9bbd5c819b71f080bce9").unwrap().try_into().unwrap(), false)),
+            Some((hex::decode("d492e18b60152bd5001335141d8ff86912c9ccd988a8409fec5316ba36df98cc").unwrap().try_into().unwrap(), false))
+        ];
+
+        // compute anchor + position (needed for nullifier)
+        let mut position = 0u64;
+        let mut cur = note_a.commitment().to_bytes();
+        for (i, val) in auth_path.clone().into_iter().enumerate() {
+            let (uncle, b) = val.unwrap();
+            let mut lhs = cur;
+            let mut rhs = uncle;
+            if b { ::std::mem::swap(&mut lhs, &mut rhs); }
+            cur = Blake2s7rParams::new()
+                .hash_length(32)
+                .personal(crate::constants::MERKLE_TREE_PERSONALIZATION)
+                .to_state()
+                .update(&lhs)
+                .update(&rhs)
+                .finalize()
+                .as_bytes()
+                .try_into()
+                .expect("output length is correct");
+            if b { position |= 1 << i; }
+        }
+
+        let _anchor_bits = {
+            let mut bits = multipack::bytes_to_bits_le(&cur);
+            bits.truncate(254);
+            bits
+        };
+
+        // nullifier
+        let _nf = {
+            let nf = note_a.nullifier(&fvk_alice.nk, position);
+            ExtractedNullifier::from(nf)
+        };
+
+        let value_c = 50000u64;
+        let unshielded_outputs_hash = [0; 4];
+
+        let note_b = Note::from_parts(
+            0,
+            sender,
+            Name(0),
+            ExtendedAsset::from_string(&"11.0000 EOS@eosio.token".to_string()).unwrap(),
+            Rseed([42; 32]),
+            [0; 512]
+        );
+
+        // net value commitment randomness
+        let rcv = ValueCommitTrapdoor::random(&mut rng);
+
+        // symbol commitment randomness
+        let rscm = Rseed([21; 32]);
+
+        // ---- BENCH ----
+        println!("SpendOutput proofgen benchmark: N_PROOFS = {}", N_PROOFS);
+        let total_start = Instant::now();
+
+        let mut ms: Vec<u128> = Vec::with_capacity(N_PROOFS);
+
+        for i in 0..N_PROOFS {
+            let instance = SpendOutput {
+                note_a: Some(note_a.clone()),
+                proof_generation_key: Some(sk_alice.proof_generation_key()),
+                auth_path: auth_path.clone(),
+                rcv: Some(rcv.inner()),
+                rcv_mul: Some(5),
+                rscm: Some(rscm.rcm().0),
+                note_b: Some(note_b.clone()),
+                value_c: Some(value_c),
+                unshielded_outputs_hash: Some(unshielded_outputs_hash),
+            };
+
+            let start = Instant::now();
+            let proof = create_random_proof(instance, &params, &mut OsRng).unwrap();
+            let d = start.elapsed().as_millis();
+            ms.push(d);
+
+            if WRITE_PROOFS {
+                let f = File::create(format!("proof_spendoutput_{:03}.bin", i)).unwrap();
+                proof.write(f).unwrap();
+            }
+
+            println!("  proof {:>3}/{:>3}: {} ms", i + 1, N_PROOFS, d);
+        }
+
+        let total_ms = total_start.elapsed().as_millis();
+        let min = *ms.iter().min().unwrap_or(&0);
+        let max = *ms.iter().max().unwrap_or(&0);
+        let sum: u128 = ms.iter().sum();
+        let avg = if N_PROOFS > 0 { sum / (N_PROOFS as u128) } else { 0 };
+
+        println!("SpendOutput proofgen total: {} ms", total_ms);
+        println!("SpendOutput proofgen stats: min={} ms, avg={} ms, max={} ms", min, avg, max);
     }
 }
 

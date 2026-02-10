@@ -143,8 +143,8 @@ impl ValueCommitment {
     ///
     /// [concretehomomorphiccommit]: https://zips.z.cash/protocol/protocol.pdf#concretehomomorphiccommit
     pub fn derive(value: u64, rcv: ValueCommitTrapdoor) -> Self {
-        let cv = (VALUE_COMMITMENT_VALUE_GENERATOR * jubjub::Scalar::from(value))
-            + (VALUE_COMMITMENT_RANDOMNESS_GENERATOR * rcv.0);
+        let cv = (*VALUE_COMMITMENT_VALUE_GENERATOR * jubjub::Scalar::from(value))
+            + (*VALUE_COMMITMENT_RANDOMNESS_GENERATOR * rcv.0);
 
         ValueCommitment(cv.into())
     }
@@ -230,7 +230,15 @@ mod tests {
     use jubjub::ExtendedPoint;
     use rand::rngs::OsRng;
     use std::ops::{Add, Sub};
-    use crate::contract::scalar_to_raw_bytes_le;
+
+    use ff::PrimeField;
+    use jubjub::Fq;
+    fn fq_to_bytes(fq: &Fq) -> [u8; 32] {
+        let repr = fq.to_repr();
+        let mut b = [0u8; 32];
+        b.copy_from_slice(repr.as_ref());
+        b
+    }
 
     #[test]
     fn test_homomorphic_properties()
@@ -266,20 +274,20 @@ mod tests {
         // Spend
         let s1 = ValueCommitment::derive(3, rcv.clone()).0.to_affine();
         let s2 = ValueCommitment::derive(7, rcv.clone()).0.to_affine();
-        println!("{}", hex::encode(scalar_to_raw_bytes_le(&s1.get_u())));
-        println!("{}", hex::encode(scalar_to_raw_bytes_le(&s1.get_v())));
-        println!("{}", hex::encode(scalar_to_raw_bytes_le(&s2.get_u())));
-        println!("{}", hex::encode(scalar_to_raw_bytes_le(&s2.get_v())));
+        println!("{}", hex::encode(fq_to_bytes(&s1.get_u())));
+        println!("{}", hex::encode(fq_to_bytes(&s1.get_v())));
+        println!("{}", hex::encode(fq_to_bytes(&s2.get_u())));
+        println!("{}", hex::encode(fq_to_bytes(&s2.get_v())));
         let s1 = ExtendedPoint::from(s1);
         let s_sum = s1.clone().add(&s2);
 
         // Output
         let o1 = ValueCommitment::derive(8, rcv.clone()).0.to_affine();
         let o2 = ValueCommitment::derive(2, rcv.clone()).0.to_affine();
-        println!("{}", hex::encode(scalar_to_raw_bytes_le(&o1.get_u())));
-        println!("{}", hex::encode(scalar_to_raw_bytes_le(&o1.get_v())));
-        println!("{}", hex::encode(scalar_to_raw_bytes_le(&o2.get_u())));
-        println!("{}", hex::encode(scalar_to_raw_bytes_le(&o2.get_v())));
+        println!("{}", hex::encode(fq_to_bytes(&o1.get_u())));
+        println!("{}", hex::encode(fq_to_bytes(&o1.get_v())));
+        println!("{}", hex::encode(fq_to_bytes(&o2.get_u())));
+        println!("{}", hex::encode(fq_to_bytes(&o2.get_v())));
         let o1 = ExtendedPoint::from(o1);
         let o_sum = o1.clone().add(&o2);
 

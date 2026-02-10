@@ -48,7 +48,7 @@ impl NoteCommitment
 
 /// The u-coordinate of the commitment to a note.
 #[derive(Copy, Clone, Debug)]
-pub struct ExtractedNoteCommitment(pub bls12_381::Scalar);
+pub struct ExtractedNoteCommitment(pub crate::engine::Scalar);
 
 impl ExtractedNoteCommitment {
     /// Deserialize the extracted note commitment from a byte array.
@@ -58,7 +58,7 @@ impl ExtractedNoteCommitment {
     ///
     /// [cmucanon]: https://zips.z.cash/protocol/protocol.pdf#outputencodingandconsensus
     pub fn from_bytes(bytes: &[u8; 32]) -> CtOption<Self> {
-        bls12_381::Scalar::from_repr(*bytes).map(ExtractedNoteCommitment)
+        crate::engine::Scalar::from_repr(*bytes).map(ExtractedNoteCommitment)
     }
 
     /// Serialize the value commitment to its canonical byte representation.

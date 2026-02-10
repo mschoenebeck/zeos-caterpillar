@@ -1,6 +1,8 @@
 use bellman::gadgets::boolean::{Boolean, AllocatedBit};
 use bellman::{Circuit, ConstraintSystem, SynthesisError};
 use ff::PrimeField;
+#[cfg(not(target_arch = "wasm32"))]
+use ff::Field;
 use crate::note::Note;
 use crate::keys::ProofGenerationKey;
 use super::{conditionally_swap_u256, u8_vec_into_boolean_vec_le};
@@ -35,9 +37,9 @@ pub struct Spend
     pub rscm: Option<jubjub::Fr>,
 }
 
-impl Circuit<bls12_381::Scalar> for Spend
+impl Circuit<crate::engine::Scalar> for Spend
 {
-    fn synthesize<CS: ConstraintSystem<bls12_381::Scalar>>(
+    fn synthesize<CS: ConstraintSystem<crate::engine::Scalar>>(
         self,
         cs: &mut CS,
     ) -> Result<(), SynthesisError>
@@ -142,7 +144,7 @@ impl Circuit<bls12_381::Scalar> for Spend
         note_a_preimage.extend(value_a_bits.clone());
         // Compute note a's value as a linear combination of the bits.
         let mut value_a_num = num::Num::zero();
-        let mut coeff = bls12_381::Scalar::one();
+        let mut coeff = crate::engine::scalar_one();
         for bit in &value_a_bits
         {
             value_a_num = value_a_num.add_bool_with_coeff(CS::one(), bit, coeff);
@@ -370,7 +372,7 @@ mod tests
     use bellman::gadgets::multipack;
     use bellman::Circuit;
     use bellman::groth16::generate_random_parameters;
-    use bls12_381::Bls12;
+    use crate::engine::{Bls12, fq_to_engine_scalar};
     use crate::constants::MERKLE_TREE_DEPTH;
     use crate::eosio::ExtendedAsset;
     use crate::eosio::Name;
@@ -476,15 +478,21 @@ mod tests
 
         instance.synthesize(&mut cs).unwrap();
         println!("num constraints: {}", cs.num_constraints());
-        
+
         assert!(cs.is_satisfied());
         assert_eq!(cs.get("randomization of note commitment a/u3/num").to_repr(), note_a.commitment().to_bytes());
-        assert_eq!(cs.get_input(0, "ONE"), bls12_381::Scalar::one());
+        assert_eq!(cs.get_input(0, "ONE"), crate::engine::scalar_one());
         assert_eq!(cs.get_input(1, "anchor/input 0"), anchor[0]);
         assert_eq!(cs.get_input(2, "nullifier/input variable").to_repr(), nf.to_bytes());
-        assert_eq!(cs.get_input(3, "symbol commitment/input variable").to_repr(), scm.to_bytes());
-        assert_eq!(cs.get_input(4, "commitment point/u/input variable"), cv_net.as_inner().to_affine().get_u());
-        assert_eq!(cs.get_input(5, "commitment point/v/input variable"), cv_net.as_inner().to_affine().get_v());
+        assert_eq!(cs.get_input(3, "symbol commitment/input variable").to_repr(), scm.to_repr());
+        assert_eq!(
+            cs.get_input(4, "commitment point/u/input variable"),
+            fq_to_engine_scalar(cv_net.as_inner().to_affine().get_u())
+        );
+        assert_eq!(
+            cs.get_input(5, "commitment point/v/input variable"),
+            fq_to_engine_scalar(cv_net.as_inner().to_affine().get_v())
+        );
     }
 
     #[test]

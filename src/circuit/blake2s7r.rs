@@ -380,7 +380,7 @@ pub fn blake2s7r<Scalar: PrimeField, CS: ConstraintSystem<Scalar>>(
 #[cfg(test)]
 mod test {
     use crate::blake2s7r::Params as Blake2s7rParams;
-    use bls12_381::Scalar;
+    use crate::engine::Scalar;
     use hex_literal::hex;
     use rand_core::{RngCore, SeedableRng};
     use rand_xorshift::XorShiftRng;

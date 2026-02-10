@@ -15,7 +15,7 @@ pub fn group_hash(tag: &[u8], personalization: &[u8]) -> Option<jubjub::Subgroup
     assert_eq!(personalization.len(), 8);
 
     // Check to see that scalar field is 255 bits
-    assert!(bls12_381::Scalar::NUM_BITS == 255);
+    assert!(crate::engine::Scalar::NUM_BITS == 255);
 
     let h = Params::new()
         .hash_length(32)
