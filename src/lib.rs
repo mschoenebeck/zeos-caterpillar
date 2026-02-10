@@ -25,6 +25,7 @@ pub mod blake2s7r;
 pub mod group_hash;
 pub mod spec;
 pub mod wallet;
+pub mod wallet_encryption;
 pub mod transaction;
 pub mod transaction_spend_tests;
 
@@ -79,7 +80,7 @@ pub extern "C" fn wallet_last_error() -> *const libc::c_char {
 /// source: https://dev.to/kgrech/7-ways-to-pass-a-string-between-rust-and-c-4ieb
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 #[no_mangle]
-pub unsafe extern fn free_string(ptr: *const libc::c_char)
+pub unsafe extern "C" fn free_string(ptr: *const libc::c_char)
 {
     // Take the ownership back to rust and drop the owner
     let _ = CString::from_raw(ptr as *mut _);
@@ -672,6 +673,162 @@ pub extern "C" fn wallet_read(
     };
 
     *out_p_wallet = Box::into_raw(Box::new(wallet));
+    true
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[no_mangle]
+pub extern "C" fn wallet_is_encrypted(
+    p_bytes: *const u8,
+    len: libc::size_t,
+    out_is_encrypted: &mut bool,
+) -> bool {
+    *out_is_encrypted = false;
+
+    if p_bytes.is_null() {
+        set_last_error("wallet_is_encrypted: p_bytes is null");
+        return false;
+    }
+    if len == 0 {
+        set_last_error("wallet_is_encrypted: len is zero");
+        return false;
+    }
+
+    let bytes: &[u8] = unsafe { slice::from_raw_parts(p_bytes, len as usize) };
+    *out_is_encrypted = wallet_encryption::is_encrypted_wallet(bytes);
+    true
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[no_mangle]
+pub extern "C" fn wallet_encrypt_size(
+    plain_len: u64,
+    out_size: &mut u64,
+) -> bool {
+    *out_size = wallet_encryption::encrypted_size(plain_len as usize) as u64;
+    true
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[no_mangle]
+pub extern "C" fn wallet_encrypt_bytes(
+    p_plain: *const u8,
+    plain_len: libc::size_t,
+    password: *const libc::c_char,
+    out_bytes: *mut u8,
+) -> bool {
+    if p_plain.is_null() {
+        set_last_error("wallet_encrypt_bytes: p_plain is null");
+        return false;
+    }
+    if plain_len == 0 {
+        set_last_error("wallet_encrypt_bytes: plain_len is zero");
+        return false;
+    }
+    if password.is_null() {
+        set_last_error("wallet_encrypt_bytes: password is null");
+        return false;
+    }
+    if out_bytes.is_null() {
+        set_last_error("wallet_encrypt_bytes: out_bytes is null");
+        return false;
+    }
+
+    let plain: &[u8] = unsafe { slice::from_raw_parts(p_plain, plain_len as usize) };
+    let pw = unsafe { CStr::from_ptr(password) }.to_bytes(); // best-effort
+
+    let enc = match wallet_encryption::encrypt_wallet_bytes(
+        plain,
+        pw,
+        wallet_encryption::KdfParams::default(),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            set_last_error(&format!("wallet_encrypt_bytes: encrypt failed: {e:?}"));
+            return false;
+        }
+    };
+
+    // SAFETY: caller must allocate exactly wallet_encrypt_size(plain_len) bytes.
+    unsafe {
+        std::ptr::copy_nonoverlapping(enc.as_ptr(), out_bytes, enc.len());
+    }
+
+    true
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[no_mangle]
+pub extern "C" fn wallet_decrypt_size(
+    p_enc: *const u8,
+    enc_len: libc::size_t,
+    out_size: &mut u64,
+) -> bool {
+    *out_size = 0;
+
+    if p_enc.is_null() {
+        set_last_error("wallet_decrypt_size: p_enc is null");
+        return false;
+    }
+    if enc_len == 0 {
+        set_last_error("wallet_decrypt_size: enc_len is zero");
+        return false;
+    }
+
+    let enc: &[u8] = unsafe { slice::from_raw_parts(p_enc, enc_len as usize) };
+    match wallet_encryption::decrypted_size(enc) {
+        Ok(sz) => {
+            *out_size = sz as u64;
+            true
+        }
+        Err(e) => {
+            set_last_error(&format!("wallet_decrypt_size: invalid encrypted wallet: {e:?}"));
+            false
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[no_mangle]
+pub extern "C" fn wallet_decrypt_bytes(
+    p_enc: *const u8,
+    enc_len: libc::size_t,
+    password: *const libc::c_char,
+    out_plain: *mut u8,
+) -> bool {
+    if p_enc.is_null() {
+        set_last_error("wallet_decrypt_bytes: p_enc is null");
+        return false;
+    }
+    if enc_len == 0 {
+        set_last_error("wallet_decrypt_bytes: enc_len is zero");
+        return false;
+    }
+    if password.is_null() {
+        set_last_error("wallet_decrypt_bytes: password is null");
+        return false;
+    }
+    if out_plain.is_null() {
+        set_last_error("wallet_decrypt_bytes: out_plain is null");
+        return false;
+    }
+
+    let enc: &[u8] = unsafe { slice::from_raw_parts(p_enc, enc_len as usize) };
+    let pw = unsafe { CStr::from_ptr(password) }.to_bytes();
+
+    let plain = match wallet_encryption::decrypt_wallet_bytes(enc, pw) {
+        Ok(v) => v,
+        Err(e) => {
+            // Wrong password and corrupted file look the same; that's fine.
+            set_last_error(&format!("wallet_decrypt_bytes: decrypt failed: {e:?}"));
+            return false;
+        }
+    };
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(plain.as_ptr(), out_plain, plain.len());
+    }
+
     true
 }
 

@@ -22,6 +22,8 @@ blake2s_simd = "1"
 bls12_381 = "0.8"
 byteorder = "1"
 chacha20poly1305 = "0.10.1"
+argon2 = "0.5"
+zeroize = "1.7"
 chrono = { version = "0.4.26", features = ["serde"] }
 constant_time_eq = "0.2.5"
 ff = "0.13"
