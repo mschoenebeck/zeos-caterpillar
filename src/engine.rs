@@ -75,6 +75,7 @@ pub fn fq_to_engine_scalar(fq: Fq) -> crate::engine::Scalar {
         .expect("jubjub::Fq must decode into engine::Scalar (same field)")
 }
 
+#[cfg(test)]
 #[inline]
 pub fn engine_scalar_to_fq(s: crate::engine::Scalar) -> Fq {
     let b = crate::engine::scalar_to_canonical_bytes(&s);
