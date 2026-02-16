@@ -2177,6 +2177,30 @@ pub extern "C" fn wallet_digest_block(
     true
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[no_mangle]
+pub extern "C" fn wallet_reset_chain_state(p_wallet: *mut Wallet) -> bool {
+    if p_wallet.is_null() {
+        set_last_error("wallet_reset_chain_state: p_wallet is null");
+        return false;
+    }
+
+    let result = std::panic::catch_unwind(|| {
+        let wallet = unsafe { &mut *p_wallet };
+        wallet.reset_chain_state();
+    });
+
+    match result {
+        Ok(_) => {
+            true
+        }
+        Err(_) => {
+            set_last_error("wallet_reset_chain_state: panic");
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests
 {

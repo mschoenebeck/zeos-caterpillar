@@ -953,6 +953,44 @@ impl Wallet
 
         Some((sis_path, self.merkle_tree.get(&tos).unwrap().clone()))
     }
+
+    /// Forget everything derived from chain sync (history, digested blocks, merkle cache),
+    /// but keep unpublished notes (user-local staging).
+    ///
+    /// Invariant after this call:
+    /// - block_num == 0, leaf_count == 0, auth_count == 0
+    /// - merkle_tree and note pools are empty
+    /// - unpublished_notes unchanged
+    pub fn reset_chain_state(&mut self) {
+        // Chain progress / counters
+        self.block_num = 0;
+        self.leaf_count = 0;
+        self.auth_count = 0;
+
+        // Chain-derived wallet state
+        self.unspent_notes.clear();
+        self.spent_notes.clear();
+        self.outgoing_notes.clear();
+
+        // Merkle cache must be cleared too, otherwise leaf_count reset breaks indexing invariants
+        self.merkle_tree.clear();
+
+        // Keep unpublished_notes untouched by design.
+        //
+        // Optional: you *can* opportunistically re-add auth tokens from unpublished notes
+        // (they don't require merkle leaves), but it's not required for correctness because
+        // digest_block() already retries unpublished notes every block.
+        //
+        // If you want that behavior, uncomment:
+        /*
+        let snapshot = self.unpublished_notes.clone();
+        for (_, map) in snapshot.into_iter() {
+            for (_, notes) in map.into_iter() {
+                let _ = self.add_notes(&notes, 0, 0);
+            }
+        }
+        */
+    }
 }
 
 #[cfg(test)]

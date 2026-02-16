@@ -46,5 +46,6 @@ extern bool wallet_zsign(wallet_t* p_wallet, const char* rztx_json, const char* 
 extern bool wallet_zverify_spend(const char* tx_json, const char* p_spendoutput_params_bytes, size_t spendoutput_params_bytes_len, const char* p_spend_params_bytes, size_t spend_params_bytes_len, const char* p_output_params_bytes, size_t output_params_bytes_len, bool* out_is_valid);
 extern bool wallet_transact(wallet_t* p_wallet, const char* ztx_json, const char* fee_token_contract_json, const char* fees_json, const char* p_mint_params_bytes, size_t mint_params_bytes_len, const char* p_spendoutput_params_bytes, size_t spendoutput_params_bytes_len, const char* p_spend_params_bytes, size_t spend_params_bytes_len, const char* p_output_params_bytes, size_t output_params_bytes_len, const char** out_tx_json);
 extern bool wallet_digest_block(wallet_t* p_wallet, const char* block, uint64_t* out_digest);
+extern bool wallet_reset_chain_state(wallet_t* pWallet);
 
 } // extern "C"
