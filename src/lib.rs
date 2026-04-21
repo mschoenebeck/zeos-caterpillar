@@ -1339,14 +1339,16 @@ pub extern "C" fn wallet_add_leaves(
 pub extern "C" fn wallet_add_notes(
     p_wallet: *mut Wallet,
     notes: *const libc::c_char,
-) -> bool {
+    block_num: u32,
+    block_ts: u64,
+) -> u64 {
     if p_wallet.is_null() {
         set_last_error("wallet_add_notes: p_wallet is null");
-        return false;
+        return 0;
     }
     if notes.is_null() {
         set_last_error("wallet_add_notes: notes is null");
-        return false;
+        return 0;
     }
 
     let wallet = unsafe { &mut *p_wallet };
@@ -1354,18 +1356,84 @@ pub extern "C" fn wallet_add_notes(
         Ok(s) => s,
         Err(_) => {
             set_last_error("wallet_add_notes: invalid UTF-8 in notes");
-            return false;
+            return 0;
         }
     };
     let notes_vec: Vec<String> = match serde_json::from_str(notes_str) {
         Ok(v) => v,
         Err(e) => {
             set_last_error(&format!("wallet_add_notes: invalid JSON in notes: {e}"));
+            return 0;
+        }
+    };
+
+    wallet.add_notes(&notes_vec, block_num, block_ts)
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[no_mangle]
+pub extern "C" fn wallet_set_block_num(
+    p_wallet: *mut Wallet,
+    block_num: u32,
+) -> bool {
+    if p_wallet.is_null() {
+        set_last_error("wallet_set_block_num: p_wallet is null");
+        return false;
+    }
+    let wallet = unsafe { &mut *p_wallet };
+    wallet.set_block_num(block_num);
+    true
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[no_mangle]
+pub extern "C" fn wallet_add_nullifiers(
+    p_wallet: *mut Wallet,
+    nullifiers_hex: *const libc::c_char,
+    out_count: *mut u64,
+) -> bool {
+    if p_wallet.is_null() {
+        set_last_error("wallet_add_nullifiers: p_wallet is null");
+        return false;
+    }
+    if nullifiers_hex.is_null() {
+        set_last_error("wallet_add_nullifiers: nullifiers_hex is null");
+        return false;
+    }
+
+    let wallet = unsafe { &mut *p_wallet };
+    let hex_str: &str = match unsafe { std::ffi::CStr::from_ptr(nullifiers_hex) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_last_error("wallet_add_nullifiers: invalid UTF-8");
             return false;
         }
     };
 
-    wallet.add_notes(&notes_vec, 0, 0);
+    use crate::contract::ScalarBytes;
+    let mut nullifiers: Vec<ScalarBytes> = Vec::new();
+    let bytes_str = hex_str.as_bytes();
+    let mut i = 0;
+    while i + 64 <= bytes_str.len() {
+        let chunk = &hex_str[i..i+64];
+        let mut arr = [0u8; 32];
+        for j in 0..32 {
+            arr[j] = match u8::from_str_radix(&chunk[j*2..j*2+2], 16) {
+                Ok(b) => b,
+                Err(_) => {
+                    set_last_error("wallet_add_nullifiers: invalid hex");
+                    return false;
+                }
+            };
+        }
+        nullifiers.push(ScalarBytes(arr));
+        i += 64;
+    }
+
+    let count = wallet.mark_notes_spent(&nullifiers);
+    if !out_count.is_null() {
+        unsafe { *out_count = count as u64; }
+    }
     true
 }
 
