@@ -38,7 +38,9 @@ extern bool wallet_transaction_history_json(wallet_t* p_wallet, bool pretty, con
 extern bool wallet_addresses_json(wallet_t* p_wallet, bool pretty, const char** out_json);
 extern bool wallet_derive_address(wallet_t* p_wallet, const char** out_address);
 extern bool wallet_add_leaves(wallet_t* p_wallet, const char* leaves);
-extern bool wallet_add_notes(wallet_t* p_wallet, const char* notes);
+extern uint64_t wallet_add_notes(wallet_t* p_wallet, const char* notes, uint32_t block_num, uint64_t block_ts);
+extern bool wallet_set_block_num(wallet_t* p_wallet, uint32_t block_num);
+extern bool wallet_add_nullifiers(wallet_t* p_wallet, const char* nullifiers_hex, uint64_t* out_count);
 extern bool wallet_add_unpublished_notes(wallet_t* p_wallet, const char* unpublished_notes);
 extern bool wallet_create_unpublished_auth_note(wallet_t* p_wallet, const char* seed, uint64_t contract, const char* address, const char** out_unpublished_notes);
 extern bool wallet_resolve(wallet_t* p_wallet, const char* ztx_json, const char* fee_token_contract_json, const char* fees_json, const char** out_rztx_json);

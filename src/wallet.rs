@@ -342,6 +342,11 @@ impl Wallet
         self.block_num
     }
 
+    pub fn set_block_num(&mut self, bn: u32)
+    {
+        self.block_num = bn;
+    }
+
     pub fn leaf_count(&self) -> u64
     {
         self.leaf_count
@@ -931,6 +936,41 @@ impl Wallet
 
         self.leaf_count += 1;
         return tos;
+    }
+
+    pub fn mark_notes_spent(&mut self, nullifiers: &[ScalarBytes]) -> usize
+    {
+        if nullifiers.is_empty() || self.unspent_notes.is_empty() {
+            return 0;
+        }
+
+        let fvk = if !self.seed.is_empty() {
+            let sk = SpendingKey::from_seed(&self.seed);
+            FullViewingKey::from_spending_key(&sk)
+        } else {
+            return 0;
+        };
+        let mut spent_count = 0;
+
+        let nf_scalars: Vec<crate::engine::Scalar> = nullifiers.iter()
+            .filter_map(|nf| {
+                crate::engine::Scalar::try_from(nf.clone()).ok()
+            })
+            .collect();
+
+        let mut i = self.unspent_notes.len();
+        while i > 0 {
+            i -= 1;
+            if self.unspent_notes[i].note().is_auth_token() { continue; }
+            let note_nf = self.unspent_notes[i].note().nullifier(&fvk.nk, self.unspent_notes[i].position()).extract().0;
+            if nf_scalars.iter().any(|nf| note_nf.eq(nf)) {
+                let note = self.unspent_notes.remove(i);
+                self.spent_notes.push(note);
+                spent_count += 1;
+            }
+        }
+
+        spent_count
     }
 
     pub fn get_sister_path_and_root(&self, note: &NoteEx) -> Option<(Vec<Option<([u8; 32], bool)>>, ScalarBytes)>
