@@ -1,30 +1,28 @@
-use bellman::gadgets::boolean::{Boolean, AllocatedBit};
-use bellman::{Circuit, ConstraintSystem, SynthesisError};
-use ff::PrimeField;
-#[cfg(not(target_arch = "wasm32"))]
-use ff::Field;
-use crate::note::Note;
-use crate::keys::ProofGenerationKey;
-use super::{conditionally_swap_u256, u8_vec_into_boolean_vec_le};
-use super::ecc;
-use super::pedersen_hash;
 use super::blake2s7r;
 use super::constants::{
     NOTE_COMMITMENT_RANDOMNESS_GENERATOR, NULLIFIER_POSITION_GENERATOR,
-    PROOF_GENERATION_KEY_GENERATOR
+    PROOF_GENERATION_KEY_GENERATOR,
 };
+use super::ecc;
+use super::pedersen_hash;
+use super::{conditionally_swap_u256, u8_vec_into_boolean_vec_le};
+use crate::circuit::constants::{
+    VALUE_COMMITMENT_RANDOMNESS_GENERATOR, VALUE_COMMITMENT_VALUE_GENERATOR,
+};
+use crate::keys::ProofGenerationKey;
+use crate::note::Note;
 use bellman::gadgets::blake2s;
 use bellman::gadgets::boolean;
+use bellman::gadgets::boolean::{AllocatedBit, Boolean};
 use bellman::gadgets::multipack;
 use bellman::gadgets::num;
-use crate::circuit::constants::{
-    VALUE_COMMITMENT_RANDOMNESS_GENERATOR,
-    VALUE_COMMITMENT_VALUE_GENERATOR,
-};
+use bellman::{Circuit, ConstraintSystem, SynthesisError};
+#[cfg(not(target_arch = "wasm32"))]
+use ff::Field;
+use ff::PrimeField;
 
 /// This is an instance of the `Spend` circuit.
-pub struct Spend
-{
+pub struct Spend {
     /// The note a which is being spent
     pub note_a: Option<Note>,
     /// Proof Generation Key for note a which is required for spending
@@ -37,14 +35,11 @@ pub struct Spend
     pub rscm: Option<jubjub::Fr>,
 }
 
-impl Circuit<crate::engine::Scalar> for Spend
-{
+impl Circuit<crate::engine::Scalar> for Spend {
     fn synthesize<CS: ConstraintSystem<crate::engine::Scalar>>(
         self,
         cs: &mut CS,
-    ) -> Result<(), SynthesisError>
-    {
-
+    ) -> Result<(), SynthesisError> {
         // Prover witnesses ak (ensures that it's on the curve)
         let ak = ecc::EdwardsPoint::witness(
             cs.namespace(|| "ak"),
@@ -103,7 +98,8 @@ impl Circuit<crate::engine::Scalar> for Spend
             ecc::EdwardsPoint::witness(
                 cs.namespace(|| "witness g_d"),
                 self.note_a.as_ref().map(|a| {
-                    a.address().diversifier()
+                    a.address()
+                        .diversifier()
                         .g_d()
                         .expect("checked at construction")
                         .into()
@@ -129,24 +125,19 @@ impl Circuit<crate::engine::Scalar> for Spend
         // note a account to boolean bit vector
         let account_a_bits = boolean::u64_into_boolean_vec_le(
             cs.namespace(|| "account_a"),
-            self.note_a.as_ref().map(|a| {
-                a.account().raw()
-            })
+            self.note_a.as_ref().map(|a| a.account().raw()),
         )?;
         note_a_preimage.extend(account_a_bits.clone());
         // note a value to boolean bit vector
         let value_a_bits = boolean::u64_into_boolean_vec_le(
             cs.namespace(|| "value_a"),
-            self.note_a.as_ref().map(|a| {
-                a.amount()
-            })
+            self.note_a.as_ref().map(|a| a.amount()),
         )?;
         note_a_preimage.extend(value_a_bits.clone());
         // Compute note a's value as a linear combination of the bits.
         let mut value_a_num = num::Num::zero();
         let mut coeff = crate::engine::scalar_one();
-        for bit in &value_a_bits
-        {
+        for bit in &value_a_bits {
             value_a_num = value_a_num.add_bool_with_coeff(CS::one(), bit, coeff);
             coeff = coeff.double();
         }
@@ -154,18 +145,14 @@ impl Circuit<crate::engine::Scalar> for Spend
         // notes' symbol to boolean bit vector
         let symbol_bits = boolean::u64_into_boolean_vec_le(
             cs.namespace(|| "symbol"),
-            self.note_a.as_ref().map(|a| {
-                a.symbol().raw()
-            })
+            self.note_a.as_ref().map(|a| a.symbol().raw()),
         )?;
         note_a_preimage.extend(symbol_bits.clone());
         symbol_preimage.extend(symbol_bits.clone());
         // notes' contract to boolean bit vector
         let contract_bits = boolean::u64_into_boolean_vec_le(
             cs.namespace(|| "contract"),
-            self.note_a.as_ref().map(|a| {
-                a.contract().raw()
-            })
+            self.note_a.as_ref().map(|a| a.contract().raw()),
         )?;
         note_a_preimage.extend(contract_bits.clone());
         symbol_preimage.extend(contract_bits.clone());
@@ -181,12 +168,12 @@ impl Circuit<crate::engine::Scalar> for Spend
             64 +    // symbol
             64 +    // contract
             256 +   // g_d
-            256     // pk_d
+            256 // pk_d
         );
         assert_eq!(
             symbol_preimage.len(),
             64 +    // symbol
-            64      // contract
+            64 // contract
         );
 
         // Compute the commitment of note a
@@ -199,9 +186,7 @@ impl Circuit<crate::engine::Scalar> for Spend
             // Booleanize the randomness for the note commitment
             let rcm = boolean::field_into_boolean_vec_le(
                 cs.namespace(|| "rcm a"),
-                self.note_a.as_ref().map(|a|
-                    a.rcm()
-                ),
+                self.note_a.as_ref().map(|a| a.rcm()),
             )?;
             // Compute the note commitment randomness in the exponent
             let rcm = ecc::fixed_base_multiplication(
@@ -241,7 +226,10 @@ impl Circuit<crate::engine::Scalar> for Spend
         let mut position_bits = vec![];
         // This is an injective encoding, as cur is a
         // point in the prime order subgroup.
-        let mut cur = cm_a.get_u().to_bits_le(cs.namespace(|| "cur into bits"))?.clone();
+        let mut cur = cm_a
+            .get_u()
+            .to_bits_le(cs.namespace(|| "cur into bits"))?
+            .clone();
         cur.push(Boolean::Constant(false));
         assert_eq!(cur.len(), 256);
         // Ascend the merkle tree authentication path
@@ -249,14 +237,13 @@ impl Circuit<crate::engine::Scalar> for Spend
             let cs = &mut cs.namespace(|| format!("merkle tree hash {}", i));
             // Determines if the current subtree is the "right" leaf at this
             // depth of the tree.
-            let cur_is_right = boolean::AllocatedBit::alloc(
-                cs.namespace(|| "position bit"),
-                e.map(|e| e.1),
-            )?;
+            let cur_is_right =
+                boolean::AllocatedBit::alloc(cs.namespace(|| "position bit"), e.map(|e| e.1))?;
             // Push this boolean for nullifier computation later
             position_bits.push(boolean::Boolean::from(cur_is_right.clone()).clone());
             // Witness the authentication path element adjacent at this depth.
-            let path_element = u8_vec_into_boolean_vec_le(cs.namespace(|| "path element"), e.map(|(v, _)| v))?;
+            let path_element =
+                u8_vec_into_boolean_vec_le(cs.namespace(|| "path element"), e.map(|(v, _)| v))?;
             // Swap the two if the current subtree is on the right
             let (ul, ur) = conditionally_swap_u256(
                 cs.namespace(|| "conditional reversal of preimage"),
@@ -320,7 +307,7 @@ impl Circuit<crate::engine::Scalar> for Spend
             Some(note_a) => {
                 // check if note being spent is an NFT
                 is_nft = Some(note_a.symbol().raw() == 0);
-            },
+            }
             None => {
                 is_nft = None;
             }
@@ -364,38 +351,36 @@ impl Circuit<crate::engine::Scalar> for Spend
 }
 
 #[cfg(test)]
-mod tests
-{
-    use group::Curve;
-    use rand::rngs::OsRng;
-    use bellman::gadgets::test::TestConstraintSystem;
-    use bellman::gadgets::multipack;
-    use bellman::Circuit;
-    use bellman::groth16::generate_random_parameters;
-    use crate::engine::{Bls12, fq_to_engine_scalar};
+mod tests {
+    use super::Spend;
+    use crate::blake2s7r::Params as Blake2s7rParams;
     use crate::constants::MERKLE_TREE_DEPTH;
+    use crate::contract::AffineVerifyingKeyBytesLE;
+    use crate::engine::{fq_to_engine_scalar, Bls12};
     use crate::eosio::ExtendedAsset;
     use crate::eosio::Name;
+    use crate::keys::{FullViewingKey, SpendingKey};
+    use crate::note::nullifier::ExtractedNullifier;
     use crate::note::Note;
     use crate::note::Rseed;
-    use crate::note::nullifier::ExtractedNullifier;
-    use crate::contract::AffineVerifyingKeyBytesLE;
-    use super::Spend;
-    use crate::value::{ValueCommitTrapdoor, ValueCommitment};
-    use std::fs::File;
-    use std::fs;
-    use crate::keys::{SpendingKey, FullViewingKey};
-    use crate::spec::windowed_pedersen_commit;
     use crate::pedersen_hash::Personalization;
     use crate::spec::extract_p;
-    use crate::blake2s7r::Params as Blake2s7rParams;
-    use ff::PrimeField;
-    use core::iter;
+    use crate::spec::windowed_pedersen_commit;
+    use crate::value::{ValueCommitTrapdoor, ValueCommitment};
+    use bellman::gadgets::multipack;
+    use bellman::gadgets::test::TestConstraintSystem;
+    use bellman::groth16::generate_random_parameters;
+    use bellman::Circuit;
     use bitvec::{array::BitArray, order::Lsb0};
+    use core::iter;
+    use ff::PrimeField;
+    use group::Curve;
+    use rand::rngs::OsRng;
+    use std::fs;
+    use std::fs::File;
 
     #[test]
-    fn test_spend_circuit()
-    {
+    fn test_spend_circuit() {
         let mut rng = OsRng.clone();
         let mut cs = TestConstraintSystem::new();
 
@@ -410,13 +395,31 @@ mod tests
             Name(0),
             ExtendedAsset::from_string(&"10.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
-            [0; 512]
+            [0; 512],
         );
 
         let auth_path = vec![
-            Some((hex::decode("0100000000000000000000000000000000000000000000000000000000000000").unwrap().try_into().unwrap(), false)),
-            Some((hex::decode("322eb027eb8aee02f2c996a31912d1ae05e251c597ae9bbd5c819b71f080bce9").unwrap().try_into().unwrap(), false)),
-            Some((hex::decode("d492e18b60152bd5001335141d8ff86912c9ccd988a8409fec5316ba36df98cc").unwrap().try_into().unwrap(), false))
+            Some((
+                hex::decode("0100000000000000000000000000000000000000000000000000000000000000")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                false,
+            )),
+            Some((
+                hex::decode("322eb027eb8aee02f2c996a31912d1ae05e251c597ae9bbd5c819b71f080bce9")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                false,
+            )),
+            Some((
+                hex::decode("d492e18b60152bd5001335141d8ff86912c9ccd988a8409fec5316ba36df98cc")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                false,
+            )),
         ];
         let mut position = 0u64;
         let mut cur = note_a.commitment().to_bytes();
@@ -430,7 +433,7 @@ mod tests
             if b {
                 ::std::mem::swap(&mut lhs, &mut rhs);
             }
-            
+
             cur = Blake2s7rParams::new()
                 .hash_length(32)
                 .personal(crate::constants::MERKLE_TREE_PERSONALIZATION)
@@ -459,9 +462,17 @@ mod tests
         let scm = windowed_pedersen_commit(
             Personalization::SymbolCommitment,
             iter::empty()
-                .chain(BitArray::<_, Lsb0>::new(note_a.symbol().raw().to_le_bytes()).iter().by_vals())
-                .chain(BitArray::<_, Lsb0>::new(note_a.contract().raw().to_le_bytes()).iter().by_vals()),
-                srcm.rcm().0
+                .chain(
+                    BitArray::<_, Lsb0>::new(note_a.symbol().raw().to_le_bytes())
+                        .iter()
+                        .by_vals(),
+                )
+                .chain(
+                    BitArray::<_, Lsb0>::new(note_a.contract().raw().to_le_bytes())
+                        .iter()
+                        .by_vals(),
+                ),
+            srcm.rcm().0,
         );
         let scm = extract_p(&scm);
 
@@ -480,11 +491,22 @@ mod tests
         println!("num constraints: {}", cs.num_constraints());
 
         assert!(cs.is_satisfied());
-        assert_eq!(cs.get("randomization of note commitment a/u3/num").to_repr(), note_a.commitment().to_bytes());
+        assert_eq!(
+            cs.get("randomization of note commitment a/u3/num")
+                .to_repr(),
+            note_a.commitment().to_bytes()
+        );
         assert_eq!(cs.get_input(0, "ONE"), crate::engine::scalar_one());
         assert_eq!(cs.get_input(1, "anchor/input 0"), anchor[0]);
-        assert_eq!(cs.get_input(2, "nullifier/input variable").to_repr(), nf.to_bytes());
-        assert_eq!(cs.get_input(3, "symbol commitment/input variable").to_repr(), scm.to_repr());
+        assert_eq!(
+            cs.get_input(2, "nullifier/input variable").to_repr(),
+            nf.to_bytes()
+        );
+        assert_eq!(
+            cs.get_input(3, "symbol commitment/input variable")
+                .to_repr(),
+            scm.to_repr()
+        );
         assert_eq!(
             cs.get_input(4, "commitment point/u/input variable"),
             fq_to_engine_scalar(cv_net.as_inner().to_affine().get_u())
@@ -496,8 +518,7 @@ mod tests
     }
 
     #[test]
-    fn generate_and_write_params()
-    {
+    fn generate_and_write_params() {
         let instance = Spend {
             note_a: None,
             proof_generation_key: None,
@@ -515,4 +536,3 @@ mod tests
         assert!(res.is_ok());
     }
 }
-

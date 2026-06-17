@@ -1,10 +1,10 @@
 //! Gadget for Zcash's Pedersen hash.
 
 use super::ecc::{EdwardsPoint, MontgomeryPoint};
+pub use crate::pedersen_hash::Personalization;
 use bellman::gadgets::boolean::Boolean;
 use bellman::gadgets::lookup::*;
 use bellman::{ConstraintSystem, SynthesisError};
-pub use crate::pedersen_hash::Personalization;
 
 use super::constants::PEDERSEN_CIRCUIT_GENERATORS;
 
@@ -105,12 +105,12 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::pedersen_hash;
     use bellman::gadgets::boolean::{AllocatedBit, Boolean};
     use bellman::gadgets::test::*;
     use group::{ff::PrimeField, Curve};
     use rand_core::{RngCore, SeedableRng};
     use rand_xorshift::XorShiftRng;
-    use crate::pedersen_hash;
 
     fn fq_to_engine_scalar(fq: jubjub::Fq) -> crate::engine::Scalar {
         let repr = fq.to_repr();

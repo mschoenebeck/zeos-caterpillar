@@ -1,7 +1,5 @@
 //! Helper functions defined in the Zcash Protocol Specification.
 
-use blake2s_simd::Params as Blake2sParams;
-use group::{cofactor::CofactorGroup, ff::PrimeField, Curve, WnafBase, WnafScalar};
 use crate::{
     constants::{
         CRH_IVK_PERSONALIZATION, KEY_DIVERSIFICATION_PERSONALIZATION,
@@ -10,6 +8,8 @@ use crate::{
     group_hash::group_hash,
     pedersen_hash::{pedersen_hash, Personalization},
 };
+use blake2s_simd::Params as Blake2sParams;
+use group::{cofactor::CofactorGroup, ff::PrimeField, Curve, WnafBase, WnafScalar};
 use jubjub::Fq;
 
 const PREPARED_WINDOW_SIZE: usize = 4;

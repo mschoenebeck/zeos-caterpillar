@@ -1,42 +1,42 @@
-use super::keys::{DiversifiedTransmissionKey, Diversifier, SpendingKey, FullViewingKey};
+use super::keys::{DiversifiedTransmissionKey, Diversifier, FullViewingKey, SpendingKey};
 use bech32::{FromBase32, ToBase32, Variant};
 use rand::RngCore;
-use serde::{Serialize, Serializer, Deserialize, Deserializer, de::Visitor, de};
+use serde::{de, de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 use std::{error::Error, fmt};
 
 #[derive(Debug)]
-pub enum AddressError
-{
-    InvalidStringLength,       // bech32m string too short
-    InvalidDiversifier,        // diversifier.g_d() failed
-    IvkWallet,                 // unchanged
-    InvalidHrp,                // hrp != "za"
-    InvalidVariant,            // not Bech32m
-    InvalidLength,             // wrong decoded byte length
-    InvalidPkD,                // pk_d is identity or fails construction
-    Bech32(bech32::Error),     // bech32 decode/encode error
+pub enum AddressError {
+    InvalidStringLength,   // bech32m string too short
+    InvalidDiversifier,    // diversifier.g_d() failed
+    IvkWallet,             // unchanged
+    InvalidHrp,            // hrp != "za"
+    InvalidVariant,        // not Bech32m
+    InvalidLength,         // wrong decoded byte length
+    InvalidPkD,            // pk_d is identity or fails construction
+    Bech32(bech32::Error), // bech32 decode/encode error
 }
 impl Error for AddressError {}
-impl fmt::Display for AddressError
-{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result
-    {
-        match self
-        {
-            Self::InvalidStringLength => write!(f, "invalid bech32m address string length (must be 78)"),
-            Self::InvalidDiversifier   => write!(f, "invalid address diversifier"),
-            Self::IvkWallet            => write!(f, "Read-Only Wallet (spending not possible)"),
-            Self::InvalidHrp           => write!(f, "invalid HRP (expected \"za\")"),
-            Self::InvalidVariant       => write!(f, "invalid bech32 variant (expected Bech32m)"),
-            Self::InvalidLength        => write!(f, "decoded address payload has invalid length"),
-            Self::InvalidPkD           => write!(f, "invalid pk_d (identity or malformed)"),
-            Self::Bech32(e)            => write!(f, "bech32 error: {e}"),
+impl fmt::Display for AddressError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::InvalidStringLength => {
+                write!(f, "invalid bech32m address string length (must be 78)")
+            }
+            Self::InvalidDiversifier => write!(f, "invalid address diversifier"),
+            Self::IvkWallet => write!(f, "Read-Only Wallet (spending not possible)"),
+            Self::InvalidHrp => write!(f, "invalid HRP (expected \"za\")"),
+            Self::InvalidVariant => write!(f, "invalid bech32 variant (expected Bech32m)"),
+            Self::InvalidLength => write!(f, "decoded address payload has invalid length"),
+            Self::InvalidPkD => write!(f, "invalid pk_d (identity or malformed)"),
+            Self::Bech32(e) => write!(f, "bech32 error: {e}"),
         }
     }
 }
 
 impl From<bech32::Error> for AddressError {
-    fn from(e: bech32::Error) -> Self { AddressError::Bech32(e) }
+    fn from(e: bech32::Error) -> Self {
+        AddressError::Bech32(e)
+    }
 }
 
 /// A Sapling payment address.
@@ -67,17 +67,17 @@ impl Address {
     /// Note that we cannot verify in this constructor that `pk_d` is derived from
     /// `diversifier`, so addresses for which these values have no known relationship
     /// (and therefore no-one can receive funds at them) can still be constructed.
-    pub fn from_parts(
-        diversifier: Diversifier,
-        pk_d: DiversifiedTransmissionKey
-    ) -> Option<Self> {
+    pub fn from_parts(diversifier: Diversifier, pk_d: DiversifiedTransmissionKey) -> Option<Self> {
         // Check that the diversifier is valid
         diversifier.g_d()?;
 
         if pk_d.is_identity() {
             None
         } else {
-            Some(Address { pk_d, d: diversifier })
+            Some(Address {
+                pk_d,
+                d: diversifier,
+            })
         }
     }
 
@@ -94,8 +94,9 @@ impl Address {
 
         // from_bytes -> CtOption<DTK>; convert to Option<DTK>
         let pk_d = Option::<DiversifiedTransmissionKey>::from(
-            DiversifiedTransmissionKey::from_bytes(&pkd_bytes)
-        ).ok_or(AddressError::InvalidPkD)?;
+            DiversifiedTransmissionKey::from_bytes(&pkd_bytes),
+        )
+        .ok_or(AddressError::InvalidPkD)?;
 
         // Validate invariants (diversifier valid, pk_d non-identity)
         Address::from_parts(diversifier, pk_d).ok_or(AddressError::InvalidDiversifier)
@@ -110,9 +111,12 @@ impl Address {
     }
 
     /// Encodes this address as Bech32m
-    pub fn to_bech32m(&self) -> Result<String, AddressError>
-    {
-        Ok(bech32::encode("za", self.to_bytes().to_base32(), Variant::Bech32m)?)
+    pub fn to_bech32m(&self) -> Result<String, AddressError> {
+        Ok(bech32::encode(
+            "za",
+            self.to_bytes().to_base32(),
+            Variant::Bech32m,
+        )?)
     }
 
     /// Parse a Bech32m encoded address
@@ -141,10 +145,9 @@ impl Address {
     }
 
     /// creates a dummy address
-    pub fn dummy(rng: &mut impl RngCore) -> Self
-    {
+    pub fn dummy(rng: &mut impl RngCore) -> Self {
         let sk = SpendingKey::random(rng);
-        let fvk  = FullViewingKey::from_spending_key(&sk);
+        let fvk = FullViewingKey::from_spending_key(&sk);
         fvk.default_address().1
     }
 
@@ -169,8 +172,7 @@ impl Address {
 }
 
 // serde_json traits
-impl Serialize for Address
-{
+impl Serialize for Address {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -205,14 +207,12 @@ impl<'de> Deserialize<'de> for Address {
 }
 
 #[cfg(test)]
-mod tests
-{
-    use rand::rngs::OsRng;
+mod tests {
     use super::Address;
+    use rand::rngs::OsRng;
 
     #[test]
-    fn test_bech32m_encode_decode()
-    {
+    fn test_bech32m_encode_decode() {
         let mut rng = OsRng.clone();
         let a = Address::dummy(&mut rng);
         let encoded = a.to_bech32m().unwrap();
@@ -222,8 +222,7 @@ mod tests
     }
 
     #[test]
-    fn test_json_serde()
-    {
+    fn test_json_serde() {
         let mut rng = OsRng.clone();
         let a = Address::dummy(&mut rng);
         let encoded = serde_json::to_string(&a).unwrap();

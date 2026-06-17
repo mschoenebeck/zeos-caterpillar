@@ -1,11 +1,11 @@
 //! Various constants used for the Zcash proofs.
 
-use crate::engine::{Scalar, scalar_one, scalar_zero, scalar_from_canonical_bytes};
-use ff::{Field, PrimeField};
-use jubjub::{ExtendedPoint, Fq, SubgroupPoint};
-use group::{Curve, Group};
-use lazy_static::lazy_static;
 use crate::constants::{PEDERSEN_HASH_CHUNKS_PER_GENERATOR, PEDERSEN_HASH_GENERATORS};
+use crate::engine::{scalar_from_canonical_bytes, scalar_one, scalar_zero, Scalar};
+use ff::{Field, PrimeField};
+use group::{Curve, Group};
+use jubjub::{ExtendedPoint, Fq, SubgroupPoint};
+use lazy_static::lazy_static;
 type Coord = Scalar;
 
 #[inline]
@@ -13,8 +13,7 @@ fn fq_to_coord(fq: Fq) -> Coord {
     let repr = fq.to_repr();
     let mut b = [0u8; 32];
     b.copy_from_slice(repr.as_ref());
-    scalar_from_canonical_bytes(&b)
-        .expect("jubjub::Fq must decode into engine::Scalar")
+    scalar_from_canonical_bytes(&b).expect("jubjub::Fq must decode into engine::Scalar")
 }
 
 /// The `d` constant of the twisted Edwards curve: d = -(10240/10241)
@@ -93,10 +92,7 @@ pub fn generate_circuit_generator(mut gen: SubgroupPoint) -> FixedGeneratorOwned
         let mut g = gen;
         for _ in 0..7 {
             let g_affine = jubjub::ExtendedPoint::from(g).to_affine();
-            coeffs.push((
-                fq_to_coord(g_affine.get_u()),
-                fq_to_coord(g_affine.get_v()),
-            ));
+            coeffs.push((fq_to_coord(g_affine.get_u()), fq_to_coord(g_affine.get_v())));
             g += gen;
         }
         windows.push(coeffs);

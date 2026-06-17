@@ -37,16 +37,15 @@
 //! [`SaplingBuilder::add_output`]: crate::transaction::components::sapling::builder::SaplingBuilder::add_output
 //! [Rust documentation]: https://doc.rust-lang.org/stable/std/primitive.i64.html
 
+use core::fmt::{self, Debug};
+use core::iter::Sum;
+use core::ops::{Add, AddAssign, Sub, SubAssign};
 use ff::Field;
 use group::GroupEncoding;
 use rand::RngCore;
 use subtle::CtOption;
-use core::iter::Sum;
-use core::ops::{Add, AddAssign, Sub, SubAssign};
-use core::fmt::{self, Debug};
 
 use crate::constants::{VALUE_COMMITMENT_RANDOMNESS_GENERATOR, VALUE_COMMITMENT_VALUE_GENERATOR};
-
 
 /// A value operation overflowed.
 #[derive(Debug)]
@@ -241,8 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn test_homomorphic_properties()
-    {
+    fn test_homomorphic_properties() {
         let mut rng = OsRng.clone();
         let rcv = ValueCommitTrapdoor::random(&mut rng);
 
@@ -260,14 +258,18 @@ mod tests {
         let x = s_sum.0.add(o_sum.0);
 
         // Balance
-        println!("{:?}", (s1.add(&s2).sub(&o1).sub(&o2)).0.eq(&(s_sum.clone().sub(&o_sum)).0));
+        println!(
+            "{:?}",
+            (s1.add(&s2).sub(&o1).sub(&o2))
+                .0
+                .eq(&(s_sum.clone().sub(&o_sum)).0)
+        );
         println!("{:?}", b);
         println!("{:?}", x);
     }
 
     #[test]
-    fn test_homomorphic_properties_affine()
-    {
+    fn test_homomorphic_properties_affine() {
         let mut rng = OsRng.clone();
         let rcv = ValueCommitTrapdoor::random(&mut rng);
 
@@ -301,8 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn test_homomorphic_properties2()
-    {
+    fn test_homomorphic_properties2() {
         let mut rng = OsRng.clone();
         let rcv = ValueCommitTrapdoor::random(&mut rng);
 

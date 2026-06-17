@@ -4,11 +4,7 @@
 //!
 //! [section 4.2.2]: https://zips.z.cash/protocol/protocol.pdf#saplingkeycomponents
 
-use std::io::{self, Read, Write};
-use rand_core::RngCore;
-use serde::{Serialize, Serializer, Deserialize, ser::SerializeStruct, Deserializer, de::Visitor, de::SeqAccess, de::MapAccess, de};
-use std::fmt;
-use std::error::Error;
+use crate::note_encryption::EphemeralKeyBytes;
 use crate::{
     address::Address,
     constants::{PROOF_GENERATION_KEY_GENERATOR, SPENDING_KEY_GENERATOR},
@@ -19,14 +15,21 @@ use crate::{
         PreparedBaseSubgroup, PreparedScalar,
     },
 };
-use bech32::{FromBase32, ToBase32, Variant};
 use aes::Aes256;
+use bech32::{FromBase32, ToBase32, Variant};
 use blake2b_simd::{Hash as Blake2bHash, Params as Blake2bParams};
 use ff::PrimeField;
 use fpe::ff1::{BinaryNumeralString, FF1};
 use group::{Curve, Group, GroupEncoding};
+use rand_core::RngCore;
+use serde::{
+    de, de::MapAccess, de::SeqAccess, de::Visitor, ser::SerializeStruct, Deserialize, Deserializer,
+    Serialize, Serializer,
+};
+use std::error::Error;
+use std::fmt;
+use std::io::{self, Read, Write};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
-use crate::note_encryption::EphemeralKeyBytes;
 
 pub const PRF_EXPAND_PERSONALIZATION: &[u8; 16] = b"Zcash_ExpandSeed";
 
@@ -58,15 +61,16 @@ pub enum DecodingError {
     InvalidNsk,
 }
 impl Error for DecodingError {}
-impl fmt::Display for DecodingError
-{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result
-    {
-        match self
-        {
-            Self::LengthInvalid{expected, actual} => write!(f, "invalid bech32m ivk string length (must be {} but is {})", expected, actual),
+impl fmt::Display for DecodingError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::LengthInvalid { expected, actual } => write!(
+                f,
+                "invalid bech32m ivk string length (must be {} but is {})",
+                expected, actual
+            ),
             Self::InvalidAsk => write!(f, "InvalidAsk"),
-            Self::InvalidNsk => write!(f, "InvalidNsk")
+            Self::InvalidNsk => write!(f, "InvalidNsk"),
         }
     }
 }
@@ -102,7 +106,8 @@ impl SpendingKey {
         let ask = jubjub::Fr::from_bytes_wide(prf_expand(seed, &[0x00]).as_array());
         let nsk = jubjub::Fr::from_bytes_wide(prf_expand(seed, &[0x01]).as_array());
         let mut ovk = OutgoingViewingKey([0u8; 32]);
-        ovk.0.copy_from_slice(&prf_expand(seed, &[0x02]).as_bytes()[..32]);
+        ovk.0
+            .copy_from_slice(&prf_expand(seed, &[0x02]).as_bytes()[..32]);
         SpendingKey { dk, ask, nsk, ovk }
     }
 
@@ -206,7 +211,7 @@ impl Clone for FullViewingKey {
 impl FullViewingKey {
     pub fn from_spending_key(sk: &SpendingKey) -> Self {
         FullViewingKey {
-            dk:  sk.dk,
+            dk: sk.dk,
             ak: *SPENDING_KEY_GENERATOR * sk.ask,
             nk: NullifierDerivingKey(*PROOF_GENERATION_KEY_GENERATOR * sk.nsk),
             ovk: sk.ovk,
@@ -214,7 +219,6 @@ impl FullViewingKey {
     }
 
     pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
-
         let mut dk = [0u8; 32];
         reader.read_exact(&mut dk)?;
 
@@ -283,7 +287,8 @@ impl FullViewingKey {
     /// Returns `None` if the diversifier index does not produce a valid diversifier for
     /// this `DiversifiableFullViewingKey`.
     pub fn address(&self, j: DiversifierIndex) -> Option<Address> {
-        self.dk.diversifier(j)
+        self.dk
+            .diversifier(j)
             .and_then(|d_j| self.to_payment_address(d_j))
     }
 
@@ -357,16 +362,18 @@ impl IncomingViewingKey {
     /// Parses an Orchard incoming viewing key from its raw encoding.
     pub fn from_bytes(bytes: &[u8; 64]) -> CtOption<Self> {
         jubjub::Fr::from_repr(bytes[32..].try_into().unwrap()).and_then(|ivk| {
-            CtOption::new(IncomingViewingKey {
-                dk: DiversifierKey(bytes[..32].try_into().unwrap()),
-                ivk
-            }, 1.into())
+            CtOption::new(
+                IncomingViewingKey {
+                    dk: DiversifierKey(bytes[..32].try_into().unwrap()),
+                    ivk,
+                },
+                1.into(),
+            )
         })
     }
 
     /// Encodes this Incoming Viewing Key as Bech32m
-    pub fn to_bech32m(&self) -> Result<String, bech32::Error>
-    {
+    pub fn to_bech32m(&self) -> Result<String, bech32::Error> {
         bech32::encode("ivk", self.to_bytes().to_base32(), Variant::Bech32m)
     }
 
@@ -378,16 +385,18 @@ impl IncomingViewingKey {
                 s.len()
             ));
         }
-        let (hrp, data, variant) = bech32::decode(s)
-            .map_err(|e| format!("bech32 decode failed: {}", e))?;
+        let (hrp, data, variant) =
+            bech32::decode(s).map_err(|e| format!("bech32 decode failed: {}", e))?;
         if hrp != "ivk" {
             return Err(format!("unexpected HRP '{}', expected 'ivk'", hrp).into());
         }
         if variant != bech32::Variant::Bech32m {
-            return Err(format!("unexpected bech32 variant {:?}, expected Bech32m", variant).into());
+            return Err(
+                format!("unexpected bech32 variant {:?}, expected Bech32m", variant).into(),
+            );
         }
-        let decoded = Vec::<u8>::from_base32(&data)
-            .map_err(|e| format!("base32 decoding failed: {}", e))?;
+        let decoded =
+            Vec::<u8>::from_base32(&data).map_err(|e| format!("base32 decoding failed: {}", e))?;
         if decoded.len() < 64 {
             return Err(format!(
                 "from_bech32m: incorrect length, got {} bytes, expected at least 64",
@@ -406,7 +415,6 @@ impl IncomingViewingKey {
             Err("from_bech32m: invalid byte data for viewing key".to_string())
         }
     }
-    
 
     /// Returns the payment address for this key corresponding to the given diversifier.
     pub fn to_payment_address(&self, d: Diversifier) -> Option<Address> {
@@ -416,8 +424,7 @@ impl IncomingViewingKey {
     }
 }
 
-impl Serialize for IncomingViewingKey
-{
+impl Serialize for IncomingViewingKey {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -435,7 +442,10 @@ impl<'de> Deserialize<'de> for IncomingViewingKey {
     where
         D: Deserializer<'de>,
     {
-        enum Field { Dk, Ivk }
+        enum Field {
+            Dk,
+            Ivk,
+        }
 
         impl<'de> Deserialize<'de> for Field {
             fn deserialize<D>(deserializer: D) -> Result<Field, D::Error>
@@ -480,15 +490,17 @@ impl<'de> Deserialize<'de> for IncomingViewingKey {
             where
                 V: SeqAccess<'de>,
             {
-                let dk: String = seq.next_element()?
+                let dk: String = seq
+                    .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(0, &self))?;
-                let ivk: String = seq.next_element()?
+                let ivk: String = seq
+                    .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(1, &self))?;
                 let dk = hex::decode(dk).unwrap()[0..32].try_into().unwrap();
                 let ivk = hex::decode(ivk).unwrap()[0..32].try_into().unwrap();
-                Ok(IncomingViewingKey{
+                Ok(IncomingViewingKey {
                     dk: DiversifierKey::from_bytes(dk),
-                    ivk: jubjub::Fr::from_repr(ivk).unwrap()
+                    ivk: jubjub::Fr::from_repr(ivk).unwrap(),
                 })
             }
 
@@ -518,9 +530,9 @@ impl<'de> Deserialize<'de> for IncomingViewingKey {
                 let ivk: String = ivk.ok_or_else(|| de::Error::missing_field("ivk"))?;
                 let dk = hex::decode(dk).unwrap()[0..32].try_into().unwrap();
                 let ivk = hex::decode(ivk).unwrap()[0..32].try_into().unwrap();
-                Ok(IncomingViewingKey{
+                Ok(IncomingViewingKey {
                     dk: DiversifierKey::from_bytes(dk),
-                    ivk: jubjub::Fr::from_repr(ivk).unwrap()
+                    ivk: jubjub::Fr::from_repr(ivk).unwrap(),
                 })
             }
         }
@@ -821,8 +833,7 @@ impl EphemeralSecretKey {
 #[derive(Debug)]
 pub struct EphemeralPublicKey(jubjub::ExtendedPoint);
 
-impl EphemeralPublicKey
-{
+impl EphemeralPublicKey {
     #[allow(dead_code)]
     pub(crate) fn from_affine(epk: jubjub::AffinePoint) -> Self {
         EphemeralPublicKey(epk.into())
@@ -859,8 +870,7 @@ impl PreparedEphemeralPublicKey {
 #[derive(Debug)]
 pub struct SharedSecret(jubjub::SubgroupPoint);
 
-impl SharedSecret
-{
+impl SharedSecret {
     /// Defined in [Zcash Protocol Spec § 5.4.5.4: Sapling Key Agreement][concretesaplingkdf].
     ///
     /// [concretesaplingkdf]: https://zips.z.cash/protocol/protocol.pdf#concretesaplingkdf
@@ -890,7 +900,7 @@ impl SharedSecret
 mod tests {
     use group::{Group, GroupEncoding};
 
-    use super::{FullViewingKey, DiversifierIndex, SpendingKey};
+    use super::{DiversifierIndex, FullViewingKey, SpendingKey};
     use crate::{constants::SPENDING_KEY_GENERATOR, keys::IncomingViewingKey};
 
     #[test]
@@ -917,15 +927,13 @@ mod tests {
     }
 
     #[test]
-    fn derive_addresses()
-    {
+    fn derive_addresses() {
         let sk_alice = SpendingKey::from_seed(b"This is Alice seed string! Usually this is just a listing of words. Here we just use sentences.");
         let fvk_alice = FullViewingKey::from_spending_key(&sk_alice);
 
         let mut i = 0;
         let mut d = DiversifierIndex::from(0u64);
-        while i < 100
-        {
+        while i < 100 {
             let a;
             (d, a) = fvk_alice.find_address(d).unwrap();
             let du: u64 = d.try_into().unwrap();
@@ -936,8 +944,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ivk_serde()
-    {
+    fn test_ivk_serde() {
         let sk = SpendingKey::from_seed(b"This is Alice seed string! Usually this is just a listing of words. Here we just use sentences.");
         let fvk = FullViewingKey::from_spending_key(&sk);
         let ivk = IncomingViewingKey::from_fvk(&fvk);

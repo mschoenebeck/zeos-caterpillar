@@ -1,11 +1,11 @@
-use core::iter;
-use bitvec::{array::BitArray, order::Lsb0};
-use group::ff::PrimeField;
-use subtle::{ConstantTimeEq, CtOption};
 use crate::{
     pedersen_hash::Personalization,
-    spec::{extract_p, windowed_pedersen_commit}
+    spec::{extract_p, windowed_pedersen_commit},
 };
+use bitvec::{array::BitArray, order::Lsb0};
+use core::iter;
+use group::ff::PrimeField;
+use subtle::{ConstantTimeEq, CtOption};
 
 /// The trapdoor for a Sapling note commitment.
 #[derive(Clone, Debug)]
@@ -15,8 +15,7 @@ pub struct NoteCommitTrapdoor(pub jubjub::Fr);
 #[derive(Clone, Debug)]
 pub struct NoteCommitment(pub jubjub::SubgroupPoint);
 
-impl NoteCommitment
-{
+impl NoteCommitment {
     /// $NoteCommit^Sapling$.
     ///
     /// Defined in [Zcash Protocol Spec § 5.4.8.2: Windowed Pedersen commitments][concretewindowedcommit].
@@ -30,15 +29,30 @@ impl NoteCommitment
         symbol: u64,
         code: u64,
         rcm: NoteCommitTrapdoor,
-    ) -> Self
-    {
+    ) -> Self {
         NoteCommitment(windowed_pedersen_commit(
             Personalization::NoteCommitment,
             iter::empty()
-                .chain(BitArray::<_, Lsb0>::new(account.to_le_bytes()).iter().by_vals())
-                .chain(BitArray::<_, Lsb0>::new(value.to_le_bytes()).iter().by_vals())
-                .chain(BitArray::<_, Lsb0>::new(symbol.to_le_bytes()).iter().by_vals())
-                .chain(BitArray::<_, Lsb0>::new(code.to_le_bytes()).iter().by_vals())
+                .chain(
+                    BitArray::<_, Lsb0>::new(account.to_le_bytes())
+                        .iter()
+                        .by_vals(),
+                )
+                .chain(
+                    BitArray::<_, Lsb0>::new(value.to_le_bytes())
+                        .iter()
+                        .by_vals(),
+                )
+                .chain(
+                    BitArray::<_, Lsb0>::new(symbol.to_le_bytes())
+                        .iter()
+                        .by_vals(),
+                )
+                .chain(
+                    BitArray::<_, Lsb0>::new(code.to_le_bytes())
+                        .iter()
+                        .by_vals(),
+                )
                 .chain(BitArray::<_, Lsb0>::new(g_d).iter().by_vals())
                 .chain(BitArray::<_, Lsb0>::new(pk_d).iter().by_vals()),
             rcm.0,

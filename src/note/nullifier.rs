@@ -1,35 +1,37 @@
-use core::iter;
-use rand_core::RngCore;
-use bitvec::{array::BitArray, order::Lsb0};
-use subtle::{ConstantTimeEq, CtOption};
-use group::{ff::PrimeField, GroupEncoding};
 use super::NoteCommitment;
 use crate::{
     keys::NullifierDerivingKey,
     pedersen_hash::{pedersen_hash, Personalization},
-    spec::{mixing_pedersen_hash, extract_p},
+    spec::{extract_p, mixing_pedersen_hash},
 };
+use bitvec::{array::BitArray, order::Lsb0};
+use core::iter;
+use group::{ff::PrimeField, GroupEncoding};
+use rand_core::RngCore;
+use subtle::{ConstantTimeEq, CtOption};
 
 /// Typesafe wrapper for nullifier values.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Nullifier(pub jubjub::SubgroupPoint);
 
-impl Nullifier
-{
+impl Nullifier {
     pub fn derive(
         nk: &NullifierDerivingKey,
         cm: NoteCommitment,
         position: u64,
         //rho: ExtractedNullifier
-    ) -> Self
-    {
+    ) -> Self {
         let rho_mix = mixing_pedersen_hash(cm.0, position);
         Nullifier(pedersen_hash(
             Personalization::Nullifier,
             iter::empty()
                 .chain(BitArray::<_, Lsb0>::new(nk.0.to_bytes()).iter().by_vals())
-                .chain(BitArray::<_, Lsb0>::new(rho_mix.to_bytes()).iter().by_vals()),
-                //.chain(BitArray::<_, Lsb0>::new(rho.to_bytes()).iter().by_vals())
+                .chain(
+                    BitArray::<_, Lsb0>::new(rho_mix.to_bytes())
+                        .iter()
+                        .by_vals(),
+                ),
+            //.chain(BitArray::<_, Lsb0>::new(rho.to_bytes()).iter().by_vals())
         ))
     }
 
@@ -38,8 +40,7 @@ impl Nullifier
         Nullifier(pedersen_hash(Personalization::Nullifier, bits))
     }
 
-    pub fn extract(&self) -> ExtractedNullifier
-    {
+    pub fn extract(&self) -> ExtractedNullifier {
         ExtractedNullifier(extract_p(&self.0))
     }
 }

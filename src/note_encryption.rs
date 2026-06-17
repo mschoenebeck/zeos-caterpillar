@@ -19,24 +19,19 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
-use core::fmt;
-use chacha20poly1305::{
-    aead::AeadInPlace,
-    ChaCha20Poly1305,
-    KeyInit
-};
-use std::io::{self, Read, Write};
-use base64::{engine::general_purpose, Engine as _};
 use crate::{
+    eosio::{ExtendedAsset, Symbol},
     note::Note,
-    eosio::{Symbol, ExtendedAsset}
 };
+use base64::{engine::general_purpose, Engine as _};
+use chacha20poly1305::{aead::AeadInPlace, ChaCha20Poly1305, KeyInit};
+use core::fmt;
 use rand_core::RngCore;
+use std::io::{self, Read, Write};
 use subtle::{Choice, ConstantTimeEq};
 
 /// The size of [`NotePlaintextBytes`].
-pub const NOTE_PLAINTEXT_SIZE: usize = 
-    8  + // header
+pub const NOTE_PLAINTEXT_SIZE: usize = 8  + // header
     11 + // diversifier
     8  + // account
     8  + // value
@@ -46,9 +41,8 @@ pub const NOTE_PLAINTEXT_SIZE: usize =
 //    32 + // rho
     512; // memo
 /// The size of [`OutPlaintextBytes`].
-pub const OUT_PLAINTEXT_SIZE: usize = 
-    32 + // pk_d
-    32;  // esk
+pub const OUT_PLAINTEXT_SIZE: usize = 32 + // pk_d
+    32; // esk
 const AEAD_TAG_SIZE: usize = 16;
 /// The size of an encrypted note plaintext.
 pub const ENC_CIPHERTEXT_SIZE: usize = NOTE_PLAINTEXT_SIZE + AEAD_TAG_SIZE;
@@ -77,21 +71,18 @@ impl fmt::Debug for TransmittedNoteCiphertext {
     }
 }
 
-impl TransmittedNoteCiphertext
-{
+impl TransmittedNoteCiphertext {
     ///
-    pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()>
-    {
-        writer.write_all(self.epk_bytes.as_ref())?;         // 32
-        writer.write_all(self.enc_ciphertext.as_ref())?;    // ENC_CIPHERTEXT_SIZE
-        writer.write_all(self.out_ciphertext.as_ref())?;    // OUT_CIPHERTEXT_SIZE
+    pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
+        writer.write_all(self.epk_bytes.as_ref())?; // 32
+        writer.write_all(self.enc_ciphertext.as_ref())?; // ENC_CIPHERTEXT_SIZE
+        writer.write_all(self.out_ciphertext.as_ref())?; // OUT_CIPHERTEXT_SIZE
 
         Ok(())
     }
 
     ///
-    pub fn read<R: Read>(mut reader: R) -> io::Result<Self>
-    {
+    pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
         let mut epk_bytes = [0; 32];
         reader.read_exact(&mut epk_bytes)?;
         let mut enc_ciphertext = [0; ENC_CIPHERTEXT_SIZE];
@@ -99,32 +90,28 @@ impl TransmittedNoteCiphertext
         let mut out_ciphertext = [0; OUT_CIPHERTEXT_SIZE];
         reader.read_exact(&mut out_ciphertext)?;
 
-        Ok(TransmittedNoteCiphertext{
+        Ok(TransmittedNoteCiphertext {
             epk_bytes,
             enc_ciphertext,
-            out_ciphertext
+            out_ciphertext,
         })
     }
 
     ///
-    pub fn to_base64(&self) -> String
-    {
+    pub fn to_base64(&self) -> String {
         let mut data = vec![];
         let _ = self.write(&mut data);
         general_purpose::STANDARD.encode(&data)
     }
 
     ///
-    pub fn from_base64(b64: &String) -> Option<TransmittedNoteCiphertext>
-    {
+    pub fn from_base64(b64: &String) -> Option<TransmittedNoteCiphertext> {
         let data = general_purpose::STANDARD.decode(b64);
-        if data.is_err()
-        {
+        if data.is_err() {
             return None;
         }
         let tnc = TransmittedNoteCiphertext::read(data.unwrap().as_slice());
-        if tnc.is_err()
-        {
+        if tnc.is_err() {
             return None;
         }
         Some(tnc.unwrap())
@@ -205,10 +192,7 @@ pub struct NoteEncryption {
 impl NoteEncryption {
     /// Construct a new note encryption context for the specified note,
     /// recipient, and memo.
-    pub fn new(
-        ovk: Option<OutgoingViewingKey>,
-        note: Note,
-    ) -> Self {
+    pub fn new(ovk: Option<OutgoingViewingKey>, note: Note) -> Self {
         let esk = derive_esk(&note).expect("ZIP 212 is active.");
         NoteEncryption {
             epk: ka_derive_public(&note, &esk),
@@ -250,10 +234,7 @@ impl NoteEncryption {
     }
 
     /// Generates `outCiphertext` for this note.
-    pub fn encrypt_outgoing_plaintext<R: RngCore>(
-        &self,
-        rng: &mut R,
-    ) -> [u8; OUT_CIPHERTEXT_SIZE] {
+    pub fn encrypt_outgoing_plaintext<R: RngCore>(&self, rng: &mut R) -> [u8; OUT_CIPHERTEXT_SIZE] {
         let (ock, input) = if let Some(ovk) = &self.ovk {
             let ock = derive_ock(ovk, &epk_bytes(&self.epk));
             let input = outgoing_plaintext_bytes(&self.note, &self.esk);
@@ -322,11 +303,7 @@ fn try_note_decryption_inner(
         )
         .ok()?;
 
-    let note = parse_note_plaintext_ivk(
-        ivk,
-        ephemeral_key,
-        &plaintext.0,
-    )?;
+    let note = parse_note_plaintext_ivk(ivk, ephemeral_key, &plaintext.0)?;
 
     Some(note)
 }
@@ -345,10 +322,7 @@ fn parse_note_plaintext_ivk(
     }
 }
 
-fn check_note_validity(
-    note: &Note,
-    ephemeral_key: &EphemeralKeyBytes,
-) -> NoteValidity {
+fn check_note_validity(note: &Note, ephemeral_key: &EphemeralKeyBytes) -> NoteValidity {
     if let Some(derived_esk) = derive_esk(note) {
         if epk_bytes(&ka_derive_public(&note, &derived_esk))
             .ct_eq(&ephemeral_key)
@@ -443,31 +417,26 @@ pub fn try_output_recovery_with_ock(
         }
     }
 
-    if let NoteValidity::Valid =
-        check_note_validity(&note, &ephemeral_key)
-    {
+    if let NoteValidity::Valid = check_note_validity(&note, &ephemeral_key) {
         Some(note)
     } else {
         None
     }
 }
 
-
-
-
 // ! In-band secret distribution for Orchard bundles.
 use blake2b_simd::{Hash, Params};
 use group::ff::PrimeField;
 
 use crate::{
+    address::Address,
+    eosio::{Asset, Name},
     keys::{
         DiversifiedTransmissionKey, Diversifier, EphemeralPublicKey, EphemeralSecretKey,
         OutgoingViewingKey, PreparedEphemeralPublicKey, PreparedIncomingViewingKey, SharedSecret,
     },
     note::Rseed,
     spec::diversify_hash,
-    address::Address,
-    eosio::{Asset, Name}
 };
 
 ///
@@ -495,10 +464,7 @@ pub(crate) fn prf_ock_orchard(
     )
 }
 
-fn orchard_parse_note_plaintext<F>(
-    plaintext: &[u8],
-    get_validated_pk_d: F,
-) -> Option<Note>
+fn orchard_parse_note_plaintext<F>(plaintext: &[u8], get_validated_pk_d: F) -> Option<Note>
 where
     F: FnOnce(&Diversifier) -> Option<DiversifiedTransmissionKey>,
 {
@@ -527,7 +493,9 @@ where
 
     let pk_d = get_validated_pk_d(&diversifier)?;
     let recipient = Address::from_parts(diversifier, pk_d)?;
-    Some(Note::from_parts(header, recipient, account, asset, rseed, memo))
+    Some(Note::from_parts(
+        header, recipient, account, asset, rseed, memo,
+    ))
 }
 
 /// Derives the `EphemeralSecretKey` corresponding to this note.
@@ -550,18 +518,12 @@ fn prepare_epk(epk: EphemeralPublicKey) -> PreparedEphemeralPublicKey {
 }
 
 /// Derives `EphemeralPublicKey` from `esk` and the note's diversifier.
-pub fn ka_derive_public(
-    note: &Note,
-    esk: &EphemeralSecretKey,
-) -> EphemeralPublicKey{
+pub fn ka_derive_public(note: &Note, esk: &EphemeralSecretKey) -> EphemeralPublicKey {
     esk.derive_public(note.address().g_d().into())
 }
 
 /// Derives the `SharedSecret` from the sender's information during note encryption.
-fn ka_agree_enc(
-    esk: &EphemeralSecretKey,
-    pk_d: &DiversifiedTransmissionKey,
-) -> SharedSecret {
+fn ka_agree_enc(esk: &EphemeralSecretKey, pk_d: &DiversifiedTransmissionKey) -> SharedSecret {
     esk.agree(pk_d)
 }
 
@@ -569,7 +531,7 @@ fn ka_agree_enc(
 /// decryption.
 fn ka_agree_dec(
     ivk: &PreparedIncomingViewingKey,
-    epk: &PreparedEphemeralPublicKey
+    epk: &PreparedEphemeralPublicKey,
 ) -> SharedSecret {
     epk.agree(ivk)
 }
@@ -592,9 +554,7 @@ fn kdf(secret: SharedSecret, ephemeral_key: &EphemeralKeyBytes) -> Hash {
 /// Encodes the given `Note` and `Memo` as a note plaintext.
 ///
 /// [`zcash_primitives` has been refactored]: https://github.com/zcash/librustzcash/issues/454
-fn note_plaintext_bytes(
-    note: &Note,
-) -> NotePlaintextBytes {
+fn note_plaintext_bytes(note: &Note) -> NotePlaintextBytes {
     let mut np = [0; NOTE_PLAINTEXT_SIZE];
     np[0..8].copy_from_slice(&note.header().to_le_bytes());
     np[8..19].copy_from_slice(&note.address().diversifier().0);
@@ -609,18 +569,12 @@ fn note_plaintext_bytes(
 
 /// Derives the [`OutgoingCipherKey`] for an encrypted note, given the note-specific
 /// public data and an `OutgoingViewingKey`.
-fn derive_ock(
-    ovk: &OutgoingViewingKey,
-    ephemeral_key: &EphemeralKeyBytes,
-) -> OutgoingCipherKey {
+fn derive_ock(ovk: &OutgoingViewingKey, ephemeral_key: &EphemeralKeyBytes) -> OutgoingCipherKey {
     prf_ock_orchard(ovk, ephemeral_key)
 }
 
 /// Encodes the outgoing plaintext for the given note.
-fn outgoing_plaintext_bytes(
-    note: &Note,
-    esk: &EphemeralSecretKey,
-) -> OutPlaintextBytes {
+fn outgoing_plaintext_bytes(note: &Note, esk: &EphemeralSecretKey) -> OutPlaintextBytes {
     let mut op = [0; OUT_PLAINTEXT_SIZE];
     op[..32].copy_from_slice(&note.address().pk_d().to_bytes());
     op[32..].copy_from_slice(&esk.0.to_repr());
@@ -718,18 +672,17 @@ fn extract_esk(out_plaintext: &OutPlaintextBytes) -> Option<EphemeralSecretKey> 
 
 #[cfg(test)]
 mod tests {
-    use rand::rngs::OsRng;
-    use super::{try_note_decryption, try_output_recovery_with_ovk};
     use super::{derive_esk, ka_derive_public, NoteEncryption, TransmittedNoteCiphertext};
+    use super::{try_note_decryption, try_output_recovery_with_ovk};
     use crate::{
-        keys::{PreparedIncomingViewingKey, SpendingKey, FullViewingKey},
+        eosio::{ExtendedAsset, Name},
+        keys::{FullViewingKey, PreparedIncomingViewingKey, SpendingKey},
         note::{Note, Rseed},
-        eosio::{ExtendedAsset, Name}
     };
+    use rand::rngs::OsRng;
 
     #[test]
-    fn test_key_derivation_and_encryption()
-    {
+    fn test_key_derivation_and_encryption() {
         let mut rng = OsRng.clone();
 
         // Alice' key material
@@ -737,7 +690,8 @@ mod tests {
         let fvk_alice = FullViewingKey::from_spending_key(&sk_alice);
 
         // Bob's key material
-        let sk_bob = SpendingKey::from_seed(b"This is Bob's seed string. His seed is a little shorter...");
+        let sk_bob =
+            SpendingKey::from_seed(b"This is Bob's seed string. His seed is a little shorter...");
         let fvk_bob = FullViewingKey::from_spending_key(&sk_bob);
         let recipient = fvk_bob.default_address().1;
 
@@ -748,13 +702,13 @@ mod tests {
             Name(0),
             ExtendedAsset::from_string(&"10.0000 ZEOS@thezeostoken".to_string()).unwrap(),
             Rseed([42; 32]),
-            [0; 512]
+            [0; 512],
         );
 
         // the ephermeral key pair which is used for encryption/decryption is derived deterministically from the note
         let esk = derive_esk(&note).unwrap();
         let epk = ka_derive_public(&note, &esk);
-        
+
         let ne = NoteEncryption::new(Some(fvk_alice.ovk), note.clone());
         // a dummy action to test encryption/decryption
         let encrypted_note = TransmittedNoteCiphertext {
@@ -768,7 +722,10 @@ mod tests {
         let encrypted_note = TransmittedNoteCiphertext::from_base64(&b64_str).unwrap();
 
         // test receiver decryption
-        match try_note_decryption(&PreparedIncomingViewingKey::new(&fvk_bob.ivk()), &encrypted_note) {
+        match try_note_decryption(
+            &PreparedIncomingViewingKey::new(&fvk_bob.ivk()),
+            &encrypted_note,
+        ) {
             Some(decrypted_note) => assert_eq!(decrypted_note, note),
             None => panic!("Note decryption failed"),
         }
@@ -781,8 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decryption()
-    {
+    fn test_decryption() {
         let sk = SpendingKey::from_seed(b"army add gossip wrist squeeze chronic simple gold like island wheel north cave praise buddy shine monitor damp into another expose tortoise educate army");
         let fvk = FullViewingKey::from_spending_key(&sk);
         println!("{}", fvk.default_address().1.to_bech32m().unwrap());
@@ -791,9 +747,12 @@ mod tests {
             "xcxVNdFTYJ/aiqBrbucv+i5zxeDkPqKuEidGWdBfl237UVOgs1lhCfLoi4FS5K1ZEOUpnxEtkL+nlQ9vNmMEqkzOd42QvPugF6UTvpdsASykUWRWEhuAQbooh8HCq2IPL5z/+e0eVLOtCjO26aOMj0jug5Ms8FHMLQNo/VbdxPeQnGebXDRwwZegd6hFj2mhzQ/GbnyJT3Va7UHhgYC0aVpkOlnxoZ5L2rTzfSlmIfkooEJB+Gs2nyIxYFJk7SpjAP8UJuWfl6w0bE/LstpEREDdvsNV4kPiVKWh5MDUGjJk6AO8r26hwHjsZf+g2zWaw/wZzLBddZ/wwC0jRMfa4A3CeSTOcIeLLFdssV7ZUDiJ70Bn3CYQ2YvjKC5rr74o87lQxkX8nZL1PTCUiBE0lrNDMNJMGZcDFVXUYMIzakiRML+8iqrM1LF4a2yVKYy237lOQ/3eax3X0/IpCgDQdRcQDSH/5/r6tSeuqy4R7yxIVDdbboeAlh4UZEcA1XogoIR3TS86BLy2ok0WvTh35Cs3vDTGK4/t93XqINbi2Oygftq2PQB+ZtmAub0VH9sZ3u7H5MA37d7AgoSgRoga54jE6i1VYRcUHj4ME+UMamp6mSEIPapvgrT9dcM00Rps+B8OOqqcelUUZU1QN9BZlchbxF7XoHLjTAiMgXA+7XU59oYTDPdvk3IBystSQtCa+t2lXBFuSPUBm0VPSy1oo7nbMDGWLocENE2R85Xis8cKsG64dLJzcbBG6d2wAdba4OWFuT7rTHc3YdCpj01CQmFp51iGYzqKXhXnvN1gosgFGR7yn9ulIOtbMWc6/kIj3u4zRSDrmmTFlaYau92NEwJu8vxI6Dq6mBlyKrTWqpYZuTMqPpSaNOp7ltSlj+BwfB2u/VWbRPM3UTAvbFglZV0embmqSlKOuQwZqoEV4J/KKMLIKknAXV7tTeITH520C7Rh".to_string()
         ];
         let encrypted_note = TransmittedNoteCiphertext::from_base64(&note_ct[0]).unwrap();
-        
+
         // test receiver decryption
-        match try_note_decryption(&PreparedIncomingViewingKey::new(&fvk.ivk()), &encrypted_note) {
+        match try_note_decryption(
+            &PreparedIncomingViewingKey::new(&fvk.ivk()),
+            &encrypted_note,
+        ) {
             Some(decrypted_note) => println!("{}", serde_json::to_string(&decrypted_note).unwrap()),
             None => panic!("Note decryption failed"),
         }

@@ -81,6 +81,5 @@ pub fn engine_scalar_to_fq(s: crate::engine::Scalar) -> Fq {
     let b = crate::engine::scalar_to_canonical_bytes(&s);
     let mut repr = <Fq as PrimeField>::Repr::default();
     repr.as_mut().copy_from_slice(&b);
-    Option::from(Fq::from_repr(repr))
-        .expect("engine::Scalar must decode into jubjub::Fq")
+    Option::from(Fq::from_repr(repr)).expect("engine::Scalar must decode into jubjub::Fq")
 }

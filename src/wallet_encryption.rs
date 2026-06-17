@@ -123,7 +123,10 @@ pub fn encrypt_wallet_bytes(
     Ok(out)
 }
 
-pub fn decrypt_wallet_bytes(encrypted: &[u8], password: &[u8]) -> Result<Vec<u8>, WalletCryptoError> {
+pub fn decrypt_wallet_bytes(
+    encrypted: &[u8],
+    password: &[u8],
+) -> Result<Vec<u8>, WalletCryptoError> {
     let (version, kdf, salt, nonce, ciphertext) = parse_header(encrypted)?;
 
     if version != WALLET_VERSION {
@@ -147,7 +150,12 @@ pub fn decrypt_wallet_bytes(encrypted: &[u8], password: &[u8]) -> Result<Vec<u8>
         .map_err(|_| WalletCryptoError::DecryptFailed)
 }
 
-fn build_aad(version: u8, kdf: &KdfParams, salt: &[u8; SALT_LEN], nonce: &[u8; NONCE_LEN]) -> Vec<u8> {
+fn build_aad(
+    version: u8,
+    kdf: &KdfParams,
+    salt: &[u8; SALT_LEN],
+    nonce: &[u8; NONCE_LEN],
+) -> Vec<u8> {
     let mut aad = Vec::with_capacity(1 + 1 + 12 + SALT_LEN + NONCE_LEN);
     aad.push(version);
     aad.push(KDF_ARGON2ID);

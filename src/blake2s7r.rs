@@ -19,7 +19,7 @@
 //! assert_eq!("ee7e3facc558f9f37ac71ce1784cabc1", &hash.to_hex());
 //! ```
 
-use arrayref::{array_refs, mut_array_refs, array_ref};
+use arrayref::{array_ref, array_refs, mut_array_refs};
 use core::cmp;
 use core::fmt;
 use core::mem::size_of;
@@ -68,7 +68,6 @@ impl Implementation {
             }
         }
     }
-
 }
 
 // Finalize could just be a bool, but this is easier to read at callsites.
@@ -919,14 +918,13 @@ pub fn compress1_loop(
 }
 
 #[test]
-pub fn test_blake2s7r()
-{
+pub fn test_blake2s7r() {
     use {blake2s7r, Params};
-    
+
     let expected = "b763fe1b196c46e129acf0a6e723420232f5804062db91dd0f51a9b65f2d59bf";
     let hash = blake2s7r(b"foo");
     assert_eq!(expected, &hash.to_hex());
-    
+
     let hash = Params::new()
         .hash_length(16)
         .key(b"Squeamish Ossifrage")
@@ -940,17 +938,19 @@ pub fn test_blake2s7r()
 }
 
 #[test]
-pub fn test_blake2s7r_blank_hash()
-{
+pub fn test_blake2s7r_blank_hash() {
     use Params;
-    
+
     let hash = Params::new()
         .hash_length(32)
         .key(b"")
         .personal(b"12345678")
         .to_state()
         .finalize();
-    assert_eq!("5f498b5a48f35ac196750ee10a4076fbe9d37157b03649aad426d4c6a1035310", &hash.to_hex());
+    assert_eq!(
+        "5f498b5a48f35ac196750ee10a4076fbe9d37157b03649aad426d4c6a1035310",
+        &hash.to_hex()
+    );
 }
 
 #[test]
@@ -967,7 +967,10 @@ fn test_blake2s7r_256_vars() {
         .to_state()
         .update(&data)
         .finalize();
-    assert_eq!("362215da919104ccbc728cbda275d4be642b6e80761cdea273ec56e3406fd55e", &hash.to_hex());
+    assert_eq!(
+        "362215da919104ccbc728cbda275d4be642b6e80761cdea273ec56e3406fd55e",
+        &hash.to_hex()
+    );
 }
 
 #[test]
@@ -984,5 +987,8 @@ fn test_blake2s7r_700_vars() {
         .to_state()
         .update(&data)
         .finalize();
-    assert_eq!("da0c0745e31c2abf07ed24c3be0a5f3f37d5f882e45372e316fa7a79308d38df", &hash.to_hex());
+    assert_eq!(
+        "da0c0745e31c2abf07ed24c3be0a5f3f37d5f882e45372e316fa7a79308d38df",
+        &hash.to_hex()
+    );
 }

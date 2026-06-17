@@ -1,17 +1,21 @@
-use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
-use group::GroupEncoding;
-use rand_core::RngCore;
-use serde::{Serialize, Serializer, Deserialize, ser::SerializeStruct, Deserializer, de::Visitor, de::SeqAccess, de::MapAccess, de};
-use std::fmt;
-use std::io::{self, Read, Write};
+use crate::constants::{MERKLE_TREE_DEPTH, RSEED_PERSONALIZATION};
 use crate::eosio::Asset;
 use crate::{
+    address::Address,
     eosio::{ExtendedAsset, Name, Symbol},
-    keys::{EphemeralSecretKey, NullifierDerivingKey, SpendingKey, FullViewingKey, prf_expand},
-    note::nullifier::Nullifier, address::Address,
+    keys::{prf_expand, EphemeralSecretKey, FullViewingKey, NullifierDerivingKey, SpendingKey},
+    note::nullifier::Nullifier,
 };
-use crate::constants::{MERKLE_TREE_DEPTH, RSEED_PERSONALIZATION};
 use blake2s_simd::Params as Blake2sParams;
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use group::GroupEncoding;
+use rand_core::RngCore;
+use serde::{
+    de, de::MapAccess, de::SeqAccess, de::Visitor, ser::SerializeStruct, Deserialize, Deserializer,
+    Serialize, Serializer,
+};
+use std::fmt;
+use std::io::{self, Read, Write};
 
 mod commitment;
 pub use self::commitment::{ExtractedNoteCommitment, NoteCommitment};
@@ -25,10 +29,8 @@ pub(super) mod nullifier;
 #[derive(Copy, Clone, Debug)]
 pub struct Rseed(pub [u8; 32]);
 
-impl Rseed
-{
-    pub fn new(rng: &mut impl RngCore) -> Self
-    {
+impl Rseed {
+    pub fn new(rng: &mut impl RngCore) -> Self {
         let mut bytes = [0; 32];
         rng.fill_bytes(&mut bytes);
         Rseed(bytes)
@@ -51,7 +53,9 @@ impl Rseed
     ///
     /// [saplingsend]: https://zips.z.cash/protocol/protocol.pdf#saplingsend
     pub(crate) fn rcm(&self) -> commitment::NoteCommitTrapdoor {
-        commitment::NoteCommitTrapdoor(jubjub::Fr::from_bytes_wide(prf_expand(&self.0, &[0x04]).as_array()))
+        commitment::NoteCommitTrapdoor(jubjub::Fr::from_bytes_wide(
+            prf_expand(&self.0, &[0x04]).as_array(),
+        ))
     }
 }
 
@@ -65,8 +69,7 @@ pub fn memo_to_bytes<S: AsRef<str>>(memo: S) -> [u8; 512] {
 
 /// A discrete amount of funds or an NFT received by an address.
 #[derive(Clone, Debug)]
-pub struct Note
-{
+pub struct Note {
     /// The header field
     header: u64,
     /// The recipient of the funds.
@@ -118,16 +121,15 @@ impl Note {
         account: Name,
         asset: ExtendedAsset,
         rseed: Rseed,
-        memo: [u8; 512]
-    ) -> Self
-    {
+        memo: [u8; 512],
+    ) -> Self {
         Note {
             header,
             address: recipient,
             account,
             asset,
             rseed,
-            memo
+            memo,
         }
     }
 
@@ -149,46 +151,51 @@ impl Note {
             account.unwrap_or_else(|| Name(0)),
             asset.unwrap_or_else(|| ExtendedAsset::new(Asset::new(0, Symbol(0)).unwrap(), Name(0))),
             Rseed(bytes),
-            [0; 512]
+            [0; 512],
         );
 
         (sk, fvk, note)
     }
 
-    pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()>
-    {
-        writer.write_u64::<LittleEndian>(self.header)?;                             // 8
-        writer.write_all(self.address.to_bytes().as_ref())?;                    // 43
-        writer.write_u64::<LittleEndian>(self.account().raw())?;                    // 8
-        // For notes, we enforce non-negative amounts (commitments expect that).
+    pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
+        writer.write_u64::<LittleEndian>(self.header)?; // 8
+        writer.write_all(self.address.to_bytes().as_ref())?; // 43
+        writer.write_u64::<LittleEndian>(self.account().raw())?; // 8
+                                                                 // For notes, we enforce non-negative amounts (commitments expect that).
         let amt = self.asset.quantity().amount();
         if amt < 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "note amount must be non-negative"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "note amount must be non-negative",
+            ));
         }
-        writer.write_u64::<LittleEndian>(amt as u64)?;                              // 8
-        writer.write_u64::<LittleEndian>(self.asset.quantity().symbol().raw())?;    // 8
-        writer.write_u64::<LittleEndian>(self.asset.contract().raw())?;             // 8
-        writer.write_all(self.rseed.0.as_ref())?;                               // 32
-        writer.write_all(self.memo.as_ref())?;                                  // 512
+        writer.write_u64::<LittleEndian>(amt as u64)?; // 8
+        writer.write_u64::<LittleEndian>(self.asset.quantity().symbol().raw())?; // 8
+        writer.write_u64::<LittleEndian>(self.asset.contract().raw())?; // 8
+        writer.write_all(self.rseed.0.as_ref())?; // 32
+        writer.write_all(self.memo.as_ref())?; // 512
 
         Ok(()) // 627 bytes total
     }
 
-    pub fn read<R: Read>(mut reader: R) -> io::Result<Self>
-    {
+    pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
         let header = reader.read_u64::<LittleEndian>()?;
         // address (43 bytes)
         let mut recipient = [0u8; 43];
         reader.read_exact(&mut recipient)?;
-        let recipient = Address::from_bytes(&recipient)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("invalid address: {e}")))?;
+        let recipient = Address::from_bytes(&recipient).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("invalid address: {e}"))
+        })?;
         // account
         let account_raw = reader.read_u64::<LittleEndian>()?;
         let account = Name(account_raw);
         // amount (stored as u64; must fit into i64 if you want to build an Asset)
         let amount_u64 = reader.read_u64::<LittleEndian>()?;
         if amount_u64 > i64::MAX as u64 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "amount exceeds i64::MAX"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "amount exceeds i64::MAX",
+            ));
         }
         let amount_i64 = amount_u64 as i64;
         // symbol
@@ -208,7 +215,9 @@ impl Note {
         let mut memo = [0u8; 512];
         reader.read_exact(&mut memo)?;
 
-        Ok(Note::from_parts(header, recipient, account, asset, rseed, memo))
+        Ok(Note::from_parts(
+            header, recipient, account, asset, rseed, memo,
+        ))
     }
 
     /// Returns the recipient of this note.
@@ -320,20 +329,21 @@ impl Note {
     /// Returns the derived `esk` if this note was created after ZIP 212 activated.
     pub fn esk(&self) -> EphemeralSecretKey {
         EphemeralSecretKey(jubjub::Fr::from_bytes_wide(
-                prf_expand(&self.rseed.0, &[0x05]).as_array(),
-            ))
+            prf_expand(&self.rseed.0, &[0x05]).as_array(),
+        ))
     }
 }
 
-impl Serialize for Note
-{
+impl Serialize for Note {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         // 6 is the number of fields in the struct.
         let mut state = serializer.serialize_struct("Note", 6)?;
-        let addr = self.address.to_bech32m()
+        let addr = self
+            .address
+            .to_bech32m()
             .map_err(serde::ser::Error::custom)?;
         state.serialize_field("header", &self.header)?;
         state.serialize_field("address", &addr)?;
@@ -350,7 +360,14 @@ impl<'de> Deserialize<'de> for Note {
     where
         D: Deserializer<'de>,
     {
-        enum Field { Header, Address, Account, Asset, RSeed, Memo }
+        enum Field {
+            Header,
+            Address,
+            Account,
+            Asset,
+            RSeed,
+            Memo,
+        }
 
         impl<'de> Deserialize<'de> for Field {
             fn deserialize<D2>(deserializer: D2) -> Result<Field, D2::Error>
@@ -364,14 +381,16 @@ impl<'de> Deserialize<'de> for Note {
                         f.write_str("`header` | `address` | `account` | `asset` | `rseed` | `memo`")
                     }
                     fn visit_str<E>(self, v: &str) -> Result<Field, E>
-                    where E: de::Error {
+                    where
+                        E: de::Error,
+                    {
                         match v {
-                            "header"  => Ok(Field::Header),
+                            "header" => Ok(Field::Header),
                             "address" => Ok(Field::Address),
                             "account" => Ok(Field::Account),
-                            "asset"   => Ok(Field::Asset),
-                            "rseed"   => Ok(Field::RSeed),
-                            "memo"    => Ok(Field::Memo),
+                            "asset" => Ok(Field::Asset),
+                            "rseed" => Ok(Field::RSeed),
+                            "memo" => Ok(Field::Memo),
                             _ => Err(de::Error::unknown_field(v, FIELDS)),
                         }
                     }
@@ -402,24 +421,53 @@ impl<'de> Deserialize<'de> for Note {
 
                 while let Some(key) = map.next_key()? {
                     match key {
-                        Field::Header  => { if header.is_some()  { return Err(de::Error::duplicate_field("header"));  } header  = Some(map.next_value()?); }
-                        Field::Address => { if address.is_some() { return Err(de::Error::duplicate_field("address")); } address = Some(map.next_value()?); }
-                        Field::Account => { if account.is_some() { return Err(de::Error::duplicate_field("account")); } account = Some(map.next_value()?); }
-                        Field::Asset   => { if asset.is_some()   { return Err(de::Error::duplicate_field("asset"));   } asset   = Some(map.next_value()?); }
-                        Field::RSeed   => { if rseed_hex.is_some(){ return Err(de::Error::duplicate_field("rseed"));   } rseed_hex= Some(map.next_value()?); }
-                        Field::Memo    => { if memo_hex.is_some(){ return Err(de::Error::duplicate_field("memo"));    } memo_hex = Some(map.next_value()?); }
+                        Field::Header => {
+                            if header.is_some() {
+                                return Err(de::Error::duplicate_field("header"));
+                            }
+                            header = Some(map.next_value()?);
+                        }
+                        Field::Address => {
+                            if address.is_some() {
+                                return Err(de::Error::duplicate_field("address"));
+                            }
+                            address = Some(map.next_value()?);
+                        }
+                        Field::Account => {
+                            if account.is_some() {
+                                return Err(de::Error::duplicate_field("account"));
+                            }
+                            account = Some(map.next_value()?);
+                        }
+                        Field::Asset => {
+                            if asset.is_some() {
+                                return Err(de::Error::duplicate_field("asset"));
+                            }
+                            asset = Some(map.next_value()?);
+                        }
+                        Field::RSeed => {
+                            if rseed_hex.is_some() {
+                                return Err(de::Error::duplicate_field("rseed"));
+                            }
+                            rseed_hex = Some(map.next_value()?);
+                        }
+                        Field::Memo => {
+                            if memo_hex.is_some() {
+                                return Err(de::Error::duplicate_field("memo"));
+                            }
+                            memo_hex = Some(map.next_value()?);
+                        }
                     }
                 }
 
-                let header  = header.ok_or_else(|| de::Error::missing_field("header"))?;
+                let header = header.ok_or_else(|| de::Error::missing_field("header"))?;
                 let address = address.ok_or_else(|| de::Error::missing_field("address"))?;
                 let account = account.ok_or_else(|| de::Error::missing_field("account"))?;
-                let asset   = asset.ok_or_else(|| de::Error::missing_field("asset"))?;
+                let asset = asset.ok_or_else(|| de::Error::missing_field("asset"))?;
                 let rseed_hex = rseed_hex.ok_or_else(|| de::Error::missing_field("rseed"))?;
-                let memo_hex  = memo_hex.ok_or_else(|| de::Error::missing_field("memo"))?;
+                let memo_hex = memo_hex.ok_or_else(|| de::Error::missing_field("memo"))?;
 
-                let addr = Address::from_bech32m(&address)
-                    .map_err(de::Error::custom)?;
+                let addr = Address::from_bech32m(&address).map_err(de::Error::custom)?;
 
                 let acct_name = Name::from_string(&account)
                     .map_err(|e| de::Error::custom(format!("invalid account: {e}")))?;
@@ -427,7 +475,10 @@ impl<'de> Deserialize<'de> for Note {
                 let rseed_vec = hex::decode(&rseed_hex)
                     .map_err(|e| de::Error::custom(format!("invalid rseed hex: {e}")))?;
                 if rseed_vec.len() != 32 {
-                    return Err(de::Error::custom(format!("rseed must be 32 bytes, got {}", rseed_vec.len())));
+                    return Err(de::Error::custom(format!(
+                        "rseed must be 32 bytes, got {}",
+                        rseed_vec.len()
+                    )));
                 }
                 let mut rseed = [0u8; 32];
                 rseed.copy_from_slice(&rseed_vec);
@@ -435,24 +486,46 @@ impl<'de> Deserialize<'de> for Note {
                 let memo_vec = hex::decode(&memo_hex)
                     .map_err(|e| de::Error::custom(format!("invalid memo hex: {e}")))?;
                 if memo_vec.len() != 512 {
-                    return Err(de::Error::custom(format!("memo must be 512 bytes, got {}", memo_vec.len())));
+                    return Err(de::Error::custom(format!(
+                        "memo must be 512 bytes, got {}",
+                        memo_vec.len()
+                    )));
                 }
                 let mut memo = [0u8; 512];
                 memo.copy_from_slice(&memo_vec);
 
-                Ok(Note::from_parts(header, addr, acct_name, asset, Rseed(rseed), memo))
+                Ok(Note::from_parts(
+                    header,
+                    addr,
+                    acct_name,
+                    asset,
+                    Rseed(rseed),
+                    memo,
+                ))
             }
 
             fn visit_seq<V>(self, mut seq: V) -> Result<Note, V::Error>
             where
                 V: SeqAccess<'de>,
             {
-                let header: u64 = seq.next_element()?.ok_or_else(|| de::Error::invalid_length(0, &self))?;
-                let address: String = seq.next_element()?.ok_or_else(|| de::Error::invalid_length(1, &self))?;
-                let account: String = seq.next_element()?.ok_or_else(|| de::Error::invalid_length(2, &self))?;
-                let asset: ExtendedAsset = seq.next_element()?.ok_or_else(|| de::Error::invalid_length(3, &self))?;
-                let rseed_hex: String = seq.next_element()?.ok_or_else(|| de::Error::invalid_length(4, &self))?;
-                let memo_hex: String  = seq.next_element()?.ok_or_else(|| de::Error::invalid_length(5, &self))?;
+                let header: u64 = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+                let address: String = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                let account: String = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(2, &self))?;
+                let asset: ExtendedAsset = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(3, &self))?;
+                let rseed_hex: String = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(4, &self))?;
+                let memo_hex: String = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(5, &self))?;
 
                 let addr = Address::from_bech32m(&address).map_err(de::Error::custom)?;
                 let acct_name = Name::from_string(&account)
@@ -460,30 +533,43 @@ impl<'de> Deserialize<'de> for Note {
 
                 let rseed_vec = hex::decode(&rseed_hex).map_err(de::Error::custom)?;
                 if rseed_vec.len() != 32 {
-                    return Err(de::Error::custom(format!("rseed must be 32 bytes, got {}", rseed_vec.len())));
+                    return Err(de::Error::custom(format!(
+                        "rseed must be 32 bytes, got {}",
+                        rseed_vec.len()
+                    )));
                 }
                 let mut rseed = [0u8; 32];
                 rseed.copy_from_slice(&rseed_vec);
 
                 let memo_vec = hex::decode(&memo_hex).map_err(de::Error::custom)?;
                 if memo_vec.len() != 512 {
-                    return Err(de::Error::custom(format!("memo must be 512 bytes, got {}", memo_vec.len())));
+                    return Err(de::Error::custom(format!(
+                        "memo must be 512 bytes, got {}",
+                        memo_vec.len()
+                    )));
                 }
                 let mut memo = [0u8; 512];
                 memo.copy_from_slice(&memo_vec);
 
-                Ok(Note::from_parts(header, addr, acct_name, asset, Rseed(rseed), memo))
+                Ok(Note::from_parts(
+                    header,
+                    addr,
+                    acct_name,
+                    asset,
+                    Rseed(rseed),
+                    memo,
+                ))
             }
         }
 
-        const FIELDS: &'static [&'static str] = &["header", "address", "account", "asset", "rseed", "memo"];
+        const FIELDS: &'static [&'static str] =
+            &["header", "address", "account", "asset", "rseed", "memo"];
         deserializer.deserialize_struct("Note", FIELDS, NoteVisitor)
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct NoteEx
-{
+pub struct NoteEx {
     block_num: u32,
     block_ts: u64,
     wallet_ts: u64,
@@ -491,88 +577,83 @@ pub struct NoteEx
     note: Note,
 }
 
-impl NoteEx
-{
+impl NoteEx {
     pub fn from_parts(
         block_num: u32,
         block_ts: u64,
         wallet_ts: u64,
         leaf_idx_arr: u64,
-        note: Note
-    ) -> Self
-    {
-        NoteEx{
+        note: Note,
+    ) -> Self {
+        NoteEx {
             block_num,
             block_ts,
             wallet_ts,
             leaf_idx_arr,
-            note
+            note,
         }
     }
 
-    pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()>
-    {
-        writer.write_u32::<LittleEndian>(self.block_num)?;      // 4
-        writer.write_u64::<LittleEndian>(self.block_ts)?;       // 8
-        writer.write_u64::<LittleEndian>(self.wallet_ts)?;      // 8
-        writer.write_u64::<LittleEndian>(self.leaf_idx_arr)?;   // 8
-        self.note.write(&mut writer)?;                          // 627
+    pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
+        writer.write_u32::<LittleEndian>(self.block_num)?; // 4
+        writer.write_u64::<LittleEndian>(self.block_ts)?; // 8
+        writer.write_u64::<LittleEndian>(self.wallet_ts)?; // 8
+        writer.write_u64::<LittleEndian>(self.leaf_idx_arr)?; // 8
+        self.note.write(&mut writer)?; // 627
 
-        Ok(())                                                  // 655 bytes in total
+        Ok(()) // 655 bytes in total
     }
 
-    pub fn read<R: Read>(mut reader: R) -> io::Result<Self>
-    {
+    pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
         let block_num = reader.read_u32::<LittleEndian>()?;
         let block_ts = reader.read_u64::<LittleEndian>()?;
         let wallet_ts = reader.read_u64::<LittleEndian>()?;
         let leaf_idx_arr = reader.read_u64::<LittleEndian>()?;
         let note = Note::read(&mut reader)?;
 
-        Ok(NoteEx::from_parts(block_num, block_ts, wallet_ts, leaf_idx_arr, note))
+        Ok(NoteEx::from_parts(
+            block_num,
+            block_ts,
+            wallet_ts,
+            leaf_idx_arr,
+            note,
+        ))
     }
 
-    pub fn position(&self) -> u64
-    {
-        self.leaf_idx_arr % MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH) - MT_ARR_LEAF_ROW_OFFSET!(MERKLE_TREE_DEPTH)
+    pub fn position(&self) -> u64 {
+        self.leaf_idx_arr % MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH)
+            - MT_ARR_LEAF_ROW_OFFSET!(MERKLE_TREE_DEPTH)
     }
 
-    pub fn block_ts(&self) -> u64
-    {
+    pub fn block_ts(&self) -> u64 {
         self.block_ts
     }
 
-    pub fn wallet_ts(&self) -> u64
-    {
+    pub fn wallet_ts(&self) -> u64 {
         self.wallet_ts
     }
 
-    pub fn leaf_idx_arr(&self) -> u64
-    {
+    pub fn leaf_idx_arr(&self) -> u64 {
         self.leaf_idx_arr
     }
 
-    pub fn block_num(&self) -> u32
-    {
+    pub fn block_num(&self) -> u32 {
         self.block_num
     }
 
-    pub fn note(&self) -> &Note
-    {
+    pub fn note(&self) -> &Note {
         &self.note
     }
 }
 
 #[cfg(test)]
-mod tests
-{
+mod tests {
     use super::Note;
-    use rand::rngs::OsRng;
     use crate::{eosio::ExtendedAsset, note::memo_to_bytes};
+    use rand::rngs::OsRng;
 
     #[test]
-    fn test_serde()
-    {
+    fn test_serde() {
         let mut rng = OsRng.clone();
         let a = ExtendedAsset::from_string(&"5000.0000 EOS@eosio.token".to_string()).unwrap();
         let (_, _, n) = Note::dummy(&mut rng, None, Some(a));

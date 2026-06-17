@@ -1,17 +1,18 @@
-use bellman::{Circuit, ConstraintSystem, SynthesisError};
-use bellman::gadgets::{blake2s, boolean, boolean::Boolean, boolean::AllocatedBit, multipack, num::Num};
-use ff::PrimeField;
-#[cfg(not(target_arch = "wasm32"))]
-use ff::Field;
+use super::constants::{NOTE_COMMITMENT_RANDOMNESS_GENERATOR, PROOF_GENERATION_KEY_GENERATOR};
+use super::{ecc, pedersen_hash, OrExt};
 use crate::circuit::conditionally_swap_u256;
 use crate::circuit::u256_into_boolean_vec_le;
 use crate::{address::Address, keys::ProofGenerationKey};
-use super::constants::{NOTE_COMMITMENT_RANDOMNESS_GENERATOR, PROOF_GENERATION_KEY_GENERATOR};
-use super::{ecc, pedersen_hash, OrExt};
+use bellman::gadgets::{
+    blake2s, boolean, boolean::AllocatedBit, boolean::Boolean, multipack, num::Num,
+};
+use bellman::{Circuit, ConstraintSystem, SynthesisError};
+#[cfg(not(target_arch = "wasm32"))]
+use ff::Field;
+use ff::PrimeField;
 
 /// This is an instance of the `Mint` circuit.
-pub struct Mint
-{
+pub struct Mint {
     /// The EOSIO account this note is associated with (Mint: sender, Transfer: 0, Burn: receiver, Auth: == contract)
     pub account: Option<u64>,
     /// auth token data hash
@@ -32,41 +33,29 @@ pub struct Mint
     pub proof_generation_key: Option<ProofGenerationKey>,
 }
 
-impl Circuit<crate::engine::Scalar> for Mint
-{
+impl Circuit<crate::engine::Scalar> for Mint {
     fn synthesize<CS: ConstraintSystem<crate::engine::Scalar>>(
         self,
         cs: &mut CS,
-    ) -> Result<(), SynthesisError>
-    {
+    ) -> Result<(), SynthesisError> {
         let mut note_preimage = vec![];
         let mut inputs2_bits = vec![];
 
         // note account to boolean bit vector
-        let account_bits = boolean::u64_into_boolean_vec_le(
-            cs.namespace(|| "account"),
-            self.account
-        )?;
+        let account_bits =
+            boolean::u64_into_boolean_vec_le(cs.namespace(|| "account"), self.account)?;
 
         // note value to boolean bit vector
-        let value_bits = boolean::u64_into_boolean_vec_le(
-            cs.namespace(|| "value"),
-            self.value
-        )?;
+        let value_bits = boolean::u64_into_boolean_vec_le(cs.namespace(|| "value"), self.value)?;
         inputs2_bits.extend(value_bits.clone());
 
         // note symbol to boolean bit vector
-        let symbol_bits = boolean::u64_into_boolean_vec_le(
-            cs.namespace(|| "symbol"),
-            self.symbol
-        )?;
+        let symbol_bits = boolean::u64_into_boolean_vec_le(cs.namespace(|| "symbol"), self.symbol)?;
         inputs2_bits.extend(symbol_bits.clone());
 
         // note contract to boolean bit vector
-        let contract_bits = boolean::u64_into_boolean_vec_le(
-            cs.namespace(|| "contract"),
-            self.contract
-        )?;
+        let contract_bits =
+            boolean::u64_into_boolean_vec_le(cs.namespace(|| "contract"), self.contract)?;
         inputs2_bits.extend(contract_bits.clone());
 
         // append inputs bits (account, value, symbol, contract) to note preimage
@@ -77,13 +66,18 @@ impl Circuit<crate::engine::Scalar> for Mint
         let mut value_symbol_bits = vec![];
         value_symbol_bits.extend(value_bits.into_iter());
         value_symbol_bits.extend(symbol_bits.into_iter());
-        let auth = value_symbol_bits.into_iter().enumerate().fold(
-            Boolean::Constant(false), |acc, (i, bit)| <Boolean as OrExt>::or(
-                cs.namespace(|| format!("value_symbol bits or {}", i)),
-                &acc,
-                &bit
-            ).unwrap()
-        ).not();
+        let auth = value_symbol_bits
+            .into_iter()
+            .enumerate()
+            .fold(Boolean::Constant(false), |acc, (i, bit)| {
+                <Boolean as OrExt>::or(
+                    cs.namespace(|| format!("value_symbol bits or {}", i)),
+                    &acc,
+                    &bit,
+                )
+                .unwrap()
+            })
+            .not();
 
         // Witness g_d, checking that it's on the curve.
         let g_d = {
@@ -106,9 +100,7 @@ impl Circuit<crate::engine::Scalar> for Mint
         let pk_d = {
             ecc::EdwardsPoint::witness(
                 cs.namespace(|| "witness pk_d"),
-                self.address.as_ref().map(|a| {
-                    a.pk_d().inner().into()
-                }),
+                self.address.as_ref().map(|a| a.pk_d().inner().into()),
             )?
         };
         // Check that pk_d is not small order.
@@ -170,23 +162,24 @@ impl Circuit<crate::engine::Scalar> for Mint
         // Compute accounts's value as a linear combination of the bits.
         let mut account_num = Num::zero();
         let mut coeff = crate::engine::scalar_one();
-        for bit in &account_bits
-        {
+        for bit in &account_bits {
             account_num = account_num.add_bool_with_coeff(CS::one(), bit, coeff);
             coeff = coeff.double();
         }
         // Compute contract's value as a linear combination of the bits.
         let mut contract_num = Num::zero();
         let mut coeff = crate::engine::scalar_one();
-        for bit in &contract_bits
-        {
+        for bit in &contract_bits {
             contract_num = contract_num.add_bool_with_coeff(CS::one(), bit, coeff);
             coeff = coeff.double();
         }
         // enforce: AUTH * (contract - account) = 0
         cs.enforce(
             || "conditionally enforce 0 = AUTH * (contract - account)",
-            |lc| lc + &account_num.lc(crate::engine::scalar_one()) - &contract_num.lc(crate::engine::scalar_one()),
+            |lc| {
+                lc + &account_num.lc(crate::engine::scalar_one())
+                    - &contract_num.lc(crate::engine::scalar_one())
+            },
             |lc| lc + &auth.lc(CS::one(), crate::engine::scalar_one()),
             |lc| lc,
         );
@@ -198,7 +191,7 @@ impl Circuit<crate::engine::Scalar> for Mint
             64 +    // symbol
             64 +    // contract
             256 +   // g_d
-            256     // pk_d
+            256 // pk_d
         );
 
         // Compute the hash of the note contents
@@ -210,10 +203,7 @@ impl Circuit<crate::engine::Scalar> for Mint
 
         {
             // Booleanize the randomness for the note commitment
-            let rcm = boolean::field_into_boolean_vec_le(
-                cs.namespace(|| "rcm"),
-                self.rcm,
-            )?;
+            let rcm = boolean::field_into_boolean_vec_le(cs.namespace(|| "rcm"), self.rcm)?;
 
             // Compute the note commitment randomness in the exponent
             let rcm = ecc::fixed_base_multiplication(
@@ -235,15 +225,10 @@ impl Circuit<crate::engine::Scalar> for Mint
         multipack::pack_into_inputs(cs.namespace(|| "pack inputs2 contents"), &inputs2_bits)?;
 
         // auth data hash to boolean bit vector
-        let auth_hash_bits = u256_into_boolean_vec_le(
-            cs.namespace(|| "auth_hash"),
-            self.auth_hash
-        )?;
+        let auth_hash_bits =
+            u256_into_boolean_vec_le(cs.namespace(|| "auth_hash"), self.auth_hash)?;
         // account (plus zero) bits to boolean vector
-        let zero_bits = boolean::u64_into_boolean_vec_le(
-            cs.namespace(|| "zero bits"),
-            Some(0)
-        )?;
+        let zero_bits = boolean::u64_into_boolean_vec_le(cs.namespace(|| "zero bits"), Some(0))?;
         let mut account_zero_bits = vec![];
         account_zero_bits.extend(account_bits);
         account_zero_bits.extend(zero_bits.clone());
@@ -267,34 +252,34 @@ impl Circuit<crate::engine::Scalar> for Mint
 }
 
 #[cfg(test)]
-mod tests
-{
-    use crate::note::{Note, Rseed};
-    use crate::keys::{SpendingKey, FullViewingKey};
-    use crate::eosio::{Asset, Name, Symbol, ExtendedAsset};
-    use crate::contract::AffineVerifyingKeyBytesLE;
-    use crate::engine::{Bls12, Scalar, scalar_to_canonical_bytes};
-    use rand::rngs::OsRng;
-    use bellman::gadgets::test::TestConstraintSystem;
+mod tests {
     use super::Mint;
-    use bellman::Circuit;
+    use crate::contract::AffineVerifyingKeyBytesLE;
+    use crate::engine::{scalar_to_canonical_bytes, Bls12, Scalar};
+    use crate::eosio::{Asset, ExtendedAsset, Name, Symbol};
+    use crate::keys::{FullViewingKey, SpendingKey};
+    use crate::note::{Note, Rseed};
     use bellman::gadgets::multipack;
-    use bellman::groth16::{generate_random_parameters, create_random_proof, prepare_verifying_key, verify_proof};
+    use bellman::gadgets::test::TestConstraintSystem;
     use bellman::groth16::Parameters;
     use bellman::groth16::VerifyingKey;
+    use bellman::groth16::{
+        create_random_proof, generate_random_parameters, prepare_verifying_key, verify_proof,
+    };
+    use bellman::Circuit;
     use ff::PrimeField;
+    use rand::rngs::OsRng;
     use std::fs;
     use std::fs::File;
     use std::time::Instant;
 
     #[test]
-    fn test_mint_circuit_utxo()
-    {
+    fn test_mint_circuit_utxo() {
         let mut rng = OsRng.clone();
         let (sk, _, n) = Note::dummy(
             &mut rng,
             None,
-            ExtendedAsset::from_string(&"1234567890987654321@atomicassets".to_string())
+            ExtendedAsset::from_string(&"1234567890987654321@atomicassets".to_string()),
         );
         let mut inputs2_contents = [0; 24];
         inputs2_contents[0..8].copy_from_slice(&n.amount().to_le_bytes());
@@ -319,7 +304,7 @@ mod tests
             contract: Some(n.contract().raw()),
             address: Some(n.address()),
             rcm: Some(n.rcm()),
-            proof_generation_key: Some(sk.proof_generation_key())
+            proof_generation_key: Some(sk.proof_generation_key()),
         };
 
         instance.synthesize(&mut cs).unwrap();
@@ -335,20 +320,28 @@ mod tests
 
         assert_eq!(cs.num_inputs(), 4);
         assert_eq!(cs.get_input(0, "ONE"), crate::engine::scalar_one());
-        assert_eq!(cs.get_input(1, "commitment/input variable").to_repr(), n.commitment().to_bytes());
-        assert_eq!(cs.get_input(2, "pack inputs2 contents/input 0"), inputs2_contents[0]);
-        assert_eq!(cs.get_input(3, "pack inputs3 contents/input 0"), inputs3_contents[0]);
+        assert_eq!(
+            cs.get_input(1, "commitment/input variable").to_repr(),
+            n.commitment().to_bytes()
+        );
+        assert_eq!(
+            cs.get_input(2, "pack inputs2 contents/input 0"),
+            inputs2_contents[0]
+        );
+        assert_eq!(
+            cs.get_input(3, "pack inputs3 contents/input 0"),
+            inputs3_contents[0]
+        );
     }
 
     #[test]
-    fn test_mint_circuit_auth()
-    {
+    fn test_mint_circuit_auth() {
         let mut rng = OsRng.clone();
         let code = Name::from_string(&String::from("zeosexchange")).unwrap();
         let (sk, _, n) = Note::dummy(
             &mut rng,
             Some(code),
-            Some(ExtendedAsset::new(Asset::new(0, Symbol(0)).unwrap(), code))
+            Some(ExtendedAsset::new(Asset::new(0, Symbol(0)).unwrap(), code)),
         );
         let mut inputs2_contents = [0; 24];
         inputs2_contents[16..24].copy_from_slice(&n.contract().raw().to_le_bytes());
@@ -378,7 +371,7 @@ mod tests
             contract: Some(n.contract().raw()),
             address: Some(n.address()),
             rcm: Some(n.rcm()),
-            proof_generation_key: Some(sk.proof_generation_key())
+            proof_generation_key: Some(sk.proof_generation_key()),
         };
 
         instance.synthesize(&mut cs).unwrap();
@@ -394,14 +387,22 @@ mod tests
 
         assert_eq!(cs.num_inputs(), 4);
         assert_eq!(cs.get_input(0, "ONE"), crate::engine::scalar_one());
-        assert_eq!(cs.get_input(1, "commitment/input variable").to_repr(), n.commitment().to_bytes());
-        assert_eq!(cs.get_input(2, "pack inputs2 contents/input 0"), inputs2_contents[0]);
-        assert_eq!(cs.get_input(3, "pack inputs3 contents/input 0"), inputs3_contents[0]);
+        assert_eq!(
+            cs.get_input(1, "commitment/input variable").to_repr(),
+            n.commitment().to_bytes()
+        );
+        assert_eq!(
+            cs.get_input(2, "pack inputs2 contents/input 0"),
+            inputs2_contents[0]
+        );
+        assert_eq!(
+            cs.get_input(3, "pack inputs3 contents/input 0"),
+            inputs3_contents[0]
+        );
     }
 
     #[test]
-    fn generate_and_write_params()
-    {
+    fn generate_and_write_params() {
         let instance = Mint {
             account: None,
             auth_hash: None,
@@ -423,8 +424,7 @@ mod tests
     }
 
     #[test]
-    fn write_b64_params()
-    {
+    fn write_b64_params() {
         use base64::{engine::general_purpose, Engine as _};
         let file = std::fs::read("params_mint.bin").expect("Could not read file!");
         // as hex
@@ -436,13 +436,19 @@ mod tests
     }
 
     #[test]
-    fn prove_and_verify()
-    {
+    fn prove_and_verify() {
         let f = File::open("params_mint.bin").unwrap();
         let params = Parameters::<Bls12>::read(f, false).unwrap();
 
         let mut rng = OsRng.clone();
-        let (_sk, _, n) = Note::dummy(&mut rng, Some(Name(42)), Some(ExtendedAsset::new(Asset::new(0, Symbol(12)).unwrap(), Name(0))));
+        let (_sk, _, n) = Note::dummy(
+            &mut rng,
+            Some(Name(42)),
+            Some(ExtendedAsset::new(
+                Asset::new(0, Symbol(12)).unwrap(),
+                Name(0),
+            )),
+        );
         let (sk_dummy, _, _) = Note::dummy(&mut rng, None, None);
 
         println!("create proof");
@@ -482,9 +488,18 @@ mod tests
         inputs.extend(inputs2_contents.clone());
         inputs.extend(inputs3_contents.clone());
         // print public inputs
-        println!("{}", hex::encode(scalar_to_canonical_bytes(&n.commitment().0)));
-        println!("{}", hex::encode(scalar_to_canonical_bytes(&inputs2_contents[0])));
-        println!("{}", hex::encode(scalar_to_canonical_bytes(&inputs3_contents[0])));
+        println!(
+            "{}",
+            hex::encode(scalar_to_canonical_bytes(&n.commitment().0))
+        );
+        println!(
+            "{}",
+            hex::encode(scalar_to_canonical_bytes(&inputs2_contents[0]))
+        );
+        println!(
+            "{}",
+            hex::encode(scalar_to_canonical_bytes(&inputs3_contents[0]))
+        );
 
         println!("verify proof");
         let f = File::open("vk_mint.bin").unwrap();
@@ -494,8 +509,7 @@ mod tests
     }
 
     #[test]
-    fn static_prove_and_verify()
-    {
+    fn static_prove_and_verify() {
         let f = File::open("params_mint.bin").unwrap();
         let params = Parameters::<Bls12>::read(f, false).unwrap();
 
@@ -510,7 +524,7 @@ mod tests
             Name(0),
             ExtendedAsset::from_string(&"5000.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
-            [0; 512]
+            [0; 512],
         );
 
         println!("create proof");
@@ -547,9 +561,18 @@ mod tests
         inputs.extend(inputs2_contents.clone());
         inputs.extend(inputs3_contents.clone());
         // print public inputs
-        println!("{}", hex::encode(scalar_to_canonical_bytes(&note.commitment().0)));
-        println!("{}", hex::encode(scalar_to_canonical_bytes(&inputs2_contents[0])));
-        println!("{}", hex::encode(scalar_to_canonical_bytes(&inputs3_contents[0])));
+        println!(
+            "{}",
+            hex::encode(scalar_to_canonical_bytes(&note.commitment().0))
+        );
+        println!(
+            "{}",
+            hex::encode(scalar_to_canonical_bytes(&inputs2_contents[0]))
+        );
+        println!(
+            "{}",
+            hex::encode(scalar_to_canonical_bytes(&inputs3_contents[0]))
+        );
 
         println!("verify proof");
         let f = File::open("vk_mint.bin").unwrap();
@@ -559,8 +582,7 @@ mod tests
     }
 
     #[test]
-    fn bench_proofgen_mint()
-    {
+    fn bench_proofgen_mint() {
         use bellman::groth16::{create_random_proof, Parameters};
         use std::time::Instant;
 
@@ -579,7 +601,10 @@ mod tests
         let (_sk, _, n) = Note::dummy(
             &mut rng,
             Some(Name(42)),
-            Some(ExtendedAsset::new(Asset::new(0, Symbol(12)).unwrap(), Name(0))),
+            Some(ExtendedAsset::new(
+                Asset::new(0, Symbol(12)).unwrap(),
+                Name(0),
+            )),
         );
         let (sk_dummy, _, _) = Note::dummy(&mut rng, None, None);
 
@@ -618,9 +643,16 @@ mod tests
         let min = *ms.iter().min().unwrap_or(&0);
         let max = *ms.iter().max().unwrap_or(&0);
         let sum: u128 = ms.iter().sum();
-        let avg = if N_PROOFS > 0 { sum / (N_PROOFS as u128) } else { 0 };
+        let avg = if N_PROOFS > 0 {
+            sum / (N_PROOFS as u128)
+        } else {
+            0
+        };
 
         println!("Mint proofgen total: {} ms", total_ms);
-        println!("Mint proofgen stats: min={} ms, avg={} ms, max={} ms", min, avg, max);
+        println!(
+            "Mint proofgen stats: min={} ms, avg={} ms, max={} ms",
+            min, avg, max
+        );
     }
 }

@@ -1,32 +1,33 @@
-use chrono::{DateTime, Local};
-use std::collections::HashMap;
-use std::io::{self, Read, Write};
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
-use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
-use lazy_static::lazy_static;
-use serde::{Serialize, Deserialize};
-use serde_json::Value;
-use crate::contract::{PlsSpendSequence, PlsAuthenticate};
+use crate::contract::{PlsAuthenticate, PlsSpendSequence};
+use crate::engine::{scalar_one, scalar_to_canonical_bytes};
 use crate::eosio::ExtendedAsset;
 use crate::{
     address::Address,
     blake2s7r::Params as Blake2s7rParams,
-    constants::{MERKLE_TREE_DEPTH, MEMO_CHANGE_NOTE},
+    constants::{MEMO_CHANGE_NOTE, MERKLE_TREE_DEPTH},
     contract::ScalarBytes,
     eosio::{Asset, Authorization, Name, Symbol},
-    keys::{IncomingViewingKey, SpendingKey, FullViewingKey, PreparedIncomingViewingKey},
+    keys::{FullViewingKey, IncomingViewingKey, PreparedIncomingViewingKey, SpendingKey},
+    log,
     note::{Note, NoteEx},
-    note_encryption::{try_note_decryption, try_output_recovery_with_ovk, TransmittedNoteCiphertext},
-    log
+    note_encryption::{
+        try_note_decryption, try_output_recovery_with_ovk, TransmittedNoteCiphertext,
+    },
 };
-use crate::engine::{scalar_one, scalar_to_canonical_bytes};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use chrono::{DateTime, Local};
+use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::io::{self, Read, Write};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // empty merkle tree roots
 lazy_static! {
     static ref EMPTY_ROOTS: Vec<ScalarBytes> = {
         let mut v = vec![ScalarBytes(scalar_to_canonical_bytes(&scalar_one()))];
-        for d in 0..MERKLE_TREE_DEPTH
-        {
+        for d in 0..MERKLE_TREE_DEPTH {
             let next = Blake2s7rParams::new()
                 .hash_length(32)
                 .personal(crate::constants::MERKLE_TREE_PERSONALIZATION)
@@ -44,8 +45,7 @@ lazy_static! {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Wallet
-{
+pub struct Wallet {
     // keys & addresses
     seed: Vec<u8>,
     ivk: IncomingViewingKey, // READ-ONLY WALLET: only valid if seed == ""
@@ -69,35 +69,44 @@ pub struct Wallet
     merkle_tree: HashMap<u64, ScalarBytes>,
 
     // storage of all unpublished notes
-    unpublished_notes: HashMap<u64, HashMap<String, Vec<String>>>
+    unpublished_notes: HashMap<u64, HashMap<String, Vec<String>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct HistoryTransaction
-{
+pub struct HistoryTransaction {
     pub tx_type: String,
     pub date_time: String,
     pub tx_fee: String,
-    pub account_asset_memo: Vec<(String, String, String)>  // asset, receiver, memo
+    pub account_asset_memo: Vec<(String, String, String)>, // asset, receiver, memo
 }
 
-impl Wallet
-{
+impl Wallet {
     pub fn create(
         seed: &[u8],
         is_ivk: bool,
         chain_id: [u8; 32],
         protocol_contract: Name,
         vault_contract: Name,
-        alias_authority: Authorization
-    ) -> Option<Self>
-    {
-        if is_ivk { if seed.len() != 64 { log("ivk length must equal 64 bytes"); return None; } }
-        else      { if seed.len() < 32  { log("seed length must equal at least 32 bytes"); return None; } }
+        alias_authority: Authorization,
+    ) -> Option<Self> {
+        if is_ivk {
+            if seed.len() != 64 {
+                log("ivk length must equal 64 bytes");
+                return None;
+            }
+        } else {
+            if seed.len() < 32 {
+                log("seed length must equal at least 32 bytes");
+                return None;
+            }
+        }
 
         let ivk = if is_ivk {
             let ivk = IncomingViewingKey::from_bytes(&seed.try_into().unwrap());
-            if ivk.is_none().into() { log("ivk invalid"); return None; }
+            if ivk.is_none().into() {
+                log("ivk invalid");
+                return None;
+            }
             ivk.unwrap()
         } else {
             FullViewingKey::from_spending_key(&SpendingKey::from_seed(seed)).ivk()
@@ -106,10 +115,15 @@ impl Wallet
         let diversifiers = if is_ivk {
             vec![]
         } else {
-            vec![u64::try_from(FullViewingKey::from_spending_key(&SpendingKey::from_seed(seed)).default_address().0).unwrap()]
+            vec![u64::try_from(
+                FullViewingKey::from_spending_key(&SpendingKey::from_seed(seed))
+                    .default_address()
+                    .0,
+            )
+            .unwrap()]
         };
 
-        Some(Wallet{
+        Some(Wallet {
             seed: if !is_ivk { seed.to_vec() } else { vec![] },
             ivk,
             diversifiers,
@@ -124,18 +138,16 @@ impl Wallet
             spent_notes: vec![],
             outgoing_notes: vec![],
             merkle_tree: HashMap::new(),
-            unpublished_notes: HashMap::new()
+            unpublished_notes: HashMap::new(),
         })
     }
 
-    pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()>
-    {
+    pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
         writer.write_u32::<LittleEndian>(self.seed.len() as u32)?;
         writer.write_all(self.seed.as_ref())?;
         writer.write_all(self.ivk.to_bytes().as_ref())?;
         writer.write_u32::<LittleEndian>(self.diversifiers.len() as u32)?;
-        for d in self.diversifiers.iter()
-        {
+        for d in self.diversifiers.iter() {
             writer.write_u64::<LittleEndian>(*d)?;
         }
         writer.write_all(&self.chain_id)?;
@@ -147,26 +159,24 @@ impl Wallet
         writer.write_u64::<LittleEndian>(self.leaf_count)?;
         writer.write_u64::<LittleEndian>(self.auth_count)?;
         writer.write_u32::<LittleEndian>(self.unspent_notes.len() as u32)?;
-        for n in self.unspent_notes.iter()
-        {
+        for n in self.unspent_notes.iter() {
             n.write(&mut writer)?;
         }
         writer.write_u32::<LittleEndian>(self.spent_notes.len() as u32)?;
-        for n in self.spent_notes.iter()
-        {
+        for n in self.spent_notes.iter() {
             n.write(&mut writer)?;
         }
         writer.write_u32::<LittleEndian>(self.outgoing_notes.len() as u32)?;
-        for n in self.outgoing_notes.iter()
-        {
+        for n in self.outgoing_notes.iter() {
             n.write(&mut writer)?;
         }
-        for li in 0..self.leaf_count
-        {
+        for li in 0..self.leaf_count {
             // calculate array index of this leaf in current tree
-            let idx = MT_ARR_LEAF_ROW_OFFSET!(MERKLE_TREE_DEPTH) + li % MT_NUM_LEAVES!(MERKLE_TREE_DEPTH);
+            let idx =
+                MT_ARR_LEAF_ROW_OFFSET!(MERKLE_TREE_DEPTH) + li % MT_NUM_LEAVES!(MERKLE_TREE_DEPTH);
             // calculate tree offset to translate local array indices of current tree to absolute array indices of global array
-            let tos = li / MT_NUM_LEAVES!(MERKLE_TREE_DEPTH) * MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH);
+            let tos = li / MT_NUM_LEAVES!(MERKLE_TREE_DEPTH)
+                * MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH);
             let idx = tos + idx;
             assert!(self.merkle_tree.contains_key(&idx));
             writer.write_all(self.merkle_tree.get(&idx).unwrap().0.as_ref())?;
@@ -178,8 +188,7 @@ impl Wallet
         Ok(())
     }
 
-    pub fn read<R: Read>(mut reader: R) -> io::Result<Self>
-    {
+    pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
         let seed_len = reader.read_u32::<LittleEndian>()? as usize;
         let mut seed = vec![];
         seed.resize(seed_len, 0);
@@ -193,8 +202,7 @@ impl Wallet
 
         let diversifiers_len = reader.read_u32::<LittleEndian>()? as usize;
         let mut diversifiers = vec![];
-        for _ in 0..diversifiers_len
-        {
+        for _ in 0..diversifiers_len {
             let d = reader.read_u64::<LittleEndian>()?;
             diversifiers.push(d);
         }
@@ -203,9 +211,9 @@ impl Wallet
         reader.read_exact(&mut chain_id)?;
         let protocol_contract = Name(reader.read_u64::<LittleEndian>()?);
         let vault_contract = Name(reader.read_u64::<LittleEndian>()?);
-        let alias_authority = Authorization{
+        let alias_authority = Authorization {
             actor: Name(reader.read_u64::<LittleEndian>()?),
-            permission: Name(reader.read_u64::<LittleEndian>()?)
+            permission: Name(reader.read_u64::<LittleEndian>()?),
         };
         let block_num = reader.read_u32::<LittleEndian>()?;
         let leaf_count = reader.read_u64::<LittleEndian>()?;
@@ -213,24 +221,21 @@ impl Wallet
 
         let unspent_notes_len = reader.read_u32::<LittleEndian>()? as usize;
         let mut unspent_notes = vec![];
-        for _ in 0..unspent_notes_len
-        {
+        for _ in 0..unspent_notes_len {
             let n = NoteEx::read(&mut reader)?;
             unspent_notes.push(n);
         }
 
         let spent_notes_len = reader.read_u32::<LittleEndian>()? as usize;
         let mut spent_notes = vec![];
-        for _ in 0..spent_notes_len
-        {
+        for _ in 0..spent_notes_len {
             let n = NoteEx::read(&mut reader)?;
             spent_notes.push(n);
         }
 
         let outgoing_notes_len = reader.read_u32::<LittleEndian>()? as usize;
         let mut outgoing_notes = vec![];
-        for _ in 0..outgoing_notes_len
-        {
+        for _ in 0..outgoing_notes_len {
             let n = NoteEx::read(&mut reader)?;
             outgoing_notes.push(n);
         }
@@ -252,11 +257,10 @@ impl Wallet
             spent_notes,
             outgoing_notes,
             merkle_tree,
-            unpublished_notes: HashMap::new()
+            unpublished_notes: HashMap::new(),
         };
 
-        for _ in 0..leaf_count
-        {
+        for _ in 0..leaf_count {
             let mut leaf = [0; 32];
             reader.read_exact(&mut leaf)?;
             wallet.insert_into_merkle_tree(&ScalarBytes(leaf));
@@ -266,24 +270,25 @@ impl Wallet
         let mut unpublished_notes_bytes = vec![];
         unpublished_notes_bytes.resize(unpublished_notes_bytes_len, 0);
         reader.read_exact(&mut unpublished_notes_bytes)?;
-        wallet.unpublished_notes = serde_json::from_str(&String::from_utf8(unpublished_notes_bytes).unwrap()).unwrap();
+        wallet.unpublished_notes =
+            serde_json::from_str(&String::from_utf8(unpublished_notes_bytes).unwrap()).unwrap();
 
         Ok(wallet)
     }
 
-    pub fn to_json(&self, pretty: bool) -> String
-    {
-        if pretty { serde_json::to_string_pretty(self).unwrap() }
-        else { serde_json::to_string(self).unwrap() }
+    pub fn to_json(&self, pretty: bool) -> String {
+        if pretty {
+            serde_json::to_string_pretty(self).unwrap()
+        } else {
+            serde_json::to_string(self).unwrap()
+        }
     }
 
-    pub fn from_json(json: &String) -> Result<Self, serde_json::error::Error>
-    {
+    pub fn from_json(json: &String) -> Result<Self, serde_json::error::Error> {
         serde_json::from_str(&json)
     }
 
-    pub fn size(&self) -> usize
-    {
+    pub fn size(&self) -> usize {
         4 +                                 // seed.len()
         self.seed.len() +
         64 +                                // Incoming Viewing Key
@@ -312,190 +317,208 @@ impl Wallet
         //v.len()
     }
 
-    pub fn seed(&self) -> Vec<u8>
-    {
+    pub fn seed(&self) -> Vec<u8> {
         self.seed.to_vec()
     }
 
-    pub fn chain_id(&self) -> [u8; 32]
-    {
+    pub fn chain_id(&self) -> [u8; 32] {
         self.chain_id
     }
 
-    pub fn protocol_contract(&self) -> &Name
-    {
+    pub fn protocol_contract(&self) -> &Name {
         &self.protocol_contract
     }
 
-    pub fn vault_contract(&self) -> &Name
-    {
+    pub fn vault_contract(&self) -> &Name {
         &self.vault_contract
     }
 
-    pub fn alias_authority(&self) -> &Authorization
-    {
+    pub fn alias_authority(&self) -> &Authorization {
         &self.alias_authority
     }
 
-    pub fn block_num(&self) -> u32
-    {
+    pub fn block_num(&self) -> u32 {
         self.block_num
     }
 
-    pub fn leaf_count(&self) -> u64
-    {
+    pub fn leaf_count(&self) -> u64 {
         self.leaf_count
     }
 
-    pub fn auth_count(&self) -> u64
-    {
+    pub fn auth_count(&self) -> u64 {
         self.auth_count
     }
 
-    pub fn set_auth_count(&mut self, count: u64)
-    {
+    pub fn set_auth_count(&mut self, count: u64) {
         self.auth_count = count;
     }
 
-    pub fn is_ivk(&self) -> bool
-    {
+    pub fn is_ivk(&self) -> bool {
         self.seed.len() == 0
     }
 
-    pub fn balances(&self) -> Vec<ExtendedAsset>
-    {
+    pub fn balances(&self) -> Vec<ExtendedAsset> {
         let mut map = HashMap::new();
-        for note in &self.unspent_notes
-        {
-            if !note.note().quantity().is_nft()
-            {
-                let k = ((note.note().symbol().raw() as u128) << 64) | (note.note().contract().raw() as u128);
-                if !map.contains_key(&k)
-                {
+        for note in &self.unspent_notes {
+            if !note.note().quantity().is_nft() {
+                let k = ((note.note().symbol().raw() as u128) << 64)
+                    | (note.note().contract().raw() as u128);
+                if !map.contains_key(&k) {
                     map.insert(k, note.note().amount());
-                }
-                else
-                {
+                } else {
                     *map.get_mut(&k).unwrap() += note.note().amount();
                 }
             }
         }
         let mut v = vec![];
-        for k in map.keys()
-        {
-            v.push(ExtendedAsset::new(Asset::new(
-                *map.get(k).unwrap() as i64,
-                Symbol((*k >> 64) as u64)).unwrap(),
-                Name(*k as u64)
+        for k in map.keys() {
+            v.push(ExtendedAsset::new(
+                Asset::new(*map.get(k).unwrap() as i64, Symbol((*k >> 64) as u64)).unwrap(),
+                Name(*k as u64),
             ))
         }
         v
     }
 
-    pub fn unspent_notes(&self) -> &Vec<NoteEx>
-    {
+    pub fn unspent_notes(&self) -> &Vec<NoteEx> {
         &self.unspent_notes
     }
 
-    pub fn fungible_tokens(&self, symbol: &Symbol, contract: &Name) -> Vec<NoteEx>
-    {
-        if symbol.raw() == 0 && contract.raw() == 0
-        {
+    pub fn fungible_tokens(&self, symbol: &Symbol, contract: &Name) -> Vec<NoteEx> {
+        if symbol.raw() == 0 && contract.raw() == 0 {
             // select all fungible tokens from all contracts
-            return self.unspent_notes.iter().map(|n| n.clone()).filter(|n| n.note().symbol().raw() != 0).collect();
+            return self
+                .unspent_notes
+                .iter()
+                .map(|n| n.clone())
+                .filter(|n| n.note().symbol().raw() != 0)
+                .collect();
         }
-        if symbol.raw() == 0 && contract.raw() != 0
-        {
+        if symbol.raw() == 0 && contract.raw() != 0 {
             // select all fungible tokens from this particular contract
-            return self.unspent_notes.iter().map(|n| n.clone()).filter(|n| n.note().contract().eq(&contract) && n.note().symbol().raw() != 0).collect();
+            return self
+                .unspent_notes
+                .iter()
+                .map(|n| n.clone())
+                .filter(|n| n.note().contract().eq(&contract) && n.note().symbol().raw() != 0)
+                .collect();
         }
-        if symbol.raw() != 0 && contract.raw() == 0
-        {
+        if symbol.raw() != 0 && contract.raw() == 0 {
             // select this particular fungible token from all contracts
-            return self.unspent_notes.iter().map(|n| n.clone()).filter(|n| n.note().symbol().eq(&symbol)).collect();
+            return self
+                .unspent_notes
+                .iter()
+                .map(|n| n.clone())
+                .filter(|n| n.note().symbol().eq(&symbol))
+                .collect();
         }
-        if symbol.raw() != 0 && contract.raw() != 0
-        {
+        if symbol.raw() != 0 && contract.raw() != 0 {
             // select this particular fungible token from this particular contract
-            return self.unspent_notes.iter().map(|n| n.clone()).filter(|n| n.note().contract().eq(&contract) && n.note().symbol().eq(&symbol)).collect();
+            return self
+                .unspent_notes
+                .iter()
+                .map(|n| n.clone())
+                .filter(|n| n.note().contract().eq(&contract) && n.note().symbol().eq(&symbol))
+                .collect();
         }
         vec![]
     }
 
-    pub fn non_fungible_tokens(&self, contract: &Name) -> Vec<NoteEx>
-    {
-        if contract.raw() == 0
-        {
+    pub fn non_fungible_tokens(&self, contract: &Name) -> Vec<NoteEx> {
+        if contract.raw() == 0 {
             // select all nfts from all contracts
-            return self.unspent_notes.iter().map(|n| n.clone()).filter(|n| n.note().symbol().raw() == 0 && n.note().amount() != 0).collect();
+            return self
+                .unspent_notes
+                .iter()
+                .map(|n| n.clone())
+                .filter(|n| n.note().symbol().raw() == 0 && n.note().amount() != 0)
+                .collect();
         }
-        if contract.raw() != 0
-        {
+        if contract.raw() != 0 {
             // select all nfts from this particular contract
-            return self.unspent_notes.iter().map(|n| n.clone()).filter(|n| n.note().contract().eq(&contract) && n.note().symbol().raw() == 0 && n.note().amount() != 0).collect();
+            return self
+                .unspent_notes
+                .iter()
+                .map(|n| n.clone())
+                .filter(|n| {
+                    n.note().contract().eq(&contract)
+                        && n.note().symbol().raw() == 0
+                        && n.note().amount() != 0
+                })
+                .collect();
         }
         vec![]
     }
 
-    pub fn authentication_tokens(&self, contract: &Name, spent: bool) -> Vec<NoteEx>
-    {
-        if contract.raw() == 0
-        {
+    pub fn authentication_tokens(&self, contract: &Name, spent: bool) -> Vec<NoteEx> {
+        if contract.raw() == 0 {
             // select all auth tokens from all contracts
-            return if spent { &self.spent_notes } else { &self.unspent_notes }.iter().map(|n| n.clone()).filter(|n| n.note().symbol().raw() == 0 && n.note().amount() == 0).collect();
+            return if spent {
+                &self.spent_notes
+            } else {
+                &self.unspent_notes
+            }
+            .iter()
+            .map(|n| n.clone())
+            .filter(|n| n.note().symbol().raw() == 0 && n.note().amount() == 0)
+            .collect();
         }
-        if contract.raw() != 0
-        {
+        if contract.raw() != 0 {
             // select all auth tokens from this particular contract
-            return if spent { &self.spent_notes } else { &self.unspent_notes }.iter().map(|n| n.clone()).filter(|n| n.note().contract().eq(&contract) && n.note().symbol().raw() == 0 && n.note().amount() == 0).collect()
+            return if spent {
+                &self.spent_notes
+            } else {
+                &self.unspent_notes
+            }
+            .iter()
+            .map(|n| n.clone())
+            .filter(|n| {
+                n.note().contract().eq(&contract)
+                    && n.note().symbol().raw() == 0
+                    && n.note().amount() == 0
+            })
+            .collect();
         }
         vec![]
     }
 
-    pub fn unpublished_notes(&self) -> &HashMap<u64, HashMap<String, Vec<String>>>
-    {
+    pub fn unpublished_notes(&self) -> &HashMap<u64, HashMap<String, Vec<String>>> {
         &self.unpublished_notes
     }
 
-    pub fn spending_key(&self) -> Option<SpendingKey>
-    {
-        if self.is_ivk()
-        {
+    pub fn spending_key(&self) -> Option<SpendingKey> {
+        if self.is_ivk() {
             None
-        }
-        else
-        {
+        } else {
             Some(SpendingKey::from_seed(&self.seed))
         }
     }
 
-    pub fn default_address(&self) -> Option<Address>
-    {
-        if self.seed.len() == 0
-        {
+    pub fn default_address(&self) -> Option<Address> {
+        if self.seed.len() == 0 {
             return None;
         }
-        Some(FullViewingKey::from_spending_key(&SpendingKey::from_seed(&self.seed)).default_address().1)
+        Some(
+            FullViewingKey::from_spending_key(&SpendingKey::from_seed(&self.seed))
+                .default_address()
+                .1,
+        )
     }
 
-    pub fn addresses(&self) -> Vec<Address>
-    {
+    pub fn addresses(&self) -> Vec<Address> {
         let mut v = vec![];
-        if self.seed.len() == 0
-        {
+        if self.seed.len() == 0 {
             return v;
         }
         let sk = SpendingKey::from_seed(&self.seed);
         let fvk = FullViewingKey::from_spending_key(&sk);
-        for d in &self.diversifiers
-        {
+        for d in &self.diversifiers {
             v.push(fvk.find_address((*d).into()).unwrap().1);
         }
         v
     }
 
-    pub fn derive_next_address(&mut self) -> Address
-    {
+    pub fn derive_next_address(&mut self) -> Address {
         // TODO: what if IVK wallet?
         let sk = SpendingKey::from_seed(&self.seed);
         let fvk = FullViewingKey::from_spending_key(&sk);
@@ -507,80 +530,106 @@ impl Wallet
         addr
     }
 
-    pub fn add_leaves(&mut self, leaves: &[u8])
-    {
+    pub fn add_leaves(&mut self, leaves: &[u8]) {
         assert!(leaves.len() % 32 == 0);
-        for i in 0..leaves.len()/32
-        {
+        for i in 0..leaves.len() / 32 {
             let mut bytes = [0; 32];
-            bytes.copy_from_slice(&leaves[i*32..(i+1)*32]);
+            bytes.copy_from_slice(&leaves[i * 32..(i + 1) * 32]);
             let leaf = ScalarBytes(bytes);
             self.insert_into_merkle_tree(&leaf);
         }
     }
 
-    fn note_exist_in_unspent(&self, note: &Note) -> bool
-    {
-        let v: Vec<&NoteEx> = self.unspent_notes.iter().filter(|n| n.note().eq(&note)).collect();
+    fn note_exist_in_unspent(&self, note: &Note) -> bool {
+        let v: Vec<&NoteEx> = self
+            .unspent_notes
+            .iter()
+            .filter(|n| n.note().eq(&note))
+            .collect();
         v.len() > 0
     }
 
-    fn note_exist_in_spent(&self, note: &Note) -> bool
-    {
-        let v: Vec<&NoteEx> = self.spent_notes.iter().filter(|n| n.note().eq(&note)).collect();
+    fn note_exist_in_spent(&self, note: &Note) -> bool {
+        let v: Vec<&NoteEx> = self
+            .spent_notes
+            .iter()
+            .filter(|n| n.note().eq(&note))
+            .collect();
         v.len() > 0
     }
 
-    fn note_exist_in_outgoing(&self, note: &Note) -> bool
-    {
-        let v: Vec<&NoteEx> = self.outgoing_notes.iter().filter(|n| n.note().eq(&note)).collect();
+    fn note_exist_in_outgoing(&self, note: &Note) -> bool {
+        let v: Vec<&NoteEx> = self
+            .outgoing_notes
+            .iter()
+            .filter(|n| n.note().eq(&note))
+            .collect();
         v.len() > 0
     }
 
     // Merkle Tree must be up-to-date before calling this function!
-    pub fn add_notes(&mut self, notes: &Vec<String>, block_num: u32, block_ts: u64) -> u64
-    {
+    pub fn add_notes(&mut self, notes: &Vec<String>, block_num: u32, block_ts: u64) -> u64 {
         let sk = SpendingKey::from_seed(&self.seed);
         let fvk = FullViewingKey::from_spending_key(&sk);
-        let wallet_ts = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_millis() as u64;
+        let wallet_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis() as u64;
         let mut fts_received = 0;
         let mut nfts_received = 0;
         let mut ats_received = 0;
 
-        for n in notes
-        {
+        for n in notes {
             let encrypted_note = TransmittedNoteCiphertext::from_base64(n);
-            if encrypted_note.is_none() { continue; }
+            if encrypted_note.is_none() {
+                continue;
+            }
             let encrypted_note = encrypted_note.unwrap();
 
             // test receiver decryption
-            match try_note_decryption(&PreparedIncomingViewingKey::new(&fvk.ivk()), &encrypted_note) {
+            match try_note_decryption(
+                &PreparedIncomingViewingKey::new(&fvk.ivk()),
+                &encrypted_note,
+            ) {
                 Some(note) => {
                     // Merkle tree must be up to date! We check if there's a leaf for this note and get it's array index in the merkle
                     // tree. If there is no index (i.e. leaf), this note can't be valid and is discarded. Only Auth Tokens have no merkle leaves!
                     let tree_idx = if !note.is_auth_token() {
                         let cm = note.commitment();
-                        let idx = self.merkle_tree.iter().find_map(|(key, val)| if val.0 == cm.to_bytes() { Some(key) } else { None });
-                        if idx.is_none() { continue; }
+                        let idx = self.merkle_tree.iter().find_map(|(key, val)| {
+                            if val.0 == cm.to_bytes() {
+                                Some(key)
+                            } else {
+                                None
+                            }
+                        });
+                        if idx.is_none() {
+                            continue;
+                        }
                         *idx.unwrap()
-                    } else { 0 };
-                    let note_ex = NoteEx::from_parts(
-                        block_num,
-                        block_ts,
-                        wallet_ts,
-                        tree_idx,
-                        note
-                    );
+                    } else {
+                        0
+                    };
+                    let note_ex =
+                        NoteEx::from_parts(block_num, block_ts, wallet_ts, tree_idx, note);
                     // make sure a note is not added twice
-                    if !self.note_exist_in_unspent(note_ex.note()) && !self.note_exist_in_spent(note_ex.note())
+                    if !self.note_exist_in_unspent(note_ex.note())
+                        && !self.note_exist_in_spent(note_ex.note())
                     {
-                        if note_ex.note().is_auth_token() { ats_received += 1; }
-                        else if note_ex.note().symbol().raw() == 0 && note_ex.note().amount() != 0 { nfts_received += 1; }
-                        else { if !note_ex.note().memo().eq(&MEMO_CHANGE_NOTE) { fts_received += 1; } } // don't count 'change' notes
+                        if note_ex.note().is_auth_token() {
+                            ats_received += 1;
+                        } else if note_ex.note().symbol().raw() == 0 && note_ex.note().amount() != 0
+                        {
+                            nfts_received += 1;
+                        } else {
+                            if !note_ex.note().memo().eq(&MEMO_CHANGE_NOTE) {
+                                fts_received += 1;
+                            }
+                        } // don't count 'change' notes
                         self.unspent_notes.push(note_ex);
                     }
-                },
-                None => {},
+                }
+                None => {}
             }
 
             // test sender decryption
@@ -589,95 +638,89 @@ impl Wallet
                     // Auth tokens can be "self-minted" (receiver decrypt succeeds too),
                     // in which case sender recovery would create a duplicate "Sent" entry for the mint.
                     // We only want the incoming mint + (optional) later synthetic burn.
-                    if note.is_auth_token() && (self.note_exist_in_unspent(&note) || self.note_exist_in_spent(&note)) {
+                    if note.is_auth_token()
+                        && (self.note_exist_in_unspent(&note) || self.note_exist_in_spent(&note))
+                    {
                         continue;
                     }
 
-                    let note_ex = NoteEx::from_parts(
-                        block_num,
-                        block_ts,
-                        wallet_ts,
-                        0,
-                        note.clone()
-                    );
+                    let note_ex =
+                        NoteEx::from_parts(block_num, block_ts, wallet_ts, 0, note.clone());
                     // make sure a note is not added twice
-                    if !self.note_exist_in_outgoing(note_ex.note())
-                    {
+                    if !self.note_exist_in_outgoing(note_ex.note()) {
                         self.outgoing_notes.push(note_ex);
                     }
-                },
-                None => {},
+                }
+                None => {}
             }
         }
 
         (ats_received << 16) | (nfts_received << 8) | fts_received
     }
 
-    pub fn transaction_history(&self) -> Vec<HistoryTransaction>
-    {
+    pub fn transaction_history(&self) -> Vec<HistoryTransaction> {
         let mut history = vec![];
         let mut received = self.unspent_notes.clone();
         received.append(&mut self.spent_notes.clone());
         received.sort_by(|a, b| b.block_ts().cmp(&a.block_ts()));
         let mut sent = self.outgoing_notes.clone();
         sent.sort_by(|a, b| b.block_ts().cmp(&a.block_ts()));
-        while !received.is_empty() || !sent.is_empty()
-        {
-            let mut htx = HistoryTransaction{
+        while !received.is_empty() || !sent.is_empty() {
+            let mut htx = HistoryTransaction {
                 tx_type: "".to_string(),
                 date_time: "".to_string(),
                 tx_fee: "".to_string(),
-                account_asset_memo: vec![]
+                account_asset_memo: vec![],
             };
             let mut tx = vec![];
 
-            if !received.is_empty() && !sent.is_empty()
-            {
-                if sent[0].block_ts() <= received[0].block_ts()
-                {
+            if !received.is_empty() && !sent.is_empty() {
+                if sent[0].block_ts() <= received[0].block_ts() {
                     tx.push(sent.remove(0));
-                    while !sent.is_empty() && sent[0].block_ts() == tx[0].block_ts()
-                    {
+                    while !sent.is_empty() && sent[0].block_ts() == tx[0].block_ts() {
                         tx.push(sent.remove(0));
                     }
                     htx.tx_type = "Sent".to_string();
-                    htx.date_time = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].block_ts())).format("%Y-%m-%d %H:%M:%S").to_string();
-                }
-                else
-                {
+                    htx.date_time = DateTime::<Local>::from(
+                        UNIX_EPOCH + Duration::from_millis(tx[0].block_ts()),
+                    )
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string();
+                } else {
                     tx.push(received.remove(0));
-                    while !received.is_empty() && received[0].block_ts() == tx[0].block_ts()
-                    {
+                    while !received.is_empty() && received[0].block_ts() == tx[0].block_ts() {
                         tx.push(received.remove(0));
                     }
                     htx.tx_type = "Received".to_string();
-                    htx.date_time = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].block_ts())).format("%Y-%m-%d %H:%M:%S").to_string();
+                    htx.date_time = DateTime::<Local>::from(
+                        UNIX_EPOCH + Duration::from_millis(tx[0].block_ts()),
+                    )
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string();
                 }
-
-            }
-            else if !received.is_empty() && sent.is_empty()
-            {
+            } else if !received.is_empty() && sent.is_empty() {
                 tx.push(received.remove(0));
-                while !received.is_empty() && received[0].block_ts() == tx[0].block_ts()
-                {
+                while !received.is_empty() && received[0].block_ts() == tx[0].block_ts() {
                     tx.push(received.remove(0));
                 }
                 htx.tx_type = "Received".to_string();
-                htx.date_time = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].block_ts())).format("%Y-%m-%d %H:%M:%S").to_string();
-            }
-            else if received.is_empty() && !sent.is_empty()
-            {
+                htx.date_time =
+                    DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].block_ts()))
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string();
+            } else if received.is_empty() && !sent.is_empty() {
                 tx.push(sent.remove(0));
-                while !sent.is_empty() && sent[0].block_ts() == tx[0].block_ts()
-                {
+                while !sent.is_empty() && sent[0].block_ts() == tx[0].block_ts() {
                     tx.push(sent.remove(0));
                 }
                 htx.tx_type = "Sent".to_string();
-                htx.date_time = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].block_ts())).format("%Y-%m-%d %H:%M:%S").to_string();
+                htx.date_time =
+                    DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(tx[0].block_ts()))
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string();
             }
 
-            for n in tx.iter()
-            {
+            for n in tx.iter() {
                 // Special-case (AT UX): if an auth token is minted and burned within the same block timestamp,
                 // hide it entirely (suppress both mint and burn). This situation is usually an internal
                 // one-shot token and showing it clutters/confuses history.
@@ -686,9 +729,11 @@ impl Wallet
                 // "Received" AT is still in `received` and can be removed here.
                 if htx.tx_type == "Sent" && n.note().is_auth_token() {
                     let cm = n.note().commitment();
-                    if let Some(idx) = received.iter().position(|m|
-                        m.block_ts() == n.block_ts() && m.note().is_auth_token() && m.note().commitment() == cm
-                    ) {
+                    if let Some(idx) = received.iter().position(|m| {
+                        m.block_ts() == n.block_ts()
+                            && m.note().is_auth_token()
+                            && m.note().commitment() == cm
+                    }) {
                         // Remove the mint (Received) entry so it won't show later
                         received.remove(idx);
                         // Skip showing the burn (Sent) entry
@@ -706,40 +751,84 @@ impl Wallet
                 //
                 // To avoid showing such duplicates in the wallet history, we suppress outgoing notes that have
                 // a matching incoming note (same commitment, same block_ts).
-                if htx.tx_type == "Sent" && n.note().account() != Name(0) && !n.note().is_auth_token()
+                if htx.tx_type == "Sent"
+                    && n.note().account() != Name(0)
+                    && !n.note().is_auth_token()
                 {
                     let cm = n.note().commitment();
-                    if received.iter().any(|m|
-                        m.block_ts() == n.block_ts() && m.note().commitment() == cm
-                    ) { continue; }
+                    if received
+                        .iter()
+                        .any(|m| m.block_ts() == n.block_ts() && m.note().commitment() == cm)
+                    {
+                        continue;
+                    }
                 }
 
-                if !n.note().memo().eq(&MEMO_CHANGE_NOTE)
-                {
-                    if n.note().account().eq(&self.alias_authority.actor) && n.note().memo_string().contains("fee")
+                if !n.note().memo().eq(&MEMO_CHANGE_NOTE) {
+                    if n.note().account().eq(&self.alias_authority.actor)
+                        && n.note().memo_string().contains("fee")
                     {
                         htx.tx_fee = n.note().asset().quantity().to_string();
-                    }
-                    else if n.note().account().raw() != 0
-                    {
+                    } else if n.note().account().raw() != 0 {
                         htx.account_asset_memo.push((
                             n.note().account().to_string(),
-                            if n.note().is_auth_token() { hex::encode(n.note().commitment().to_bytes()) } else { n.note().asset().to_string() + &if htx.tx_type.eq("Received") { " (@".to_owned() + &n.note().address().to_bech32m().unwrap() + ")" } else { "".to_string() } },
-                            String::from_utf8(n.note().memo()[0..{let len = n.note().memo().iter().position(|&c| c == 0); if len.is_none() {512} else {len.unwrap()}}].to_vec()).unwrap()
+                            if n.note().is_auth_token() {
+                                hex::encode(n.note().commitment().to_bytes())
+                            } else {
+                                n.note().asset().to_string()
+                                    + &if htx.tx_type.eq("Received") {
+                                        " (@".to_owned()
+                                            + &n.note().address().to_bech32m().unwrap()
+                                            + ")"
+                                    } else {
+                                        "".to_string()
+                                    }
+                            },
+                            String::from_utf8(
+                                n.note().memo()[0..{
+                                    let len = n.note().memo().iter().position(|&c| c == 0);
+                                    if len.is_none() {
+                                        512
+                                    } else {
+                                        len.unwrap()
+                                    }
+                                }]
+                                    .to_vec(),
+                            )
+                            .unwrap(),
                         ));
-                    }
-                    else
-                    {
+                    } else {
                         htx.account_asset_memo.push((
-                            if htx.tx_type.eq("Sent") { n.note().address().to_bech32m().unwrap() } else { "".to_string() },
-                            n.note().asset().to_string() + &if htx.tx_type.eq("Received") { " (@".to_owned() + &n.note().address().to_bech32m().unwrap() + ")" } else { "".to_string() },
-                            String::from_utf8(n.note().memo()[0..{let len = n.note().memo().iter().position(|&c| c == 0); if len.is_none() {512} else {len.unwrap()}}].to_vec()).unwrap()
+                            if htx.tx_type.eq("Sent") {
+                                n.note().address().to_bech32m().unwrap()
+                            } else {
+                                "".to_string()
+                            },
+                            n.note().asset().to_string()
+                                + &if htx.tx_type.eq("Received") {
+                                    " (@".to_owned()
+                                        + &n.note().address().to_bech32m().unwrap()
+                                        + ")"
+                                } else {
+                                    "".to_string()
+                                },
+                            String::from_utf8(
+                                n.note().memo()[0..{
+                                    let len = n.note().memo().iter().position(|&c| c == 0);
+                                    if len.is_none() {
+                                        512
+                                    } else {
+                                        len.unwrap()
+                                    }
+                                }]
+                                    .to_vec(),
+                            )
+                            .unwrap(),
                         ));
                     }
                 }
             }
-            if !htx.account_asset_memo.is_empty()
-            {
+            if !htx.account_asset_memo.is_empty() {
                 history.push(htx);
             }
         }
@@ -747,8 +836,7 @@ impl Wallet
     }
 
     // Merkle Tree must be up-to-date before calling this function!
-    pub fn digest_block(&mut self, block: &str) -> u64
-    {
+    pub fn digest_block(&mut self, block: &str) -> u64 {
         let sk = SpendingKey::from_seed(&self.seed);
         let fvk = FullViewingKey::from_spending_key(&sk);
         let j: Value = serde_json::from_str(&block).unwrap();
@@ -762,71 +850,92 @@ impl Wallet
         let mut ats_spent = 0;
 
         // make sure to not sync a block twice
-        if block_num <= self.block_num { return 0; }
+        if block_num <= self.block_num {
+            return 0;
+        }
 
-        for tx in j["transactions"].as_array().unwrap()
-        {
-            for action in tx["trx"]["transaction"]["actions"].as_array().unwrap()
-            {
-                if action["account"].as_str().unwrap().eq(&self.alias_authority.actor.to_string())
+        for tx in j["transactions"].as_array().unwrap() {
+            for action in tx["trx"]["transaction"]["actions"].as_array().unwrap() {
+                if action["account"]
+                    .as_str()
+                    .unwrap()
+                    .eq(&self.alias_authority.actor.to_string())
                 {
-                    if  action["name"].as_str().unwrap().eq("mint") ||
-                        action["name"].as_str().unwrap().eq("spend") ||
-                        action["name"].as_str().unwrap().eq("publishnotes")
+                    if action["name"].as_str().unwrap().eq("mint")
+                        || action["name"].as_str().unwrap().eq("spend")
+                        || action["name"].as_str().unwrap().eq("publishnotes")
                     {
                         let mut notes_b64 = vec![];
-                        for ct in action["data"]["note_ct"].as_array().unwrap()
-                        {
+                        for ct in action["data"]["note_ct"].as_array().unwrap() {
                             notes_b64.push(ct.as_str().unwrap().to_string());
                         }
                         notes_received = self.add_notes(&notes_b64, block_num, block_ts);
                     }
-                    if action["name"].as_str().unwrap().eq("spend")
-                    {
-                        for seq in action["data"]["actions"].as_array().unwrap()
-                        {
-                            let seq: PlsSpendSequence = serde_json::from_value(seq.clone()).unwrap();
+                    if action["name"].as_str().unwrap().eq("spend") {
+                        for seq in action["data"]["actions"].as_array().unwrap() {
+                            let seq: PlsSpendSequence =
+                                serde_json::from_value(seq.clone()).unwrap();
 
-                            for so in seq.spend_output.iter()
-                            {
+                            for so in seq.spend_output.iter() {
                                 // check if published nullifier belongs to one of our notes
-                                let index = self.unspent_notes.iter().position(|n| n.note().nullifier(&fvk.nk, n.position()).extract().0.eq(&crate::engine::Scalar::try_from(so.nf.clone()).unwrap()));
-                                if index.is_some()
-                                {
+                                let index = self.unspent_notes.iter().position(|n| {
+                                    n.note()
+                                        .nullifier(&fvk.nk, n.position())
+                                        .extract()
+                                        .0
+                                        .eq(&crate::engine::Scalar::try_from(so.nf.clone())
+                                            .unwrap())
+                                });
+                                if index.is_some() {
                                     let note = self.unspent_notes.remove(index.unwrap());
-                                    if note.note().symbol().raw() == 0 && note.note().amount() != 0 { nfts_spent += 1; } else { fts_spent += 1; }
+                                    if note.note().symbol().raw() == 0 && note.note().amount() != 0
+                                    {
+                                        nfts_spent += 1;
+                                    } else {
+                                        fts_spent += 1;
+                                    }
                                     self.spent_notes.push(note);
                                 }
                             }
 
-                            for s in seq.spend.iter()
-                            {
+                            for s in seq.spend.iter() {
                                 // check if published nullifier belongs to one of our notes
-                                let index = self.unspent_notes.iter().position(|n| n.note().nullifier(&fvk.nk, n.position()).extract().0.eq(&crate::engine::Scalar::try_from(s.nf.clone()).unwrap()));
-                                if index.is_some()
-                                {
+                                let index = self.unspent_notes.iter().position(|n| {
+                                    n.note()
+                                        .nullifier(&fvk.nk, n.position())
+                                        .extract()
+                                        .0
+                                        .eq(&crate::engine::Scalar::try_from(s.nf.clone()).unwrap())
+                                });
+                                if index.is_some() {
                                     let note = self.unspent_notes.remove(index.unwrap());
-                                    if note.note().symbol().raw() == 0 && note.note().amount() != 0 { nfts_spent += 1; } else { fts_spent += 1; }
+                                    if note.note().symbol().raw() == 0 && note.note().amount() != 0
+                                    {
+                                        nfts_spent += 1;
+                                    } else {
+                                        fts_spent += 1;
+                                    }
                                     self.spent_notes.push(note);
                                 }
                             }
                         }
                     }
-                    if action["name"].as_str().unwrap().eq("authenticate")
-                    {
-                        let a: PlsAuthenticate = serde_json::from_value(action["data"]["action"].clone()).unwrap();
+                    if action["name"].as_str().unwrap().eq("authenticate") {
+                        let a: PlsAuthenticate =
+                            serde_json::from_value(action["data"]["action"].clone()).unwrap();
 
                         // check if published note commitment belongs to one of our auth notes
-                        let index = self.unspent_notes.iter().position(|n| n.note().commitment().0.eq(&crate::engine::Scalar::try_from(a.cm.clone()).unwrap()));
-                        if index.is_some()
-                        {
-                            if a.burn == 0
-                            {
+                        let index = self.unspent_notes.iter().position(|n| {
+                            n.note()
+                                .commitment()
+                                .0
+                                .eq(&crate::engine::Scalar::try_from(a.cm.clone()).unwrap())
+                        });
+                        if index.is_some() {
+                            if a.burn == 0 {
                                 // normal access via auth token
                                 // TODO: log this somehow?
-                            }
-                            else
-                            {
+                            } else {
                                 // auth note was burned
                                 let burned = self.unspent_notes.remove(index.unwrap());
 
@@ -840,7 +949,7 @@ impl Wallet
                                     block_num,
                                     block_ts,
                                     block_ts, // wallet_ts: use burn time as well
-                                    0,        // leaf_idx_arr: not applicable (same as other outgoing notes you store)
+                                    0, // leaf_idx_arr: not applicable (same as other outgoing notes you store)
                                     burned.note().clone(),
                                 );
                                 self.outgoing_notes.push(burn_ex);
@@ -854,45 +963,44 @@ impl Wallet
         // with every block also loop through all unpublished notes and attempt to add every single one of them to this wallet (i.e. try to
         // decrypt them as sender or receiver). This way it is ensured that all unpublished notes related to this wallet are always added
         // automatically which means the user doesn't have to add them manually
-        for(_, map) in self.unpublished_notes.clone().into_iter()
-        {
-            for(_, notes) in map.into_iter()
-            {
+        for (_, map) in self.unpublished_notes.clone().into_iter() {
+            for (_, notes) in map.into_iter() {
                 notes_received += self.add_notes(&notes, 0, 0);
             }
         }
 
         self.block_num = block_num;
-        (ats_spent << 48) | (nfts_spent << 40) | (fts_spent << 32) | notes_received //(ats_received << 16) | (nfts_received << 8) | fts_received
+        (ats_spent << 48) | (nfts_spent << 40) | (fts_spent << 32) | notes_received
+        //(ats_received << 16) | (nfts_received << 8) | fts_received
     }
 
-    pub fn add_unpublished_notes(&mut self, unpublished_notes: &HashMap<String, Vec<String>>)
-    {
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_millis() as u64;
+    pub fn add_unpublished_notes(&mut self, unpublished_notes: &HashMap<String, Vec<String>>) {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis() as u64;
         self.unpublished_notes.insert(ts, unpublished_notes.clone());
         // attempt to add all unpublished notes to this wallet
-        for(_, map) in self.unpublished_notes.clone().into_iter()
-        {
-            for(_, notes) in map.into_iter()
-            {
+        for (_, map) in self.unpublished_notes.clone().into_iter() {
+            for (_, notes) in map.into_iter() {
                 self.add_notes(&notes, 0, 0);
             }
         }
     }
 
-    fn insert_into_merkle_tree(&mut self, leaf: &ScalarBytes) -> u64
-    {
+    fn insert_into_merkle_tree(&mut self, leaf: &ScalarBytes) -> u64 {
         // calculate array index of next free leaf in current tree
-        let mut idx = MT_ARR_LEAF_ROW_OFFSET!(MERKLE_TREE_DEPTH) + self.leaf_count % MT_NUM_LEAVES!(MERKLE_TREE_DEPTH);
+        let mut idx = MT_ARR_LEAF_ROW_OFFSET!(MERKLE_TREE_DEPTH)
+            + self.leaf_count % MT_NUM_LEAVES!(MERKLE_TREE_DEPTH);
         // calculate tree offset to translate local array indices of current tree to absolute array indices of global array
-        let tos = self.leaf_count / MT_NUM_LEAVES!(MERKLE_TREE_DEPTH) * MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH);
+        let tos = self.leaf_count / MT_NUM_LEAVES!(MERKLE_TREE_DEPTH)
+            * MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH);
 
         // insert this leaf into tree
         self.merkle_tree.insert(tos + idx, leaf.clone());
 
         // update merkle path
-        for d in 0..MERKLE_TREE_DEPTH
-        {
+        for d in 0..MERKLE_TREE_DEPTH {
             let is_left_child = 1 == idx % 2;
             let sis_idx = if is_left_child { idx + 1 } else { idx - 1 };
 
@@ -900,8 +1008,16 @@ impl Wallet
             //                                                         (parent)                 |                     (parent)
             //                                                         /       \                |                     /       \
             //                                                      (idx)      (0)              |                (sis_idx)   (idx)
-            let l = if is_left_child { self.merkle_tree.get(&(tos + idx)).unwrap() }    else { self.merkle_tree.get(&(tos + sis_idx)).unwrap() };
-            let r = if is_left_child { &EMPTY_ROOTS[d] }                                else { self.merkle_tree.get(&(tos + idx)).unwrap() };
+            let l = if is_left_child {
+                self.merkle_tree.get(&(tos + idx)).unwrap()
+            } else {
+                self.merkle_tree.get(&(tos + sis_idx)).unwrap()
+            };
+            let r = if is_left_child {
+                &EMPTY_ROOTS[d]
+            } else {
+                self.merkle_tree.get(&(tos + idx)).unwrap()
+            };
 
             // take advantage of the fact that WASM uses little-endian byte encoding
             let mut parent_val: [u8; 32] = Blake2s7rParams::new()
@@ -917,8 +1033,7 @@ impl Wallet
 
             // in case of merkle root: mask the 2 MSBs off the root value, since the arithmetic
             // circuit only supports roots of 254 bits width.
-            if d == MERKLE_TREE_DEPTH - 1
-            {
+            if d == MERKLE_TREE_DEPTH - 1 {
                 parent_val[31] &= 0x3F;
             }
 
@@ -926,25 +1041,34 @@ impl Wallet
             idx = if is_left_child { idx / 2 } else { sis_idx / 2 };
 
             // check if parent node already exists
-            self.merkle_tree.entry(tos + idx).and_modify(|e| *e = ScalarBytes(parent_val)).or_insert(ScalarBytes(parent_val));
+            self.merkle_tree
+                .entry(tos + idx)
+                .and_modify(|e| *e = ScalarBytes(parent_val))
+                .or_insert(ScalarBytes(parent_val));
         }
 
         self.leaf_count += 1;
         return tos;
     }
 
-    pub fn get_sister_path_and_root(&self, note: &NoteEx) -> Option<(Vec<Option<([u8; 32], bool)>>, ScalarBytes)>
-    {
+    pub fn get_sister_path_and_root(
+        &self,
+        note: &NoteEx,
+    ) -> Option<(Vec<Option<([u8; 32], bool)>>, ScalarBytes)> {
         let mut idx = note.leaf_idx_arr() % MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH);
-        let tos = note.leaf_idx_arr() / MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH) * MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH);
+        let tos = note.leaf_idx_arr() / MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH)
+            * MT_ARR_FULL_TREE_OFFSET!(MERKLE_TREE_DEPTH);
 
         let mut sis_path = vec![];
-        for d in 0..MERKLE_TREE_DEPTH
-        {
+        for d in 0..MERKLE_TREE_DEPTH {
             let is_left_child = 1 == idx % 2;
             let sis_idx = if is_left_child { idx + 1 } else { idx - 1 };
 
-            let sister = if self.merkle_tree.contains_key(&(tos + sis_idx)) { self.merkle_tree.get(&(tos + sis_idx)).unwrap().clone() } else { EMPTY_ROOTS[d].clone() };
+            let sister = if self.merkle_tree.contains_key(&(tos + sis_idx)) {
+                self.merkle_tree.get(&(tos + sis_idx)).unwrap().clone()
+            } else {
+                EMPTY_ROOTS[d].clone()
+            };
             sis_path.push(Some((sister.0, !is_left_child)));
 
             // left child's array index divided by two (integer division) equals array index of parent node
@@ -994,21 +1118,21 @@ impl Wallet
 }
 
 #[cfg(test)]
-mod tests
-{
+mod tests {
     use crate::{
-        wallet::Wallet,
+        contract::{AffineProofBytesLE, PlsMint, ScalarBytes},
+        eosio::{Action, Authorization, ExtendedAsset, Name, Transaction},
+        keys::{FullViewingKey, SpendingKey},
         note::{Note, Rseed},
-        eosio::{Authorization, Name, Transaction, Action, ExtendedAsset},
-        contract::{PlsMint, ScalarBytes, AffineProofBytesLE},
-        note_encryption::{NoteEncryption, TransmittedNoteCiphertext, derive_esk, ka_derive_public},
-        keys::{SpendingKey, FullViewingKey}
+        note_encryption::{
+            derive_esk, ka_derive_public, NoteEncryption, TransmittedNoteCiphertext,
+        },
+        wallet::Wallet,
     };
     use rand::rngs::OsRng;
 
     #[test]
-    fn test_serde()
-    {
+    fn test_serde() {
         let mut rng = OsRng.clone();
         let seed = b"this is a sample seed which should be at least 32 bytes long...";
         let fvk = FullViewingKey::from_spending_key(&SpendingKey::from_seed(seed));
@@ -1018,30 +1142,142 @@ mod tests
             [0; 32],
             Name::from_string(&format!("zeos4privacy")).unwrap(),
             Name::from_string(&format!("thezeosvault")).unwrap(),
-            Authorization::from_string(&format!("thezeosalias@public")).unwrap()
-        ).unwrap();
+            Authorization::from_string(&format!("thezeosalias@public")).unwrap(),
+        )
+        .unwrap();
 
         let notes = vec![
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"7.0000 ZEOS@thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"17.0000 ZEOS@thezeostoken".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"10.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"5.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"4.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"4.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"3.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"3.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"20.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"2.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"2.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"2.0000 EOS@eosio.token".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"12345678987654321@atomicassets".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"99999999998765431@atomicassets".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"88888888887654321@atomicassets".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512]),
-            Note::from_parts(0, w.default_address().unwrap(), Name(0), ExtendedAsset::from_string(&"12345677777777321@atomicassets".to_string()).unwrap(), Rseed::new(&mut rng), [0; 512])
+            Note::from_parts(
+                0,
+                w.default_address().unwrap(),
+                Name(0),
+                ExtendedAsset::from_string(&"7.0000 ZEOS@thezeostoken".to_string()).unwrap(),
+                Rseed::new(&mut rng),
+                [0; 512],
+            ),
+            Note::from_parts(
+                0,
+                w.default_address().unwrap(),
+                Name(0),
+                ExtendedAsset::from_string(&"17.0000 ZEOS@thezeostoken".to_string()).unwrap(),
+                Rseed::new(&mut rng),
+                [0; 512],
+            ),
+            Note::from_parts(
+                0,
+                w.default_address().unwrap(),
+                Name(0),
+                ExtendedAsset::from_string(&"10.0000 EOS@eosio.token".to_string()).unwrap(),
+                Rseed::new(&mut rng),
+                [0; 512],
+            ),
+            Note::from_parts(
+                0,
+                w.default_address().unwrap(),
+                Name(0),
+                ExtendedAsset::from_string(&"5.0000 EOS@eosio.token".to_string()).unwrap(),
+                Rseed::new(&mut rng),
+                [0; 512],
+            ),
+            Note::from_parts(
+                0,
+                w.default_address().unwrap(),
+                Name(0),
+                ExtendedAsset::from_string(&"4.0000 EOS@eosio.token".to_string()).unwrap(),
+                Rseed::new(&mut rng),
+                [0; 512],
+            ),
+            Note::from_parts(
+                0,
+                w.default_address().unwrap(),
+                Name(0),
+                ExtendedAsset::from_string(&"4.0000 EOS@eosio.token".to_string()).unwrap(),
+                Rseed::new(&mut rng),
+                [0; 512],
+            ),
+            Note::from_parts(
+                0,
+                w.default_address().unwrap(),
+                Name(0),
+                ExtendedAsset::from_string(&"3.0000 EOS@eosio.token".to_string()).unwrap(),
+                Rseed::new(&mut rng),
+                [0; 512],
+            ),
+            Note::from_parts(
+                0,
+                w.default_address().unwrap(),
+                Name(0),
+                ExtendedAsset::from_string(&"3.0000 EOS@eosio.token".to_string()).unwrap(),
+                Rseed::new(&mut rng),
+                [0; 512],
+            ),
+            Note::from_parts(
+                0,
+                w.default_address().unwrap(),
+                Name(0),
+                ExtendedAsset::from_string(&"20.0000 EOS@eosio.token".to_string()).unwrap(),
+                Rseed::new(&mut rng),
+                [0; 512],
+            ),
+            Note::from_parts(
+                0,
+                w.default_address().unwrap(),
+                Name(0),
+                ExtendedAsset::from_string(&"2.0000 EOS@eosio.token".to_string()).unwrap(),
+                Rseed::new(&mut rng),
+                [0; 512],
+            ),
+            Note::from_parts(
+                0,
+                w.default_address().unwrap(),
+                Name(0),
+                ExtendedAsset::from_string(&"2.0000 EOS@eosio.token".to_string()).unwrap(),
+                Rseed::new(&mut rng),
+                [0; 512],
+            ),
+            Note::from_parts(
+                0,
+                w.default_address().unwrap(),
+                Name(0),
+                ExtendedAsset::from_string(&"2.0000 EOS@eosio.token".to_string()).unwrap(),
+                Rseed::new(&mut rng),
+                [0; 512],
+            ),
+            Note::from_parts(
+                0,
+                w.default_address().unwrap(),
+                Name(0),
+                ExtendedAsset::from_string(&"12345678987654321@atomicassets".to_string()).unwrap(),
+                Rseed::new(&mut rng),
+                [0; 512],
+            ),
+            Note::from_parts(
+                0,
+                w.default_address().unwrap(),
+                Name(0),
+                ExtendedAsset::from_string(&"99999999998765431@atomicassets".to_string()).unwrap(),
+                Rseed::new(&mut rng),
+                [0; 512],
+            ),
+            Note::from_parts(
+                0,
+                w.default_address().unwrap(),
+                Name(0),
+                ExtendedAsset::from_string(&"88888888887654321@atomicassets".to_string()).unwrap(),
+                Rseed::new(&mut rng),
+                [0; 512],
+            ),
+            Note::from_parts(
+                0,
+                w.default_address().unwrap(),
+                Name(0),
+                ExtendedAsset::from_string(&"12345677777777321@atomicassets".to_string()).unwrap(),
+                Rseed::new(&mut rng),
+                [0; 512],
+            ),
         ];
 
-        for n in notes.iter()
-        {
+        for n in notes.iter() {
             let esk = derive_esk(n).unwrap();
             let epk = ka_derive_public(n, &esk);
             let ne = NoteEncryption::new(Some(fvk.ovk), n.clone());
@@ -1069,38 +1305,38 @@ mod tests
         assert_eq!(w, decoded);
 
         println!("{}", serde_json::to_string_pretty(&w.balances()).unwrap());
-        println!("{}", serde_json::to_string_pretty(&w.non_fungible_tokens(&Name(0))).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&w.non_fungible_tokens(&Name(0))).unwrap()
+        );
     }
 
     #[test]
-    fn test_payload_serde()
-    {
-        let tx = Transaction{
-            actions: vec![
-                Action{
-                    account: Name(0),
-                    name: Name(0),
-                    authorization: vec![Authorization{
-                        actor: Name(0),
-                        permission: Name(0)
-                    }],
-                    data: serde_json::to_value(PlsMint{
-                        cm: ScalarBytes([0; 32]),
-                        value: 0,
-                        symbol: 0, //Symbol(0),
-                        contract: Name(0),
-                        proof: AffineProofBytesLE([0; 384])
-                    }).unwrap()
-                }
-            ]
+    fn test_payload_serde() {
+        let tx = Transaction {
+            actions: vec![Action {
+                account: Name(0),
+                name: Name(0),
+                authorization: vec![Authorization {
+                    actor: Name(0),
+                    permission: Name(0),
+                }],
+                data: serde_json::to_value(PlsMint {
+                    cm: ScalarBytes([0; 32]),
+                    value: 0,
+                    symbol: 0, //Symbol(0),
+                    contract: Name(0),
+                    proof: AffineProofBytesLE([0; 384]),
+                })
+                .unwrap(),
+            }],
         };
 
         println!("{}", serde_json::to_string(&tx).unwrap());
     }
 
     #[test]
-    fn test_digest_block()
-    {
+    fn test_digest_block() {
         //let mut rng = OsRng.clone();
 
         let blocks = vec![
@@ -1124,13 +1360,14 @@ mod tests
         ).unwrap();
 
         w.add_leaves(leaves.as_slice());
-        for b in blocks
-        {
+        for b in blocks {
             w.digest_block(&b.to_string());
         }
 
         println!("{}", w.to_json(true));
-        println!("{:?}", serde_json::to_string(&w.get_sister_path_and_root(&w.unspent_notes[0])).unwrap());
-
+        println!(
+            "{:?}",
+            serde_json::to_string(&w.get_sister_path_and_root(&w.unspent_notes[0])).unwrap()
+        );
     }
 }

@@ -1,22 +1,26 @@
 //! Helper structs to deal with EOSIO/Antelope related types.
 
-use std::{error::Error, fmt, cmp::{min, max}};
-use serde::{Serialize, Serializer, ser::SerializeStruct, Deserialize, Deserializer, de::Visitor, de::SeqAccess, de::MapAccess, de};
+use serde::{
+    de, de::MapAccess, de::SeqAccess, de::Visitor, ser::SerializeStruct, Deserialize, Deserializer,
+    Serialize, Serializer,
+};
 use serde_json::Value;
 use std::iter::successors;
+use std::{
+    cmp::{max, min},
+    error::Error,
+    fmt,
+};
 
 #[derive(Debug)]
-pub enum NameError
-{
+pub enum NameError {
     StringTooLong,
     CharNotAllowed(String),
     ThirteenthCharacter,
 }
 impl Error for NameError {}
-impl fmt::Display for NameError
-{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result
-    {
+impl fmt::Display for NameError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self
         {
             Self::StringTooLong => write!(f, "invalid EOSIO name: string is too long to be a valid name"),
@@ -29,34 +33,27 @@ impl fmt::Display for NameError
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Name(pub u64);
 
-impl Name
-{
-    pub fn from_string(str: &str) -> Result<Self, NameError>
-    {
+impl Name {
+    pub fn from_string(str: &str) -> Result<Self, NameError> {
         let mut value = 0;
-        if str.len() > 13
-        {
+        if str.len() > 13 {
             // string is too long to be a valid name
             return Err(NameError::StringTooLong);
         }
-        if str.is_empty()
-        {
+        if str.is_empty() {
             return Ok(Name(0));
         }
         let n = min(str.len(), 12);
-        for i in 0..n
-        {
+        for i in 0..n {
             value <<= 5;
             let c = Self::char_to_value(str.as_bytes()[i])?;
             value |= c as u64;
         }
-        value <<= 4 + 5*(12 - n);
-        if str.len() == 13
-        {
+        value <<= 4 + 5 * (12 - n);
+        if str.len() == 13 {
             let c = Self::char_to_value(str.as_bytes()[12])?;
             let v = c as u64;
-            if v > 0x0F
-            {
+            if v > 0x0F {
                 // thirteenth character in name cannot be a letter that comes after j
                 return Err(NameError::ThirteenthCharacter);
             }
@@ -65,40 +62,30 @@ impl Name
         Ok(Name(value))
     }
 
-    pub fn char_to_value(c: u8) -> Result<u8, NameError>
-    {
-        if c == '.' as u8
-        {
-        return Ok(0);
-        }
-        else if  c >= '1' as u8 && c <= '5' as u8
-        {
-        return Ok((c - '1' as u8) + 1);
-        }
-        else if c >= 'a' as u8 && c <= 'z' as u8
-        {
-        return Ok((c - 'a' as u8) + 6);
+    pub fn char_to_value(c: u8) -> Result<u8, NameError> {
+        if c == '.' as u8 {
+            return Ok(0);
+        } else if c >= '1' as u8 && c <= '5' as u8 {
+            return Ok((c - '1' as u8) + 1);
+        } else if c >= 'a' as u8 && c <= 'z' as u8 {
+            return Ok((c - 'a' as u8) + 6);
         }
         // character is not in allowed character set for names
         return Err(NameError::CharNotAllowed((c as char).to_string()));
     }
 
-    pub fn length(&self) -> u8
-    {
+    pub fn length(&self) -> u8 {
         let mask = 0xF800000000000000u64;
 
-        if self.0 == 0
-        {
+        if self.0 == 0 {
             return 0;
         }
 
         let mut l = 0;
         let mut i = 0;
         let mut v = self.0;
-        while i < 13
-        {
-            if (v & mask) > 0
-            {
+        while i < 13 {
+            if (v & mask) > 0 {
                 l = i;
             }
             i += 1;
@@ -108,25 +95,23 @@ impl Name
         l + 1
     }
 
-    pub fn raw(&self) -> u64
-    {
+    pub fn raw(&self) -> u64 {
         self.0
     }
 
-    pub fn suffix(&self) -> Self
-    {
+    pub fn suffix(&self) -> Self {
         let mut remaining_bits_after_last_actual_dot = 0;
         let mut tmp = 0;
         let mut remaining_bits = 59;
-        while remaining_bits >= 4
-        {
+        while remaining_bits >= 4 {
             // Get characters one-by-one in name in order from left to right (not including the 13th character)
             let c = (self.0 >> remaining_bits) & 0x1F;
-            if 0 == c // if this character is a dot
+            if 0 == c
+            // if this character is a dot
             {
                 tmp = remaining_bits as u32;
-            }
-            else // if this character is not a dot
+            } else
+            // if this character is not a dot
             {
                 remaining_bits_after_last_actual_dot = tmp;
             }
@@ -134,14 +119,16 @@ impl Name
         }
 
         let thirteenth_character = self.0 & 0x0F;
-        if 0 != thirteenth_character // if 13th character is not a dot
+        if 0 != thirteenth_character
+        // if 13th character is not a dot
         {
             remaining_bits_after_last_actual_dot = tmp;
         }
 
-        if remaining_bits_after_last_actual_dot == 0  // there is no actual dot in the %name other than potentially leading dots
+        if remaining_bits_after_last_actual_dot == 0
+        // there is no actual dot in the %name other than potentially leading dots
         {
-            return Name{0: self.0};
+            return Name { 0: self.0 };
         }
 
         // At this point remaining_bits_after_last_actual_dot has to be within the range of 4 to 59 (and restricted to increments of 5).
@@ -150,11 +137,12 @@ impl Name
         let mask = (1 << remaining_bits_after_last_actual_dot) - 16;
         let shift = 64 - remaining_bits_after_last_actual_dot;
 
-        Name{0: ((self.0 & mask) << shift) + (thirteenth_character << (shift-1)) }
+        Name {
+            0: ((self.0 & mask) << shift) + (thirteenth_character << (shift - 1)),
+        }
     }
 
-    pub fn prefix(&self) -> Self
-    {
+    pub fn prefix(&self) -> Self {
         let mut result = self.0;
         let mut not_dot_character_seen = false;
         let mut mask = 0xF;
@@ -162,48 +150,44 @@ impl Name
         // Get characters one-by-one in name in order from right to left
         let mut offset = 0;
         //for( int32_t offset = 0; offset <= 59; ) {
-        while offset <= 59
-        {
+        while offset <= 59 {
             let c = (self.0 >> offset) & mask;
 
-            if 0 == c // if this character is a dot
+            if 0 == c
+            // if this character is a dot
             {
-                if not_dot_character_seen // we found the rightmost dot character
+                if not_dot_character_seen
+                // we found the rightmost dot character
                 {
                     result = (self.0 >> offset) << offset;
                     break;
                 }
-            }
-            else
-            {
+            } else {
                 not_dot_character_seen = true;
             }
 
-            if offset == 0
-            {
+            if offset == 0 {
                 offset += 4;
                 mask = 0x1F;
-            }
-            else
-            {
+            } else {
                 offset += 5;
             }
         }
 
-        Name{0: result }
+        Name { 0: result }
     }
 
-    pub fn to_string(&self) -> String
-    {
-        let charmap = vec!['.', '1', '2', '3', '4', '5', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z'];
+    pub fn to_string(&self) -> String {
+        let charmap = vec![
+            '.', '1', '2', '3', '4', '5', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k',
+            'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+        ];
         let mask = 0xF800000000000000;
 
         let mut v = self.0;
         let mut str = "".to_string();
-        for i in 0..13
-        {
-            if v == 0
-            {
+        for i in 0..13 {
+            if v == 0 {
                 return str;
             }
 
@@ -217,8 +201,7 @@ impl Name
 }
 
 // serde_json traits
-impl Serialize for Name
-{
+impl Serialize for Name {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -253,25 +236,19 @@ impl<'de> Deserialize<'de> for Name {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SymbolCode(u64);
 
-impl SymbolCode
-{
-    pub fn new(raw: u64) -> Self
-    {
+impl SymbolCode {
+    pub fn new(raw: u64) -> Self {
         SymbolCode(raw)
     }
 
-    pub fn from_string(str: &String) -> Option<Self>
-    {
-        if str.len() > 7
-        {
+    pub fn from_string(str: &String) -> Option<Self> {
+        if str.len() > 7 {
             // string is too long to be a valid symbol_code
             return None;
         }
         let mut value = 0;
-        for itr in str.chars().rev()
-        {
-            if itr < 'A' || itr > 'Z'
-            {
+        for itr in str.chars().rev() {
+            if itr < 'A' || itr > 'Z' {
                 // only uppercase letters allowed in symbol_code string
                 return None;
             }
@@ -281,23 +258,28 @@ impl SymbolCode
         Some(SymbolCode(value))
     }
 
-    pub fn is_valid(&self) -> bool
-    {
-        if self.0 == 0 { return true; } // make NFT symbol code: '0,' (i.e. raw == 0) a valid symbol code
+    pub fn is_valid(&self) -> bool {
+        if self.0 == 0 {
+            return true;
+        } // make NFT symbol code: '0,' (i.e. raw == 0) a valid symbol code
         let mut sym = self.0;
         let mut i = 0;
-        while i < 7
-        {
+        while i < 7 {
             let c = (sym & 0xFF) as u8 as char;
-            if !('A' <= c && c <= 'Z') { return false; }
+            if !('A' <= c && c <= 'Z') {
+                return false;
+            }
             sym >>= 8;
-            if 0 == (sym & 0xFF)
-            {
+            if 0 == (sym & 0xFF) {
                 loop {
                     sym >>= 8;
-                    if 0 != (sym & 0xFF) { return false; }
+                    if 0 != (sym & 0xFF) {
+                        return false;
+                    }
                     i += 1;
-                    if i >= 7 { break; }
+                    if i >= 7 {
+                        break;
+                    }
                 }
             }
             i += 1;
@@ -305,29 +287,24 @@ impl SymbolCode
         return true;
     }
 
-    pub fn length(&self) -> u32
-    {
+    pub fn length(&self) -> u32 {
         let mut sym = self.0;
         let mut len = 0;
-        while 0 != (sym & 0xFF) && len <= 7
-        {
+        while 0 != (sym & 0xFF) && len <= 7 {
             len += 1;
             sym >>= 8;
         }
         return len;
     }
 
-    pub fn raw(&self) -> u64
-    {
+    pub fn raw(&self) -> u64 {
         self.0
     }
 
-    pub fn to_string(&self) -> String
-    {
+    pub fn to_string(&self) -> String {
         let mut v = self.0;
         let mut s = "".to_string();
-        while v > 0
-        {
+        while v > 0 {
             s.push((v & 0xFF) as u8 as char);
             v >>= 8;
         }
@@ -336,8 +313,7 @@ impl SymbolCode
 }
 
 // serde_json traits
-impl Serialize for SymbolCode
-{
+impl Serialize for SymbolCode {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -361,8 +337,7 @@ impl<'de> Visitor<'de> for SymbolCodeVisitor {
             .ok_or_else(|| E::custom("invalid SymbolCode (must be 1-7 uppercase letters)"))
     }
 }
-impl<'de> Deserialize<'de> for SymbolCode
-{
+impl<'de> Deserialize<'de> for SymbolCode {
     fn deserialize<D>(deserializer: D) -> Result<SymbolCode, D::Error>
     where
         D: Deserializer<'de>,
@@ -374,55 +349,52 @@ impl<'de> Deserialize<'de> for SymbolCode
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Symbol(pub u64);
 
-impl Symbol
-{
-    pub fn from_sc_precision(sc: SymbolCode, precision: u8) -> Self
-    {
+impl Symbol {
+    pub fn from_sc_precision(sc: SymbolCode, precision: u8) -> Self {
         Symbol((sc.raw() << 8) | precision as u64)
     }
 
-    pub fn from_string(str: &String) -> Option<Self>
-    {
+    pub fn from_string(str: &String) -> Option<Self> {
         let parts: Vec<String> = str.split(",").map(|s| s.to_string()).collect();
-        if parts.len() != 2 { return None; }
+        if parts.len() != 2 {
+            return None;
+        }
         let precision = parts[0].parse::<u8>();
-        if precision.is_err() { return None; }
+        if precision.is_err() {
+            return None;
+        }
         let precision = precision.unwrap();
         let sc = SymbolCode::from_string(&parts[1]);
-        if sc.is_none() { return None; }
+        if sc.is_none() {
+            return None;
+        }
         let sc = sc.unwrap();
         Some(Self::from_sc_precision(sc, precision))
     }
 
-    pub fn is_valid(&self) -> bool
-    {
+    pub fn is_valid(&self) -> bool {
         return self.code().is_valid();
     }
 
-    pub fn precision(&self) -> u8
-    {
+    pub fn precision(&self) -> u8 {
         (self.0 & 0xFF) as u8
     }
 
-    pub fn code(&self) -> SymbolCode
-    {
+    pub fn code(&self) -> SymbolCode {
         SymbolCode(self.0 >> 8)
     }
 
-    pub fn raw(&self) -> u64
-    {
+    pub fn raw(&self) -> u64 {
         self.0
     }
 
-    pub fn to_string(&self) -> String
-    {
+    pub fn to_string(&self) -> String {
         self.precision().to_string() + "," + &self.code().to_string()
     }
 }
 
 // serde_json traits
-impl Serialize for Symbol
-{
+impl Serialize for Symbol {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -435,19 +407,21 @@ impl<'de> Visitor<'de> for SymbolVisitor {
     type Value = Symbol;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a string like '4,EOS' (precision 0-255, code 1-7 uppercase A-Z) or '0,' for NFTs")
+        formatter.write_str(
+            "a string like '4,EOS' (precision 0-255, code 1-7 uppercase A-Z) or '0,' for NFTs",
+        )
     }
 
     fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Symbol::from_string(&value.to_string())
-            .ok_or_else(|| E::custom("invalid Symbol (expected 'P,SC' where SC is A-Z up to 7 chars)"))
+        Symbol::from_string(&value.to_string()).ok_or_else(|| {
+            E::custom("invalid Symbol (expected 'P,SC' where SC is A-Z up to 7 chars)")
+        })
     }
 }
-impl<'de> Deserialize<'de> for Symbol
-{
+impl<'de> Deserialize<'de> for Symbol {
     fn deserialize<D>(deserializer: D) -> Result<Symbol, D::Error>
     where
         D: Deserializer<'de>,
@@ -467,133 +441,150 @@ impl fmt::Display for AssetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AssetError::SymbolMismatch => write!(f, "asset symbols do not match"),
-            AssetError::Overflow       => write!(f, "asset arithmetic overflow"),
-            AssetError::OutOfRange     => write!(f, "asset amount out of allowed range"),
+            AssetError::Overflow => write!(f, "asset arithmetic overflow"),
+            AssetError::OutOfRange => write!(f, "asset amount out of allowed range"),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Asset
-{
+pub struct Asset {
     amount: i64,
-    symbol: Symbol
+    symbol: Symbol,
 }
 
-impl Asset
-{
+impl Asset {
     const MAX_AMOUNT: i64 = (1 << 62) - 1;
 
-    pub fn new(amount: i64, symbol: Symbol) -> Option<Self>
-    {
-        if !symbol.is_valid()
-        {
+    pub fn new(amount: i64, symbol: Symbol) -> Option<Self> {
+        if !symbol.is_valid() {
             return None;
         }
-        if symbol.raw() != 0 && !(-Self::MAX_AMOUNT <= amount && amount <= Self::MAX_AMOUNT)
-        {
+        if symbol.raw() != 0 && !(-Self::MAX_AMOUNT <= amount && amount <= Self::MAX_AMOUNT) {
             return None;
         }
-        Some(Asset{amount, symbol})
+        Some(Asset { amount, symbol })
     }
 
-    pub fn from_string(str: &str) -> Option<Self>
-    {
+    pub fn from_string(str: &str) -> Option<Self> {
         let parts: Vec<String> = str.split(" ").map(|s| s.to_string()).collect();
-        if parts.len() == 1 // NFT case
+        if parts.len() == 1
+        // NFT case
         {
             let amount = parts[0].parse::<u64>();
-            if amount.is_err() { return None; }
-            return Some(Asset { amount: amount.unwrap() as i64, symbol: Symbol(0) })
+            if amount.is_err() {
+                return None;
+            }
+            return Some(Asset {
+                amount: amount.unwrap() as i64,
+                symbol: Symbol(0),
+            });
         }
-        if parts.len() == 2 // FT case
+        if parts.len() == 2
+        // FT case
         {
             let dot = parts[0].find('.');
-            if dot.is_none() // no dot
+            if dot.is_none()
+            // no dot
             {
                 let amount = parts[0].parse::<i64>();
-                if amount.is_err() { return None; }
+                if amount.is_err() {
+                    return None;
+                }
                 let sc = SymbolCode::from_string(&parts[1]);
-                if sc.is_none() { return None; }
+                if sc.is_none() {
+                    return None;
+                }
                 let symbol = Symbol::from_sc_precision(sc.unwrap(), 0);
-                return Some(Asset { amount: amount.unwrap(), symbol })
+                return Some(Asset {
+                    amount: amount.unwrap(),
+                    symbol,
+                });
             }
             let dot = dot.unwrap();
-            let precision = parts[0].len()-1 - dot;
+            let precision = parts[0].len() - 1 - dot;
             let num_parts: Vec<String> = parts[0].split(".").map(|s| s.to_string()).collect();
-            if num_parts.len() != 2 { return None; }
+            if num_parts.len() != 2 {
+                return None;
+            }
             let amount = (num_parts[0].clone() + &num_parts[1]).parse::<i64>();
-            if amount.is_err() { return None; }
+            if amount.is_err() {
+                return None;
+            }
             let sc = SymbolCode::from_string(&parts[1]);
-            if sc.is_none() { return None; }
+            if sc.is_none() {
+                return None;
+            }
             let symbol = Symbol::from_sc_precision(sc.unwrap(), precision as u8);
-            return Some(Asset { amount: amount.unwrap(), symbol })
+            return Some(Asset {
+                amount: amount.unwrap(),
+                symbol,
+            });
         }
 
         None
     }
 
-    pub fn is_amount_within_range(&self) -> bool
-    {
+    pub fn is_amount_within_range(&self) -> bool {
         -Self::MAX_AMOUNT <= self.amount && self.amount <= Self::MAX_AMOUNT
     }
 
-    pub fn is_valid(&self) -> bool
-    {
-        if !self.symbol.is_valid()
-        {
+    pub fn is_valid(&self) -> bool {
+        if !self.symbol.is_valid() {
             return false;
         }
-        if self.symbol.raw() != 0
-        {
+        if self.symbol.raw() != 0 {
             return self.is_amount_within_range();
         }
         true
     }
 
-    pub fn is_nft(&self) -> bool
-    {
+    pub fn is_nft(&self) -> bool {
         return self.symbol().raw() == 0;
     }
 
-    pub fn amount(&self) -> i64
-    {
+    pub fn amount(&self) -> i64 {
         self.amount
     }
 
-    pub fn set_amount(&mut self, amount: i64)
-    {
+    pub fn set_amount(&mut self, amount: i64) {
         self.amount = amount;
     }
 
-    pub fn symbol(&self) -> &Symbol
-    {
+    pub fn symbol(&self) -> &Symbol {
         &self.symbol
     }
 
-    pub fn add(&self, rhs: &Self) -> Result<Self, AssetError>
-    {
+    pub fn add(&self, rhs: &Self) -> Result<Self, AssetError> {
         if self.symbol != rhs.symbol {
             return Err(AssetError::SymbolMismatch);
         }
-        let sum = self.amount.checked_add(rhs.amount).ok_or(AssetError::Overflow)?;
+        let sum = self
+            .amount
+            .checked_add(rhs.amount)
+            .ok_or(AssetError::Overflow)?;
         if self.symbol.raw() != 0 {
             // For fungible tokens, enforce MAX_AMOUNT bounds
-            if !( -Self::MAX_AMOUNT <= sum && sum <= Self::MAX_AMOUNT ) {
+            if !(-Self::MAX_AMOUNT <= sum && sum <= Self::MAX_AMOUNT) {
                 return Err(AssetError::OutOfRange);
             }
         }
-        Ok(Asset { amount: sum, symbol: self.symbol.clone() })
+        Ok(Asset {
+            amount: sum,
+            symbol: self.symbol.clone(),
+        })
     }
 
-    pub fn add_assign(&mut self, rhs: &Self) -> Result<(), AssetError>
-    {
+    pub fn add_assign(&mut self, rhs: &Self) -> Result<(), AssetError> {
         if self.symbol != rhs.symbol {
             return Err(AssetError::SymbolMismatch);
         }
-        let sum = self.amount.checked_add(rhs.amount).ok_or(AssetError::Overflow)?;
+        let sum = self
+            .amount
+            .checked_add(rhs.amount)
+            .ok_or(AssetError::Overflow)?;
         if self.symbol.raw() != 0 {
-            if !( -Self::MAX_AMOUNT <= sum && sum <= Self::MAX_AMOUNT ) {
+            if !(-Self::MAX_AMOUNT <= sum && sum <= Self::MAX_AMOUNT) {
                 return Err(AssetError::OutOfRange);
             }
         }
@@ -601,28 +592,35 @@ impl Asset
         Ok(())
     }
 
-    pub fn sub(&self, rhs: &Self) -> Result<Self, AssetError>
-    {
+    pub fn sub(&self, rhs: &Self) -> Result<Self, AssetError> {
         if self.symbol != rhs.symbol {
             return Err(AssetError::SymbolMismatch);
         }
-        let diff = self.amount.checked_sub(rhs.amount).ok_or(AssetError::Overflow)?;
+        let diff = self
+            .amount
+            .checked_sub(rhs.amount)
+            .ok_or(AssetError::Overflow)?;
         if self.symbol.raw() != 0 {
-            if !( -Self::MAX_AMOUNT <= diff && diff <= Self::MAX_AMOUNT ) {
+            if !(-Self::MAX_AMOUNT <= diff && diff <= Self::MAX_AMOUNT) {
                 return Err(AssetError::OutOfRange);
             }
         }
-        Ok(Asset { amount: diff, symbol: self.symbol.clone() })
+        Ok(Asset {
+            amount: diff,
+            symbol: self.symbol.clone(),
+        })
     }
 
-    pub fn sub_assign(&mut self, rhs: &Self) -> Result<(), AssetError>
-    {
+    pub fn sub_assign(&mut self, rhs: &Self) -> Result<(), AssetError> {
         if self.symbol != rhs.symbol {
             return Err(AssetError::SymbolMismatch);
         }
-        let diff = self.amount.checked_sub(rhs.amount).ok_or(AssetError::Overflow)?;
+        let diff = self
+            .amount
+            .checked_sub(rhs.amount)
+            .ok_or(AssetError::Overflow)?;
         if self.symbol.raw() != 0 {
-            if !( -Self::MAX_AMOUNT <= diff && diff <= Self::MAX_AMOUNT ) {
+            if !(-Self::MAX_AMOUNT <= diff && diff <= Self::MAX_AMOUNT) {
                 return Err(AssetError::OutOfRange);
             }
         }
@@ -630,30 +628,24 @@ impl Asset
         Ok(())
     }
 
-    pub fn write_decimal(number: u64, precision: u8, negative: bool) -> String
-    {
+    pub fn write_decimal(number: u64, precision: u8, negative: bool) -> String {
         let num_digits = successors(Some(number), |&n| (n >= 10).then(|| n / 10)).count() as i64;
         let precision = precision as i64;
         let mut number = number;
 
         let mut characters_needed = max(num_digits, precision);
         let mut decimal_point_pos = num_digits;
-        if precision >= num_digits
-        {
+        if precision >= num_digits {
             characters_needed += 1; // space needing for additional leading zero digit
             decimal_point_pos = 1;
-        }
-        else
-        {
+        } else {
             decimal_point_pos -= precision;
         }
-        if precision > 0
-        {
+        if precision > 0 {
             characters_needed += 1; // space for decimal point
         }
         let mut after_minus_pos = 0;
-        if negative
-        {
+        if negative {
             characters_needed += 1; // space for minus sign
             after_minus_pos += 1;
             decimal_point_pos += 1;
@@ -664,31 +656,26 @@ impl Asset
         let mut str = vec![' '; characters_needed as usize];
 
         let mut i = characters_needed - 1;
-        while number > 0 && i > decimal_point_pos
-        {
-            str[i as usize] = (number % 10 + 48) as u8 as char;  // '0' == 48
+        while number > 0 && i > decimal_point_pos {
+            str[i as usize] = (number % 10 + 48) as u8 as char; // '0' == 48
             number /= 10;
             i -= 1;
         }
-        while i > decimal_point_pos
-        {
+        while i > decimal_point_pos {
             str[i as usize] = '0';
             i -= 1;
         }
-        if i == decimal_point_pos
-        {
+        if i == decimal_point_pos {
             str[i as usize] = '.';
             i -= 1;
         }
-        while i >= after_minus_pos
-        {
-            str[i as usize] = (number % 10 + 48) as u8 as char;  // '0' == 48
+        while i >= after_minus_pos {
+            str[i as usize] = (number % 10 + 48) as u8 as char; // '0' == 48
             number /= 10;
             i -= 1;
         }
 
-        if i == 0
-        {
+        if i == 0 {
             str[i as usize] = '-';
         }
 
@@ -696,22 +683,21 @@ impl Asset
         str
     }
 
-    pub fn to_string(&self) -> String
-    {
-        if self.symbol.raw() == 0
-        {
+    pub fn to_string(&self) -> String {
+        if self.symbol.raw() == 0 {
             return (self.amount as u64).to_string();
         }
         let negative = self.amount < 0;
         let abs_amount = self.amount.unsigned_abs();
         let precision = self.symbol.precision();
-        return Self::write_decimal(abs_amount, precision, negative) + " " + &self.symbol.code().to_string();
+        return Self::write_decimal(abs_amount, precision, negative)
+            + " "
+            + &self.symbol.code().to_string();
     }
 }
 
 // serde_json traits
-impl Serialize for Asset
-{
+impl Serialize for Asset {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -731,12 +717,10 @@ impl<'de> Visitor<'de> for AssetVisitor {
     where
         E: de::Error,
     {
-        Asset::from_string(&value.to_string())
-            .ok_or_else(|| E::custom("invalid Asset string"))
+        Asset::from_string(&value.to_string()).ok_or_else(|| E::custom("invalid Asset string"))
     }
 }
-impl<'de> Deserialize<'de> for Asset
-{
+impl<'de> Deserialize<'de> for Asset {
     fn deserialize<D>(deserializer: D) -> Result<Asset, D::Error>
     where
         D: Deserializer<'de>,
@@ -745,57 +729,51 @@ impl<'de> Deserialize<'de> for Asset
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ExtendedAsset
-{
+pub struct ExtendedAsset {
     quantity: Asset,
-    contract: Name
+    contract: Name,
 }
 
-impl ExtendedAsset
-{
-    pub fn new(quantity: Asset, contract: Name) -> Self
-    {
-        ExtendedAsset{quantity, contract}
+impl ExtendedAsset {
+    pub fn new(quantity: Asset, contract: Name) -> Self {
+        ExtendedAsset { quantity, contract }
     }
 
-    pub fn quantity(&self) -> &Asset
-    {
+    pub fn quantity(&self) -> &Asset {
         &self.quantity
     }
 
-    pub fn contract(&self) -> &Name
-    {
+    pub fn contract(&self) -> &Name {
         &self.contract
     }
 
-    pub fn from_string(str: &str) -> Option<Self>
-    {
+    pub fn from_string(str: &str) -> Option<Self> {
         let parts: Vec<String> = str.split("@").map(|s| s.to_string()).collect();
-        if parts.len() == 2
-        {
+        if parts.len() == 2 {
             let quantity = Asset::from_string(&parts[0]);
-            if quantity.is_none() { return None; }
+            if quantity.is_none() {
+                return None;
+            }
             let contract = Name::from_string(&parts[1]);
-            if contract.is_err() { return None; }
-            return Some(ExtendedAsset{
+            if contract.is_err() {
+                return None;
+            }
+            return Some(ExtendedAsset {
                 quantity: quantity.unwrap(),
-                contract: contract.unwrap()
+                contract: contract.unwrap(),
             });
         }
         None
     }
 
-    pub fn to_string(&self) -> String
-    {
+    pub fn to_string(&self) -> String {
         self.quantity.to_string() + "@" + &self.contract.to_string()
     }
 }
 
 // serde_json traits
-impl Serialize for ExtendedAsset
-{
+impl Serialize for ExtendedAsset {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -815,12 +793,12 @@ impl<'de> Visitor<'de> for ExtendedAssetVisitor {
     where
         E: de::Error,
     {
-        ExtendedAsset::from_string(&value.to_string())
-            .ok_or_else(|| E::custom("invalid ExtendedAsset string (expected '<amount> <CODE>@<contract>')"))
+        ExtendedAsset::from_string(&value.to_string()).ok_or_else(|| {
+            E::custom("invalid ExtendedAsset string (expected '<amount> <CODE>@<contract>')")
+        })
     }
 }
-impl<'de> Deserialize<'de> for ExtendedAsset
-{
+impl<'de> Deserialize<'de> for ExtendedAsset {
     fn deserialize<D>(deserializer: D) -> Result<ExtendedAsset, D::Error>
     where
         D: Deserializer<'de>,
@@ -830,16 +808,13 @@ impl<'de> Deserialize<'de> for ExtendedAsset
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Authorization
-{
+pub struct Authorization {
     pub actor: Name,
     pub permission: Name,
 }
 
-impl Authorization
-{
-    pub fn from_string(s: &str) -> Result<Self, String>
-    {
+impl Authorization {
+    pub fn from_string(s: &str) -> Result<Self, String> {
         // Split actor@permission
         let parts: Vec<&str> = s.split('@').collect();
         if parts.is_empty() || parts[0].is_empty() {
@@ -852,8 +827,7 @@ impl Authorization
 
         // Parse permission
         let permission = if parts.len() == 1 {
-            Name::from_string("active")
-                .map_err(|e| format!("invalid default permission: {}", e))?
+            Name::from_string("active").map_err(|e| format!("invalid default permission: {}", e))?
         } else if parts.len() == 2 {
             Name::from_string(parts[1])
                 .map_err(|e| format!("invalid permission '{}': {}", parts[1], e))?
@@ -864,14 +838,12 @@ impl Authorization
         Ok(Authorization { actor, permission })
     }
 
-    pub fn to_string(&self) -> String
-    {
+    pub fn to_string(&self) -> String {
         format!("{}@{}", self.actor.to_string(), self.permission.to_string())
     }
 }
 
-impl Serialize for Authorization
-{
+impl Serialize for Authorization {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -889,7 +861,10 @@ impl<'de> Deserialize<'de> for Authorization {
     where
         D: Deserializer<'de>,
     {
-        enum Field { Actor, Permission }
+        enum Field {
+            Actor,
+            Permission,
+        }
 
         impl<'de> Deserialize<'de> for Field {
             fn deserialize<D>(deserializer: D) -> Result<Field, D::Error>
@@ -934,14 +909,13 @@ impl<'de> Deserialize<'de> for Authorization {
             where
                 V: SeqAccess<'de>,
             {
-                let actor = seq.next_element()?
+                let actor = seq
+                    .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(0, &self))?;
-                let permission = seq.next_element()?
+                let permission = seq
+                    .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(1, &self))?;
-                Ok(Authorization{
-                    actor,
-                    permission
-                })
+                Ok(Authorization { actor, permission })
             }
 
             fn visit_map<V>(self, mut map: V) -> Result<Authorization, V::Error>
@@ -967,11 +941,9 @@ impl<'de> Deserialize<'de> for Authorization {
                     }
                 }
                 let actor = actor.ok_or_else(|| de::Error::missing_field("actor"))?;
-                let permission = permission.ok_or_else(|| de::Error::missing_field("permission"))?;
-                Ok(Authorization{
-                    actor,
-                    permission
-                })
+                let permission =
+                    permission.ok_or_else(|| de::Error::missing_field("permission"))?;
+                Ok(Authorization { actor, permission })
             }
         }
 
@@ -981,27 +953,24 @@ impl<'de> Deserialize<'de> for Authorization {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Action
-{
+pub struct Action {
     pub account: Name,
     pub name: Name,
     pub authorization: Vec<Authorization>,
-    pub data: Value
+    pub data: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct PackedAction
-{
+pub struct PackedAction {
     pub account: Name,
     pub name: Name,
     pub authorization: Vec<Authorization>,
     #[serde(with = "hex::serde")]
-    pub data: Vec<u8>
+    pub data: Vec<u8>,
 }
 
 // equivalent of: eosiolib/core/eosio/varint.hpp: 204
-pub fn pack_vec_len(l: usize) -> Vec<u8>
-{
+pub fn pack_vec_len(l: usize) -> Vec<u8> {
     let mut v = vec![];
     let mut val = l as u64;
     loop {
@@ -1009,22 +978,21 @@ pub fn pack_vec_len(l: usize) -> Vec<u8>
         val >>= 7;
         b |= ((val > 0) as u8) << 7;
         v.push(b);
-        if val == 0 { break; }
+        if val == 0 {
+            break;
+        }
     }
     v
 }
 // equivalent of: eosio::pack(vector<eosio::action>)
-pub fn pack(actions: Vec<PackedAction>) -> Vec<u8>
-{
+pub fn pack(actions: Vec<PackedAction>) -> Vec<u8> {
     let mut v = vec![];
     v.extend(pack_vec_len(actions.len()));
-    for pa in actions.iter()
-    {
+    for pa in actions.iter() {
         v.extend(pa.account.raw().to_le_bytes());
         v.extend(pa.name.raw().to_le_bytes());
         v.extend(pack_vec_len(pa.authorization.len()));
-        for auth in pa.authorization.iter()
-        {
+        for auth in pa.authorization.iter() {
             v.extend(auth.actor.raw().to_le_bytes());
             v.extend(auth.permission.raw().to_le_bytes());
         }
@@ -1035,26 +1003,26 @@ pub fn pack(actions: Vec<PackedAction>) -> Vec<u8>
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Transaction
-{
+pub struct Transaction {
     // For now, we simplify EOSIO transactions to just a single vector of actions.
-    pub actions: Vec<Action>
+    pub actions: Vec<Action>,
 }
 
 #[cfg(test)]
-mod tests
-{
+mod tests {
     use super::*;
     use crate::contract::{PlsFtTransfer, PlsNftTransfer};
 
     #[test]
-    fn test0()
-    {
+    fn test0() {
         let a = Asset::from_string(&"18446744073709551615".to_string()).unwrap();
         println!("{}", a.to_string());
         let b = Asset::from_string(&a.to_string()).unwrap();
         println!("{}", b.to_string());
-        let a = Asset { amount: 100000, symbol: Symbol::from_string(&"0,".to_string()).unwrap() };
+        let a = Asset {
+            amount: 100000,
+            symbol: Symbol::from_string(&"0,".to_string()).unwrap(),
+        };
         println!("asset: {}", a.to_string());
         assert_eq!(Symbol::from_string(&"0,".to_string()).unwrap().raw(), 0);
 
@@ -1066,97 +1034,171 @@ mod tests
     }
 
     #[test]
-    fn test1()
-    {
-        assert_eq!(Name::from_string(&"eosio".to_string()).unwrap().raw(), 6138663577826885632);
-        assert_eq!(Name::from_string(&"eosio.msig".to_string()).unwrap().raw(), 6138663587900751872);
-        assert_eq!(Name::from_string(&"eosio.token".to_string()).unwrap().raw(), 6138663591592764928);
+    fn test1() {
+        assert_eq!(
+            Name::from_string(&"eosio".to_string()).unwrap().raw(),
+            6138663577826885632
+        );
+        assert_eq!(
+            Name::from_string(&"eosio.msig".to_string()).unwrap().raw(),
+            6138663587900751872
+        );
+        assert_eq!(
+            Name::from_string(&"eosio.token".to_string()).unwrap().raw(),
+            6138663591592764928
+        );
         assert_eq!(SymbolCode::from_string(&"ZEOSZEOS".to_string()), None);
         assert_eq!(SymbolCode::from_string(&"eos".to_string()), None);
-        assert_eq!(SymbolCode::from_string(&"EOS".to_string()).unwrap().raw(), 5459781);
-        assert_eq!(Symbol::from_sc_precision(SymbolCode::from_string(&"EOS".to_string()).unwrap(), 4).raw(), 1397703940);
-        assert_eq!(Symbol::from_sc_precision(SymbolCode::from_string(&"ZEOS".to_string()).unwrap(), 4).raw(), 357812230660);
+        assert_eq!(
+            SymbolCode::from_string(&"EOS".to_string()).unwrap().raw(),
+            5459781
+        );
+        assert_eq!(
+            Symbol::from_sc_precision(SymbolCode::from_string(&"EOS".to_string()).unwrap(), 4)
+                .raw(),
+            1397703940
+        );
+        assert_eq!(
+            Symbol::from_sc_precision(SymbolCode::from_string(&"ZEOS".to_string()).unwrap(), 4)
+                .raw(),
+            357812230660
+        );
         assert_eq!(SymbolCode(5459781).to_string(), "EOS".to_string());
         assert_eq!(Symbol(357812230660).to_string(), "4,ZEOS".to_string());
         assert_eq!(Name(6138663577826885632).to_string(), "eosio".to_string());
-        assert_eq!(Name(6138663587900751872).to_string(), "eosio.msig".to_string());
-        assert_eq!(Name(6138663591592764928).to_string(), "eosio.token".to_string());
-        assert_eq!(Symbol::from_string(&"4,EOS".to_string()).unwrap().raw(), 1397703940);
+        assert_eq!(
+            Name(6138663587900751872).to_string(),
+            "eosio.msig".to_string()
+        );
+        assert_eq!(
+            Name(6138663591592764928).to_string(),
+            "eosio.token".to_string()
+        );
+        assert_eq!(
+            Symbol::from_string(&"4,EOS".to_string()).unwrap().raw(),
+            1397703940
+        );
         assert_eq!(Symbol::from_string(&"0,".to_string()).unwrap().raw(), 0);
-        assert_eq!(Symbol::from_string(&"4,EOS".to_string()).unwrap().is_valid(), true);
-        assert_eq!(Symbol::from_string(&"0,".to_string()).unwrap().is_valid(), true);
+        assert_eq!(
+            Symbol::from_string(&"4,EOS".to_string())
+                .unwrap()
+                .is_valid(),
+            true
+        );
+        assert_eq!(
+            Symbol::from_string(&"0,".to_string()).unwrap().is_valid(),
+            true
+        );
     }
 
     #[test]
-    fn test2()
-    {   let raw: i64 = 6138663577826885632;
+    fn test2() {
+        let raw: i64 = 6138663577826885632;
         println!("{}", Name(raw as u64).to_string());
-        println!("{}", Name::from_string(&"thezeosproxy".to_string()).unwrap().raw() as i64);
-        println!("{:?}", Name::from_string(&"cryptkeeper".to_string()).unwrap().raw().to_le_bytes());
-        println!("{:?}", Symbol::from_string(&"4,EOS".to_string()).unwrap().raw().to_le_bytes());
-        println!("{:?}", Name::from_string(&"active".to_string()).unwrap().raw().to_le_bytes());
-        println!("{:?}", Name::from_string(&"teamgreymass".to_string()).unwrap().raw().to_le_bytes());
+        println!(
+            "{}",
+            Name::from_string(&"thezeosproxy".to_string())
+                .unwrap()
+                .raw() as i64
+        );
+        println!(
+            "{:?}",
+            Name::from_string(&"cryptkeeper".to_string())
+                .unwrap()
+                .raw()
+                .to_le_bytes()
+        );
+        println!(
+            "{:?}",
+            Symbol::from_string(&"4,EOS".to_string())
+                .unwrap()
+                .raw()
+                .to_le_bytes()
+        );
+        println!(
+            "{:?}",
+            Name::from_string(&"active".to_string())
+                .unwrap()
+                .raw()
+                .to_le_bytes()
+        );
+        println!(
+            "{:?}",
+            Name::from_string(&"teamgreymass".to_string())
+                .unwrap()
+                .raw()
+                .to_le_bytes()
+        );
     }
 
     #[test]
-    fn action_serde()
-    {
-        let a = Action{
+    fn action_serde() {
+        let a = Action {
             account: Name::from_string(&"eosio.token".to_string()).unwrap(),
             name: Name::from_string(&"transfer".to_string()).unwrap(),
-            authorization: vec![Authorization{
+            authorization: vec![Authorization {
                 actor: Name::from_string(&"eosio".to_string()).unwrap(),
-                permission: Name::from_string(&"active".to_string()).unwrap()
+                permission: Name::from_string(&"active".to_string()).unwrap(),
             }],
-            data: serde_json::from_str(r#"{
+            data: serde_json::from_str(
+                r#"{
                 "from": "eosio",
                 "to": "zeoscontract",
                 "quantity": "1.0000 EOS",
                 "memo": "this is a memo!"
-            }"#).unwrap()
+            }"#,
+            )
+            .unwrap(),
         };
-        let tx = Transaction{ actions: vec![a] };
+        let tx = Transaction { actions: vec![a] };
         println!("{}", serde_json::to_string(&tx).unwrap());
     }
 
     #[test]
-    fn pls_transfer_serde()
-    {
-        let a = Action{
+    fn pls_transfer_serde() {
+        let a = Action {
             account: Name::from_string(&"eosio.token".to_string()).unwrap(),
             name: Name::from_string(&"transfer".to_string()).unwrap(),
-            authorization: vec![Authorization{
+            authorization: vec![Authorization {
                 actor: Name::from_string(&"eosio".to_string()).unwrap(),
-                permission: Name::from_string(&"active".to_string()).unwrap()
+                permission: Name::from_string(&"active".to_string()).unwrap(),
             }],
-            data: serde_json::to_value(PlsFtTransfer{
+            data: serde_json::to_value(PlsFtTransfer {
                 from: Name::from_string(&"eosio".to_string()).unwrap(),
                 to: Name::from_string(&"zeoscontract".to_string()).unwrap(),
                 quantity: Asset::from_string(&"1.0000 EOS".to_string()).unwrap(),
-                memo: "this is a memo!".to_string()
-            }).unwrap()
+                memo: "this is a memo!".to_string(),
+            })
+            .unwrap(),
         };
-        let tx = Transaction{ actions: vec![a.clone()] };
+        let tx = Transaction {
+            actions: vec![a.clone()],
+        };
         println!("{}", serde_json::to_string(&tx).unwrap());
 
-        let b = Action{
+        let b = Action {
             account: Name::from_string(&"atomicassets".to_string()).unwrap(),
             name: Name::from_string(&"transfer".to_string()).unwrap(),
-            authorization: vec![Authorization{
+            authorization: vec![Authorization {
                 actor: Name::from_string(&"eosio".to_string()).unwrap(),
-                permission: Name::from_string(&"active".to_string()).unwrap()
+                permission: Name::from_string(&"active".to_string()).unwrap(),
             }],
-            data: serde_json::to_value(PlsNftTransfer{
+            data: serde_json::to_value(PlsNftTransfer {
                 from: Name::from_string(&"eosio".to_string()).unwrap(),
                 to: Name::from_string(&"zeoscontract".to_string()).unwrap(),
                 asset_ids: vec![Asset::from_string(&"1234567890987654321".to_string()).unwrap()],
-                memo: "this is a memo!".to_string()
-            }).unwrap()
+                memo: "this is a memo!".to_string(),
+            })
+            .unwrap(),
         };
-        let tx = Transaction{ actions: vec![b.clone()] };
+        let tx = Transaction {
+            actions: vec![b.clone()],
+        };
         println!("{}", serde_json::to_string(&tx).unwrap());
 
-        let tx = Transaction{ actions: vec![a.clone(), b.clone()] };
+        let tx = Transaction {
+            actions: vec![a.clone(), b.clone()],
+        };
         println!("{}", serde_json::to_string(&tx).unwrap());
 
         let tx_str = serde_json::to_string(&tx).unwrap();
@@ -1170,15 +1212,20 @@ mod tests
     }
 
     #[test]
-    fn pack_packed_actions()
-    {
+    fn pack_packed_actions() {
         {
             let mut actions = vec![];
-            actions.push(PackedAction{
+            actions.push(PackedAction {
                 account: Name::from_string(&"eosio.token".to_string()).unwrap(),
                 name: Name::from_string(&"transfer".to_string()).unwrap(),
-                authorization: vec![Authorization{actor: Name::from_string(&"zeosexchange".to_string()).unwrap(), permission: Name::from_string(&"active".to_string()).unwrap()}],
-                data: hex::decode("a0d8340d7585a9fae091d9ee5682a9faa08601000000000004454f53000000000474657374").unwrap()
+                authorization: vec![Authorization {
+                    actor: Name::from_string(&"zeosexchange".to_string()).unwrap(),
+                    permission: Name::from_string(&"active".to_string()).unwrap(),
+                }],
+                data: hex::decode(
+                    "a0d8340d7585a9fae091d9ee5682a9faa08601000000000004454f53000000000474657374",
+                )
+                .unwrap(),
             });
             let bytes = pack(actions);
             assert_eq!("0100a6823403ea3055000000572d3ccdcd01a0d8340d7585a9fa00000000a8ed323225a0d8340d7585a9fae091d9ee5682a9faa08601000000000004454f53000000000474657374", hex::encode(bytes));

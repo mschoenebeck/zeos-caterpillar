@@ -1,20 +1,19 @@
-use bellman::gadgets::boolean::{Boolean, AllocatedBit};
+use bellman::gadgets::boolean::{AllocatedBit, Boolean};
 use bellman::{ConstraintSystem, SynthesisError};
 use ff::PrimeField;
 
-mod ecc;
-mod pedersen_hash;
 mod blake2s7r;
 mod constants;
+mod ecc;
 pub mod mint;
+mod pedersen_hash;
 //pub mod transfer;
 //pub mod burn;
-pub mod spend_output;
-pub mod spend;
 pub mod output;
+pub mod spend;
+pub mod spend_output;
 
-trait OrExt
-{
+trait OrExt {
     /// Perform OR over two boolean operands
     fn or<'a, Scalar, CS>(cs: CS, a: &'a Self, b: &'a Self) -> Result<Self, SynthesisError>
     where
@@ -23,8 +22,7 @@ trait OrExt
         CS: ConstraintSystem<Scalar>;
 }
 
-impl OrExt for Boolean
-{
+impl OrExt for Boolean {
     fn or<'a, Scalar, CS>(cs: CS, a: &'a Self, b: &'a Self) -> Result<Self, SynthesisError>
     where
         Self: Sized,
@@ -33,11 +31,11 @@ impl OrExt for Boolean
     {
         match (a, b) {
             // false OR x is always x
-            (&Boolean::Constant(false), x) | (x, &Boolean::Constant(false)) => {
-                Ok(x.clone())
-            }
+            (&Boolean::Constant(false), x) | (x, &Boolean::Constant(false)) => Ok(x.clone()),
             // true OR x is always true
-            (&Boolean::Constant(true), _) | (_, &Boolean::Constant(true)) => Ok(Boolean::Constant(true)),
+            (&Boolean::Constant(true), _) | (_, &Boolean::Constant(true)) => {
+                Ok(Boolean::Constant(true))
+            }
             // a OR (NOT b) = NOT((NOT a) AND b) = NOT(b AND (NOT a))
             (&Boolean::Is(ref a), &Boolean::Not(ref b))
             | (&Boolean::Not(ref b), &Boolean::Is(ref a)) => {
@@ -47,7 +45,7 @@ impl OrExt for Boolean
             (&Boolean::Not(ref a), &Boolean::Not(ref b)) => {
                 Ok(Boolean::Not(AllocatedBit::and(cs, a, b)?))
             }
-            // a OR b = NOT(a NOR b) 
+            // a OR b = NOT(a NOR b)
             (&Boolean::Is(ref a), &Boolean::Is(ref b)) => {
                 Ok(Boolean::Not(AllocatedBit::nor(cs, a, b)?))
             }
@@ -261,13 +259,12 @@ where
 pub fn u8_vec_into_boolean_vec_le<Scalar: PrimeField, CS: ConstraintSystem<Scalar>>(
     mut cs: CS,
     vector: Option<[u8; 32]>,
-) -> Result<Vec<Boolean>, SynthesisError>
-{
+) -> Result<Vec<Boolean>, SynthesisError> {
     let values = match vector {
         Some(ref vector) => {
-            let mut tmp = Vec::with_capacity(8*32);
+            let mut tmp = Vec::with_capacity(8 * 32);
 
-            for v in vector{
+            for v in vector {
                 for i in 0..8 {
                     tmp.push(Some(v >> i & 1 == 1));
                 }

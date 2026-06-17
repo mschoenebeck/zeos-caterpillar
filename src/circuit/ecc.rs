@@ -1,14 +1,19 @@
 //! Gadgets implementing Jubjub elliptic curve operations.
 
-use std::ops::{AddAssign, MulAssign, Neg, SubAssign};
-use bellman::{ConstraintSystem, SynthesisError};
-use bellman::gadgets::{Assignment, num::{AllocatedNum, Num}, lookup::lookup3_xy, boolean::Boolean};
-use group::Curve;
-use super::constants::{FixedGenerator, edwards_d, montgomery_a, montgomery_scale};
+use super::constants::{edwards_d, montgomery_a, montgomery_scale, FixedGenerator};
+use crate::engine::fq_to_engine_scalar;
 use crate::engine::{scalar_one, scalar_zero};
+use bellman::gadgets::{
+    boolean::Boolean,
+    lookup::lookup3_xy,
+    num::{AllocatedNum, Num},
+    Assignment,
+};
+use bellman::{ConstraintSystem, SynthesisError};
 #[cfg(not(target_arch = "wasm32"))]
 use ff::Field;
-use crate::engine::fq_to_engine_scalar;
+use group::Curve;
+use std::ops::{AddAssign, MulAssign, Neg, SubAssign};
 
 #[derive(Clone)]
 pub struct EdwardsPoint {
@@ -533,7 +538,10 @@ impl MontgomeryPoint {
     /// in Montgomery, does not check that it's
     /// on the curve. Useful for constants and
     /// window table lookups.
-    pub fn interpret_unchecked(x: Num<crate::engine::Scalar>, y: Num<crate::engine::Scalar>) -> Self {
+    pub fn interpret_unchecked(
+        x: Num<crate::engine::Scalar>,
+        y: Num<crate::engine::Scalar>,
+    ) -> Self {
         MontgomeryPoint { x, y }
     }
 
@@ -628,10 +636,12 @@ mod test {
 
     use bellman::gadgets::test::*;
 
+    use super::super::constants::{
+        to_montgomery_coords, NOTE_COMMITMENT_RANDOMNESS_GENERATOR as NOTE_CM_R_WINDOW,
+    };
     use super::{fixed_base_multiplication, AllocatedNum, EdwardsPoint, MontgomeryPoint};
-    use super::super::constants::{to_montgomery_coords, NOTE_COMMITMENT_RANDOMNESS_GENERATOR as NOTE_CM_R_WINDOW};
+    use crate::engine::{engine_scalar_to_fq, fq_to_engine_scalar, scalar_one, scalar_zero};
     use bellman::gadgets::boolean::{AllocatedBit, Boolean};
-    use crate::engine::{scalar_zero, scalar_one, fq_to_engine_scalar, engine_scalar_to_fq};
 
     #[test]
     #[allow(clippy::many_single_char_names)]
@@ -647,7 +657,10 @@ mod test {
             let p = jubjub::ExtendedPoint::random(&mut rng);
             let (x, y) = to_montgomery_coords(p).unwrap();
             let p = p.to_affine();
-            let (u, v) = (fq_to_engine_scalar(p.get_u()), fq_to_engine_scalar(p.get_v()));
+            let (u, v) = (
+                fq_to_engine_scalar(p.get_u()),
+                fq_to_engine_scalar(p.get_v()),
+            );
 
             let numx = AllocatedNum::alloc(cs.namespace(|| "mont x"), || Ok(x)).unwrap();
             let numy = AllocatedNum::alloc(cs.namespace(|| "mont y"), || Ok(y)).unwrap();
@@ -694,7 +707,10 @@ mod test {
 
         for _ in 0..100 {
             let p = jubjub::ExtendedPoint::random(&mut rng).to_affine();
-            let (u, v) = (fq_to_engine_scalar(p.get_u()), fq_to_engine_scalar(p.get_v()));
+            let (u, v) = (
+                fq_to_engine_scalar(p.get_u()),
+                fq_to_engine_scalar(p.get_v()),
+            );
 
             let mut cs = TestConstraintSystem::<crate::engine::Scalar>::new();
             let numu = AllocatedNum::alloc(cs.namespace(|| "u"), || Ok(u)).unwrap();
@@ -735,7 +751,10 @@ mod test {
             let p = *crate::constants::NOTE_COMMITMENT_RANDOMNESS_GENERATOR;
             let s = jubjub::Fr::random(&mut rng);
             let q = jubjub::ExtendedPoint::from(p * s).to_affine();
-            let (u1, v1) = (fq_to_engine_scalar(q.get_u()), fq_to_engine_scalar(q.get_v()));
+            let (u1, v1) = (
+                fq_to_engine_scalar(q.get_u()),
+                fq_to_engine_scalar(q.get_v()),
+            );
 
             let s_bits = s
                 .to_le_bits()
@@ -777,8 +796,14 @@ mod test {
             let q = (p * s).to_affine();
             let p = p.to_affine();
 
-            let (u0, v0) = (fq_to_engine_scalar(p.get_u()), fq_to_engine_scalar(p.get_v()));
-            let (u1, v1) = (fq_to_engine_scalar(q.get_u()), fq_to_engine_scalar(q.get_v()));
+            let (u0, v0) = (
+                fq_to_engine_scalar(p.get_u()),
+                fq_to_engine_scalar(p.get_v()),
+            );
+            let (u1, v1) = (
+                fq_to_engine_scalar(q.get_u()),
+                fq_to_engine_scalar(q.get_v()),
+            );
 
             let num_u0 = AllocatedNum::alloc(cs.namespace(|| "u0"), || Ok(u0)).unwrap();
             let num_v0 = AllocatedNum::alloc(cs.namespace(|| "v0"), || Ok(v0)).unwrap();
@@ -823,7 +848,10 @@ mod test {
 
             let p = jubjub::ExtendedPoint::random(&mut rng).to_affine();
 
-            let (u0, v0) = (fq_to_engine_scalar(p.get_u()), fq_to_engine_scalar(p.get_v()));
+            let (u0, v0) = (
+                fq_to_engine_scalar(p.get_u()),
+                fq_to_engine_scalar(p.get_v()),
+            );
 
             let num_u0 = AllocatedNum::alloc(cs.namespace(|| "u0"), || Ok(u0)).unwrap();
             let num_v0 = AllocatedNum::alloc(cs.namespace(|| "v0"), || Ok(v0)).unwrap();
@@ -895,9 +923,18 @@ mod test {
             let p2 = p2.to_affine();
             let p3 = p3.to_affine();
 
-            let (u0, v0) = (fq_to_engine_scalar(p1.get_u()), fq_to_engine_scalar(p1.get_v()));
-            let (u1, v1) = (fq_to_engine_scalar(p2.get_u()), fq_to_engine_scalar(p2.get_v()));
-            let (u2, v2) = (fq_to_engine_scalar(p3.get_u()), fq_to_engine_scalar(p3.get_v()));
+            let (u0, v0) = (
+                fq_to_engine_scalar(p1.get_u()),
+                fq_to_engine_scalar(p1.get_v()),
+            );
+            let (u1, v1) = (
+                fq_to_engine_scalar(p2.get_u()),
+                fq_to_engine_scalar(p2.get_v()),
+            );
+            let (u2, v2) = (
+                fq_to_engine_scalar(p3.get_u()),
+                fq_to_engine_scalar(p3.get_v()),
+            );
 
             let mut cs = TestConstraintSystem::<crate::engine::Scalar>::new();
 
@@ -958,8 +995,14 @@ mod test {
             let p1 = p1.to_affine();
             let p2 = p2.to_affine();
 
-            let (u0, v0) = (fq_to_engine_scalar(p1.get_u()), fq_to_engine_scalar(p1.get_v()));
-            let (u1, v1) = (fq_to_engine_scalar(p2.get_u()), fq_to_engine_scalar(p2.get_v()));
+            let (u0, v0) = (
+                fq_to_engine_scalar(p1.get_u()),
+                fq_to_engine_scalar(p1.get_v()),
+            );
+            let (u1, v1) = (
+                fq_to_engine_scalar(p2.get_u()),
+                fq_to_engine_scalar(p2.get_v()),
+            );
 
             let mut cs = TestConstraintSystem::<crate::engine::Scalar>::new();
 
@@ -1021,17 +1064,26 @@ mod test {
             assert!(p3.x.get_value().unwrap() == x2);
             assert!(p3.y.get_value().unwrap() == y2);
 
-            cs.set("addition/yprime/num", crate::engine::Scalar::random(&mut rng));
+            cs.set(
+                "addition/yprime/num",
+                crate::engine::Scalar::random(&mut rng),
+            );
             assert_eq!(cs.which_is_unsatisfied(), Some("addition/evaluate yprime"));
             cs.set("addition/yprime/num", y2);
             assert!(cs.is_satisfied());
 
-            cs.set("addition/xprime/num", crate::engine::Scalar::random(&mut rng));
+            cs.set(
+                "addition/xprime/num",
+                crate::engine::Scalar::random(&mut rng),
+            );
             assert_eq!(cs.which_is_unsatisfied(), Some("addition/evaluate xprime"));
             cs.set("addition/xprime/num", x2);
             assert!(cs.is_satisfied());
 
-            cs.set("addition/lambda/num", crate::engine::Scalar::random(&mut rng));
+            cs.set(
+                "addition/lambda/num",
+                crate::engine::Scalar::random(&mut rng),
+            );
             assert_eq!(cs.which_is_unsatisfied(), Some("addition/evaluate lambda"));
         }
     }
@@ -1047,7 +1099,10 @@ mod test {
         };
 
         let check_small_order_from_u64s = |u, v| {
-            let (u, v) = (engine_scalar_to_fq(crate::engine::Scalar::from(u)), engine_scalar_to_fq(crate::engine::Scalar::from(v)));
+            let (u, v) = (
+                engine_scalar_to_fq(crate::engine::Scalar::from(u)),
+                engine_scalar_to_fq(crate::engine::Scalar::from(v)),
+            );
             let p = jubjub::AffinePoint::from_raw_unchecked(u, v);
 
             check_small_order_from_p(p.into(), true);
@@ -1063,18 +1118,25 @@ mod test {
         .unwrap();
         let largest_small_subgroup_order = jubjub::Fr::from(8);
 
-        let (zero_u, zero_v) = (engine_scalar_to_fq(scalar_zero()), engine_scalar_to_fq(scalar_one()));
+        let (zero_u, zero_v) = (
+            engine_scalar_to_fq(scalar_zero()),
+            engine_scalar_to_fq(scalar_one()),
+        );
 
         // generator for jubjub
         let (u, v) = (
-            engine_scalar_to_fq(crate::engine::Scalar::from_str_vartime(
-                "11076627216317271660298050606127911965867021807910416450833192264015104452986",
-            )
-            .unwrap()),
-            engine_scalar_to_fq(crate::engine::Scalar::from_str_vartime(
-                "44412834903739585386157632289020980010620626017712148233229312325549216099227",
-            )
-            .unwrap()),
+            engine_scalar_to_fq(
+                crate::engine::Scalar::from_str_vartime(
+                    "11076627216317271660298050606127911965867021807910416450833192264015104452986",
+                )
+                .unwrap(),
+            ),
+            engine_scalar_to_fq(
+                crate::engine::Scalar::from_str_vartime(
+                    "44412834903739585386157632289020980010620626017712148233229312325549216099227",
+                )
+                .unwrap(),
+            ),
         );
         let g = jubjub::AffinePoint::from_raw_unchecked(u, v).into();
         check_small_order_from_p(g, false);
