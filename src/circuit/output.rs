@@ -7,9 +7,8 @@ use crate::circuit::constants::{
 use crate::note::Note;
 use bellman::gadgets::boolean;
 use bellman::gadgets::num;
-use bellman::gadgets::{boolean::AllocatedBit, num::Num};
+use bellman::gadgets::num::Num;
 use bellman::{Circuit, ConstraintSystem, SynthesisError};
-#[cfg(not(target_arch = "wasm32"))]
 use ff::Field;
 
 /// This is an instance of the `Spend` circuit.
@@ -57,6 +56,14 @@ impl Circuit<crate::engine::Scalar> for Output {
             self.note_b.as_ref().map(|b| b.symbol().raw()),
         )?;
         symbol_preimage.extend(symbol_bits.clone());
+        // Compute note b's symbol as a linear combination of the same bits
+        // that are bound into the note and symbol commitments.
+        let mut symbol_num = num::Num::zero();
+        let mut coeff = crate::engine::scalar_one();
+        for bit in &symbol_bits {
+            symbol_num = symbol_num.add_bool_with_coeff(CS::one(), bit, coeff);
+            coeff = coeff.double();
+        }
         // notes' contract to boolean bit vector
         let contract_bits = boolean::u64_into_boolean_vec_le(
             cs.namespace(|| "contract"),
@@ -165,20 +172,7 @@ impl Circuit<crate::engine::Scalar> for Output {
         // Expose note commit b as input
         cm_b.get_u().inputize(cs.namespace(|| "commitment b"))?;
 
-        // determine if this note is an NFT?
-        // the net value of the circuit is then exposed as a pedersen commitment: net_value = note_b
-        let is_nft;
-        match self.note_b.as_ref() {
-            Some(note_b) => {
-                // check if note being spent is an NFT
-                is_nft = Some(note_b.symbol().raw() == 0);
-            }
-            None => {
-                is_nft = None;
-            }
-        };
-
-        // calculate the pedersen commitment of the net value of this SpendOutput transfer
+        // calculate the pedersen commitment of the net value of this Output transfer
         // Compute the note value in the exponent
         let value_b_exp = ecc::fixed_base_multiplication(
             cs.namespace(|| "compute the value_b in the exponent"),
@@ -201,19 +195,35 @@ impl Circuit<crate::engine::Scalar> for Output {
         // Expose the commitment as an input to the circuit
         cv.inputize(cs.namespace(|| "commitment point"))?;
 
-        let is_nft_bit = AllocatedBit::alloc(cs.namespace(|| "is_nft bit"), is_nft)?;
+        // Plain outputs are only valid for fungible tokens. Prove symbol != 0
+        // from the constrained symbol bits used by the note and symbol commitments.
+        let symbol_inv = num::AllocatedNum::alloc(cs.namespace(|| "symbol inverse"), || {
+            let symbol = self
+                .note_b
+                .as_ref()
+                .map(|b| b.symbol().raw())
+                .ok_or(SynthesisError::AssignmentMissing)?;
+            if symbol == 0 {
+                Ok(crate::engine::scalar_zero())
+            } else {
+                Ok(crate::engine::Scalar::from(symbol).invert().unwrap())
+            }
+        })?;
 
-        // To prevent NFTs from being 'split', enforce: 0 = is_nft * 1
         cs.enforce(
-            || "conditionally enforce 0 = is_nft * 1",
+            || "enforce output symbol nonzero",
+            |lc| lc + &symbol_num.lc(crate::engine::scalar_one()),
+            |lc| lc + symbol_inv.get_variable(),
             |lc| lc + CS::one(),
-            |lc| lc + is_nft_bit.get_variable(),
-            |lc| lc,
         );
 
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "output_soundness_tests.rs"]
+mod output_soundness_tests;
 
 #[cfg(test)]
 mod tests {
