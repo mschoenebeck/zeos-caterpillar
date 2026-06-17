@@ -35,7 +35,9 @@ The corresponding smart contracts of this protocol are not (yet) open-sourced.
 
 In order to move assets from an EOSIO/AntelopeIO account into a ZEOS privacy wallet usually a web app is required to which EOSIO/AntelopeIO wallets can connect to and authorize transactions. For this purpose the `zeos-caterpillar` library can be compiled to WebAssembly (wasm) to be used inside a browser application. To speed up the CPU-intensive task of zero-knowledge proof generation multi-core support has been added. Note that multi-threading in wasm browser apps only works if the web application is executed in [cross-origin isolation](https://web.dev/articles/cross-origin-isolation-guide).
 
-To demonstrate both, single-threaded and multi-threaded proof generation inside the browser, a simple demo web application is part of the repository. The library can be compiled to wasm using the `Makefile` which is located in the root folder:
+To demonstrate both, single-threaded and multi-threaded proof generation inside the browser, a simple demo web application is part of the repository. The library can be compiled to wasm using the `Makefile` which is located in the root folder.
+
+The multi-threaded target uses extra linker flags (`--shared-memory`, TLS exports, `__heap_base`) so `wasm-bindgen` emits `shared:true` memory glue for `wasm-bindgen-rayon`. After `make wasm_pkg_mt`, `make verify-mt-glue` checks that `zeos_caterpillar.js` contains `shared:true`.
 
 ```
 make -j
