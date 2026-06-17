@@ -1,31 +1,30 @@
-use bellman::gadgets::boolean::{Boolean, AllocatedBit};
-use bellman::{Circuit, ConstraintSystem, SynthesisError};
-use ff::PrimeField;
-#[cfg(not(target_arch = "wasm32"))]
-use ff::Field;
-use crate::note::Note;
-use crate::keys::ProofGenerationKey;
-use super::{conditionally_swap_u256, conditionally_swap_u128, u8_vec_into_boolean_vec_le, u8_into_boolean_vec_le, u256_into_boolean_vec_le};
-use super::ecc;
-use super::pedersen_hash;
 use super::blake2s7r;
 use super::constants::{
     NOTE_COMMITMENT_RANDOMNESS_GENERATOR, NULLIFIER_POSITION_GENERATOR,
-    PROOF_GENERATION_KEY_GENERATOR
+    PROOF_GENERATION_KEY_GENERATOR,
 };
-use bellman::gadgets::{blake2s, Assignment};
+use super::ecc;
+use super::pedersen_hash;
+use super::{
+    conditionally_swap_u128, conditionally_swap_u256, u256_into_boolean_vec_le,
+    u8_into_boolean_vec_le, u8_vec_into_boolean_vec_le,
+};
+use crate::circuit::constants::{
+    VALUE_COMMITMENT_RANDOMNESS_GENERATOR, VALUE_COMMITMENT_VALUE_GENERATOR,
+};
+use crate::keys::ProofGenerationKey;
+use crate::note::Note;
+use bellman::gadgets::blake2s;
 use bellman::gadgets::boolean;
+use bellman::gadgets::boolean::{AllocatedBit, Boolean};
 use bellman::gadgets::multipack;
 use bellman::gadgets::num;
 use bellman::gadgets::num::AllocatedNum;
-use crate::circuit::constants::{
-    VALUE_COMMITMENT_RANDOMNESS_GENERATOR,
-    VALUE_COMMITMENT_VALUE_GENERATOR,
-};
+use bellman::{Circuit, ConstraintSystem, SynthesisError};
+use ff::{Field, PrimeField};
 
 /// This is an instance of the `Spend` circuit.
-pub struct SpendOutput
-{
+pub struct SpendOutput {
     /// The note a which is being spent
     pub note_a: Option<Note>,
     /// Proof Generation Key for note a which is required for spending
@@ -45,16 +44,50 @@ pub struct SpendOutput
     /// The total amount of all unshielded outputs
     pub value_c: Option<u64>,
     /// hash of tuple list: [(account_a, amount_a), (account_b, amount_b), ...] with value_c = amount_a + amount_b + ...
-    pub unshielded_outputs_hash: Option<[u64; 4]>
+    pub unshielded_outputs_hash: Option<[u64; 4]>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct SpendOutputWitnessOverrides {
+    pub net_value: Option<u64>,
+    pub is_equal: Option<bool>,
+    pub is_greater: Option<bool>,
+    pub expose_symbol_contract: Option<bool>,
+    pub symbol_is_zero: Option<bool>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static SPEND_OUTPUT_WITNESS_OVERRIDES: std::cell::RefCell<Option<SpendOutputWitnessOverrides>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(super) fn with_spend_output_witness_overrides<R>(
+    overrides: SpendOutputWitnessOverrides,
+    f: impl FnOnce() -> R,
+) -> R {
+    struct ResetGuard(Option<SpendOutputWitnessOverrides>);
+
+    impl Drop for ResetGuard {
+        fn drop(&mut self) {
+            SPEND_OUTPUT_WITNESS_OVERRIDES.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+
+    let previous = SPEND_OUTPUT_WITNESS_OVERRIDES.with(|slot| slot.replace(Some(overrides)));
+    let _guard = ResetGuard(previous);
+    f()
 }
 
 impl Circuit<crate::engine::Scalar> for SpendOutput {
     fn synthesize<CS: ConstraintSystem<crate::engine::Scalar>>(
         self,
         cs: &mut CS,
-    ) -> Result<(), SynthesisError>
-    {
-
+    ) -> Result<(), SynthesisError> {
         // Prover witnesses ak (ensures that it's on the curve)
         let ak = ecc::EdwardsPoint::witness(
             cs.namespace(|| "ak"),
@@ -113,7 +146,8 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
             ecc::EdwardsPoint::witness(
                 cs.namespace(|| "witness g_d"),
                 self.note_a.as_ref().map(|a| {
-                    a.address().diversifier()
+                    a.address()
+                        .diversifier()
                         .g_d()
                         .expect("checked at construction")
                         .into()
@@ -139,24 +173,19 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
         // note a account to boolean bit vector
         let account_a_bits = boolean::u64_into_boolean_vec_le(
             cs.namespace(|| "account_a"),
-            self.note_a.as_ref().map(|a| {
-                a.account().raw()
-            })
+            self.note_a.as_ref().map(|a| a.account().raw()),
         )?;
         note_a_preimage.extend(account_a_bits.clone());
         // note a value to boolean bit vector
         let value_a_bits = boolean::u64_into_boolean_vec_le(
             cs.namespace(|| "value_a"),
-            self.note_a.as_ref().map(|a| {
-                a.amount()
-            })
+            self.note_a.as_ref().map(|a| a.amount()),
         )?;
         note_a_preimage.extend(value_a_bits.clone());
         // Compute note a's value as a linear combination of the bits.
         let mut value_a_num = num::Num::zero();
         let mut coeff = crate::engine::scalar_one();
-        for bit in &value_a_bits
-        {
+        for bit in &value_a_bits {
             value_a_num = value_a_num.add_bool_with_coeff(CS::one(), bit, coeff);
             coeff = coeff.double();
         }
@@ -164,18 +193,20 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
         // notes' symbol to boolean bit vector
         let symbol_bits = boolean::u64_into_boolean_vec_le(
             cs.namespace(|| "symbol"),
-            self.note_a.as_ref().map(|a| {
-                a.symbol().raw()
-            })
+            self.note_a.as_ref().map(|a| a.symbol().raw()),
         )?;
+        let mut symbol_num = num::Num::zero();
+        let mut coeff = crate::engine::scalar_one();
+        for bit in &symbol_bits {
+            symbol_num = symbol_num.add_bool_with_coeff(CS::one(), bit, coeff);
+            coeff = coeff.double();
+        }
         note_a_preimage.extend(symbol_bits.clone());
         symbol_preimage.extend(symbol_bits.clone());
         // notes' contract to boolean bit vector
         let contract_bits = boolean::u64_into_boolean_vec_le(
             cs.namespace(|| "contract"),
-            self.note_a.as_ref().map(|a| {
-                a.contract().raw()
-            })
+            self.note_a.as_ref().map(|a| a.contract().raw()),
         )?;
         note_a_preimage.extend(contract_bits.clone());
         symbol_preimage.extend(contract_bits.clone());
@@ -191,12 +222,12 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
             64 +    // symbol
             64 +    // contract
             256 +   // g_d
-            256     // pk_d
+            256 // pk_d
         );
         assert_eq!(
             symbol_preimage.len(),
             64 +    // symbol
-            64      // contract
+            64 // contract
         );
 
         // Compute the commitment of note a
@@ -209,9 +240,7 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
             // Booleanize the randomness for the note commitment
             let rcm = boolean::field_into_boolean_vec_le(
                 cs.namespace(|| "rcm a"),
-                self.note_a.as_ref().map(|a|
-                    a.rcm()
-                ),
+                self.note_a.as_ref().map(|a| a.rcm()),
             )?;
             // Compute the note commitment randomness in the exponent
             let rcm = ecc::fixed_base_multiplication(
@@ -251,7 +280,10 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
         let mut position_bits = vec![];
         // This is an injective encoding, as cur is a
         // point in the prime order subgroup.
-        let mut cur = cm_a.get_u().to_bits_le(cs.namespace(|| "cur into bits"))?.clone();
+        let mut cur = cm_a
+            .get_u()
+            .to_bits_le(cs.namespace(|| "cur into bits"))?
+            .clone();
         cur.push(Boolean::Constant(false));
         assert_eq!(cur.len(), 256);
         // Ascend the merkle tree authentication path
@@ -259,14 +291,13 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
             let cs = &mut cs.namespace(|| format!("merkle tree hash {}", i));
             // Determines if the current subtree is the "right" leaf at this
             // depth of the tree.
-            let cur_is_right = boolean::AllocatedBit::alloc(
-                cs.namespace(|| "position bit"),
-                e.map(|e| e.1),
-            )?;
+            let cur_is_right =
+                boolean::AllocatedBit::alloc(cs.namespace(|| "position bit"), e.map(|e| e.1))?;
             // Push this boolean for nullifier computation later
             position_bits.push(boolean::Boolean::from(cur_is_right.clone()).clone());
             // Witness the authentication path element adjacent at this depth.
-            let path_element = u8_vec_into_boolean_vec_le(cs.namespace(|| "path element"), e.map(|(v, _)| v))?;
+            let path_element =
+                u8_vec_into_boolean_vec_le(cs.namespace(|| "path element"), e.map(|(v, _)| v))?;
             // Swap the two if the current subtree is on the right
             let (ul, ur) = conditionally_swap_u256(
                 cs.namespace(|| "conditional reversal of preimage"),
@@ -331,15 +362,12 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
         // note b account to boolean bit vector
         let account_b_bits = boolean::u64_into_boolean_vec_le(
             cs.namespace(|| "account_b"),
-            self.note_b.as_ref().map(|b| {
-                b.account().raw()
-            })
+            self.note_b.as_ref().map(|b| b.account().raw()),
         )?;
         // Compute note b's account as a linear combination of the bits.
         let mut account_b_num = num::Num::zero();
         let mut coeff = crate::engine::scalar_one();
-        for bit in &account_b_bits
-        {
+        for bit in &account_b_bits {
             account_b_num = account_b_num.add_bool_with_coeff(CS::one(), bit, coeff);
             coeff = coeff.double();
         }
@@ -353,29 +381,23 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
         // note b value to boolean bit vector
         let value_b_bits = boolean::u64_into_boolean_vec_le(
             cs.namespace(|| "value_b"),
-            self.note_b.as_ref().map(|b| {
-                b.amount()
-            })
+            self.note_b.as_ref().map(|b| b.amount()),
         )?;
         // Compute note b's value as a linear combination of the bits.
         let mut value_b_num = num::Num::zero();
         let mut coeff = crate::engine::scalar_one();
-        for bit in &value_b_bits
-        {
+        for bit in &value_b_bits {
             value_b_num = value_b_num.add_bool_with_coeff(CS::one(), bit, coeff);
             coeff = coeff.double();
         }
 
         // note c value to boolean bit vector
-        let value_c_bits = boolean::u64_into_boolean_vec_le(
-            cs.namespace(|| "value_c"),
-            self.value_c
-        )?;
+        let value_c_bits =
+            boolean::u64_into_boolean_vec_le(cs.namespace(|| "value_c"), self.value_c)?;
         // Compute note c's value as a linear combination of the bits.
         let mut value_c_num = num::Num::zero();
         let mut coeff = crate::engine::scalar_one();
-        for bit in &value_c_bits
-        {
+        for bit in &value_c_bits {
             value_c_num = value_c_num.add_bool_with_coeff(CS::one(), bit, coeff);
             coeff = coeff.double();
         }
@@ -392,7 +414,8 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
             ecc::EdwardsPoint::witness(
                 cs.namespace(|| "witness g_d b"),
                 self.note_b.as_ref().map(|b| {
-                    b.address().diversifier()
+                    b.address()
+                        .diversifier()
                         .g_d()
                         .expect("checked at construction")
                         .into()
@@ -405,9 +428,9 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
         let pk_d_b = {
             ecc::EdwardsPoint::witness(
                 cs.namespace(|| "witness pk_d b"),
-                self.note_b.as_ref().map(|b| {
-                    b.address().pk_d().inner().into()
-                }),
+                self.note_b
+                    .as_ref()
+                    .map(|b| b.address().pk_d().inner().into()),
             )?
         };
         pk_d_b.assert_not_small_order(cs.namespace(|| "pk_d b not small order"))?;
@@ -420,7 +443,7 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
             64 +    // symbol
             64 +    // contract
             256 +   // g_d
-            256     // pk_d
+            256 // pk_d
         );
 
         // Compute the commitment of note b
@@ -433,9 +456,7 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
             // Booleanize the randomness for the note commitment
             let rcm = boolean::field_into_boolean_vec_le(
                 cs.namespace(|| "rcm b"),
-                self.note_b.as_ref().map(|b| {
-                    b.rcm()
-                })
+                self.note_b.as_ref().map(|b| b.rcm()),
             )?;
 
             // Compute the note commitment randomness in the exponent
@@ -456,11 +477,11 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
         // - is the note A being spent greater than the output of the circuit (note B, amount C)?
         // - does note A equal the output of the circuit (note B, amount C)?
         // the net value of the circuit is then exposed as a pedersen commitment: net_value = note_a - (note_b + value_c)
-        let is_nft;
-        let is_equal;
-        let is_greater;
-        let net_value;
-        let expose_symbol_contract;
+        let mut is_nft;
+        let mut is_equal;
+        let mut is_greater;
+        let mut net_value;
+        let mut expose_symbol_contract;
         match self.note_a.as_ref() {
             Some(note_a) => {
                 match self.note_b.as_ref() {
@@ -469,12 +490,19 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
                             Some(value_c) => {
                                 // check if note being spent is an NFT
                                 is_nft = Some(note_a.symbol().raw() == 0);
-                                let amount_spent = note_b.amount() + value_c;
+                                let amount_spent = note_b
+                                    .amount()
+                                    .checked_add(*value_c)
+                                    .ok_or(SynthesisError::AssignmentMissing)?;
                                 is_equal = Some(note_a.amount() == amount_spent);
                                 is_greater = Some(note_a.amount() > amount_spent);
-                                net_value = Some(if note_a.amount() > amount_spent { note_a.amount() - amount_spent } else { amount_spent - note_a.amount() });
+                                net_value = Some(if note_a.amount() > amount_spent {
+                                    note_a.amount() - amount_spent
+                                } else {
+                                    amount_spent - note_a.amount()
+                                });
                                 expose_symbol_contract = Some(*value_c > 0);
-                            },
+                            }
                             None => {
                                 is_nft = None;
                                 is_equal = None;
@@ -483,7 +511,7 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
                                 expose_symbol_contract = None;
                             }
                         }
-                    },
+                    }
                     None => {
                         is_nft = None;
                         is_equal = None;
@@ -492,7 +520,7 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
                         expose_symbol_contract = None;
                     }
                 }
-            },
+            }
             None => {
                 is_nft = None;
                 is_equal = None;
@@ -502,12 +530,37 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
             }
         };
 
+        #[cfg(test)]
+        SPEND_OUTPUT_WITNESS_OVERRIDES.with(|slot| {
+            if let Some(overrides) = *slot.borrow() {
+                if let Some(v) = overrides.net_value {
+                    net_value = Some(v);
+                }
+                if let Some(v) = overrides.is_equal {
+                    is_equal = Some(v);
+                }
+                if let Some(v) = overrides.is_greater {
+                    is_greater = Some(v);
+                }
+                if let Some(v) = overrides.expose_symbol_contract {
+                    expose_symbol_contract = Some(v);
+                }
+                if let Some(v) = overrides.symbol_is_zero {
+                    is_nft = Some(v);
+                }
+            }
+        });
+
         // calculate the pedersen commitment of the net value of this SpendOutput transfer
         // Booleanize the net value into little-endian bit order
-        let net_value_bits = boolean::u64_into_boolean_vec_le(
-            cs.namespace(|| "net_value_bits"),
-            net_value
-        )?;
+        let net_value_bits =
+            boolean::u64_into_boolean_vec_le(cs.namespace(|| "net_value_bits"), net_value)?;
+        let mut net_value_num = num::Num::zero();
+        let mut coeff = crate::engine::scalar_one();
+        for bit in &net_value_bits {
+            net_value_num = net_value_num.add_bool_with_coeff(CS::one(), bit, coeff);
+            coeff = coeff.double();
+        }
         // Compute the net value in the exponent
         let net_value_exp = ecc::fixed_base_multiplication(
             cs.namespace(|| "compute the net value in the exponent"),
@@ -526,10 +579,7 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
             &rcv_bits,
         )?;
         // Booleanize the randomness multiplier.
-        let rcv_mul_bits = u8_into_boolean_vec_le(
-            cs.namespace(|| "rcv_mul"),
-            self.rcv_mul
-        )?;
+        let rcv_mul_bits = u8_into_boolean_vec_le(cs.namespace(|| "rcv_mul"), self.rcv_mul)?;
         // multiply the exponentiated randomness by rcv_mul
         let final_rcv = rcv_exp.mul(cs.namespace(|| "multiplication of rcv_exp"), &rcv_mul_bits)?;
         // Compute the Pedersen commitment to the net value by adding the final randomness
@@ -537,28 +587,211 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
         // Expose the commitment as an input to the circuit
         cv_net.inputize(cs.namespace(|| "cv_net"))?;
 
-        let is_nft_bit = AllocatedBit::alloc(cs.namespace(|| "is_nft bit"), is_nft)?;
-        let is_nft_num = num::Num::zero().add_bool_with_coeff(CS::one(), &Boolean::from(is_nft_bit.clone()), crate::engine::scalar_one());
         let is_equal_bit = AllocatedBit::alloc(cs.namespace(|| "is_equal bit"), is_equal)?;
         let is_greater_bit = AllocatedBit::alloc(cs.namespace(|| "is_greater bit"), is_greater)?;
-        let expose_symbol_contract_bit = AllocatedBit::alloc(cs.namespace(|| "expose_symbol_contract bit"), expose_symbol_contract)?;
+        let expose_symbol_contract_bit = AllocatedBit::alloc(
+            cs.namespace(|| "expose_symbol_contract bit"),
+            expose_symbol_contract,
+        )?;
 
-        // To prevent NFTs from being 'split', make sure that in case of NFT either B or C is zero
-        // create helper signals for A, B and C with is_nft_bit acting as chip-enable signal
-        let is_nft_anum = AllocatedNum::alloc(cs.namespace(|| "is_nft_anum"), || Ok(*is_nft_num.get_value().get()?))?;
-        let value_a_anum = AllocatedNum::alloc(cs.namespace(|| "value_a_anum"), || Ok(*value_a_num.get_value().get()?))?;
-        let value_b_anum = AllocatedNum::alloc(cs.namespace(|| "value_b_anum"), || Ok(*value_b_num.get_value().get()?))?;
-        let value_c_anum = AllocatedNum::alloc(cs.namespace(|| "value_c_anum"), || Ok(*value_c_num.get_value().get()?))?;
-        let a_mul_nft = value_a_anum.mul(cs.namespace(|| "a_mul_nft"), &is_nft_anum)?;
-        let b_mul_nft = value_b_anum.mul(cs.namespace(|| "b_mul_nft"), &is_nft_anum)?;
-        let c_mul_nft = value_c_anum.mul(cs.namespace(|| "c_mul_nft"), &is_nft_anum)?;
-        // enforce A = B xor C <=> (2*B) * C = B + C - A 
+        // Bind branch flags and net value to the actual booleanized note amounts.
+        // gt => a = b + c + n
+        // eq => a = b + c and n = 0
+        // lt => b + c = a + n, where lt = 1 - gt - eq
+        cs.enforce(
+            || "spend_output: gt and eq are mutually exclusive",
+            |lc| lc + is_greater_bit.get_variable(),
+            |lc| lc + is_equal_bit.get_variable(),
+            |lc| lc,
+        );
+
+        cs.enforce(
+            || "spend_output: gt branch binds net value",
+            |lc| lc + is_greater_bit.get_variable(),
+            |lc| {
+                lc + &value_a_num.lc(crate::engine::scalar_one())
+                    - &value_b_num.lc(crate::engine::scalar_one())
+                    - &value_c_num.lc(crate::engine::scalar_one())
+                    - &net_value_num.lc(crate::engine::scalar_one())
+            },
+            |lc| lc,
+        );
+
+        cs.enforce(
+            || "spend_output: eq branch binds equality",
+            |lc| lc + is_equal_bit.get_variable(),
+            |lc| {
+                lc + &value_a_num.lc(crate::engine::scalar_one())
+                    - &value_b_num.lc(crate::engine::scalar_one())
+                    - &value_c_num.lc(crate::engine::scalar_one())
+            },
+            |lc| lc,
+        );
+
+        cs.enforce(
+            || "spend_output: eq branch forces zero net value",
+            |lc| lc + is_equal_bit.get_variable(),
+            |lc| lc + &net_value_num.lc(crate::engine::scalar_one()),
+            |lc| lc,
+        );
+
+        cs.enforce(
+            || "spend_output: lt branch binds net value",
+            |lc| lc + CS::one() - is_greater_bit.get_variable() - is_equal_bit.get_variable(),
+            |lc| {
+                lc + &value_b_num.lc(crate::engine::scalar_one())
+                    + &value_c_num.lc(crate::engine::scalar_one())
+                    - &value_a_num.lc(crate::engine::scalar_one())
+                    - &net_value_num.lc(crate::engine::scalar_one())
+            },
+            |lc| lc,
+        );
+
+        // Make the equality flag canonical: is_equal == (net_value == 0).
+        let net_value_is_zero_bit = AllocatedBit::alloc(
+            cs.namespace(|| "net_value_is_zero bit"),
+            net_value.map(|v| v == 0),
+        )?;
+        let net_value_inv = AllocatedNum::alloc(cs.namespace(|| "net_value_inv"), || {
+            let value = net_value.ok_or(SynthesisError::AssignmentMissing)?;
+            if value == 0 {
+                Ok(crate::engine::scalar_zero())
+            } else {
+                Ok(crate::engine::Scalar::from(value).invert().unwrap())
+            }
+        })?;
+
+        cs.enforce(
+            || "spend_output: net_value_is_zero implies net_value == 0",
+            |lc| lc + &net_value_num.lc(crate::engine::scalar_one()),
+            |lc| lc + net_value_is_zero_bit.get_variable(),
+            |lc| lc,
+        );
+
+        cs.enforce(
+            || "spend_output: nonzero net_value has inverse",
+            |lc| lc + &net_value_num.lc(crate::engine::scalar_one()),
+            |lc| lc + net_value_inv.get_variable(),
+            |lc| lc + CS::one() - net_value_is_zero_bit.get_variable(),
+        );
+
+        cs.enforce(
+            || "spend_output: is_equal equals net_value_is_zero",
+            |lc| lc + CS::one(),
+            |lc| lc + is_equal_bit.get_variable() - net_value_is_zero_bit.get_variable(),
+            |lc| lc,
+        );
+
+        // If value_c is non-zero, symbol/contract must be publicly exposed.
+        // The converse is intentionally not enforced: revealing when value_c == 0 is not a soundness bug.
+        cs.enforce(
+            || "spend_output: cannot hide symbol contract when value_c is non-zero",
+            |lc| lc + CS::one() - expose_symbol_contract_bit.get_variable(),
+            |lc| lc + &value_c_num.lc(crate::engine::scalar_one()),
+            |lc| lc,
+        );
+
+        // Constrained zero-check for symbol == 0. This is the NFT discriminator.
+        let symbol_is_zero_bit =
+            AllocatedBit::alloc(cs.namespace(|| "symbol_is_zero bit"), is_nft)?;
+        let symbol_inv = AllocatedNum::alloc(cs.namespace(|| "symbol_inv"), || {
+            let symbol = self
+                .note_a
+                .as_ref()
+                .map(|a| a.symbol().raw())
+                .ok_or(SynthesisError::AssignmentMissing)?;
+            if symbol == 0 {
+                Ok(crate::engine::scalar_zero())
+            } else {
+                Ok(crate::engine::Scalar::from(symbol).invert().unwrap())
+            }
+        })?;
+
+        cs.enforce(
+            || "spend_output: symbol_is_zero implies symbol == 0",
+            |lc| lc + &symbol_num.lc(crate::engine::scalar_one()),
+            |lc| lc + symbol_is_zero_bit.get_variable(),
+            |lc| lc,
+        );
+
+        cs.enforce(
+            || "spend_output: nonzero symbol has inverse",
+            |lc| lc + &symbol_num.lc(crate::engine::scalar_one()),
+            |lc| lc + symbol_inv.get_variable(),
+            |lc| lc + CS::one() - symbol_is_zero_bit.get_variable(),
+        );
+
+        // To prevent NFTs from being split, constrain the NFT-only products
+        // to the actual booleanized values gated by the constrained symbol_is_zero bit.
+        let a_mul_nft = AllocatedNum::alloc(cs.namespace(|| "a_mul_nft"), || {
+            let note_a = self
+                .note_a
+                .as_ref()
+                .ok_or(SynthesisError::AssignmentMissing)?;
+            if note_a.symbol().raw() == 0 {
+                Ok(crate::engine::Scalar::from(note_a.amount()))
+            } else {
+                Ok(crate::engine::scalar_zero())
+            }
+        })?;
+        let b_mul_nft = AllocatedNum::alloc(cs.namespace(|| "b_mul_nft"), || {
+            let note_a = self
+                .note_a
+                .as_ref()
+                .ok_or(SynthesisError::AssignmentMissing)?;
+            let note_b = self
+                .note_b
+                .as_ref()
+                .ok_or(SynthesisError::AssignmentMissing)?;
+            if note_a.symbol().raw() == 0 {
+                Ok(crate::engine::Scalar::from(note_b.amount()))
+            } else {
+                Ok(crate::engine::scalar_zero())
+            }
+        })?;
+        let c_mul_nft = AllocatedNum::alloc(cs.namespace(|| "c_mul_nft"), || {
+            let note_a = self
+                .note_a
+                .as_ref()
+                .ok_or(SynthesisError::AssignmentMissing)?;
+            let value_c = self.value_c.ok_or(SynthesisError::AssignmentMissing)?;
+            if note_a.symbol().raw() == 0 {
+                Ok(crate::engine::Scalar::from(value_c))
+            } else {
+                Ok(crate::engine::scalar_zero())
+            }
+        })?;
+
+        cs.enforce(
+            || "spend_output: a_mul_nft is constrained",
+            |lc| lc + &value_a_num.lc(crate::engine::scalar_one()),
+            |lc| lc + symbol_is_zero_bit.get_variable(),
+            |lc| lc + a_mul_nft.get_variable(),
+        );
+
+        cs.enforce(
+            || "spend_output: b_mul_nft is constrained",
+            |lc| lc + &value_b_num.lc(crate::engine::scalar_one()),
+            |lc| lc + symbol_is_zero_bit.get_variable(),
+            |lc| lc + b_mul_nft.get_variable(),
+        );
+
+        cs.enforce(
+            || "spend_output: c_mul_nft is constrained",
+            |lc| lc + &value_c_num.lc(crate::engine::scalar_one()),
+            |lc| lc + symbol_is_zero_bit.get_variable(),
+            |lc| lc + c_mul_nft.get_variable(),
+        );
+
+        // enforce A = B xor C <=> (2*B) * C = B + C - A
         // source: https://github.com/zcash-hackworks/design-of-sapling-book/blob/master/zksnarks/r1cs.md
         cs.enforce(
             || "conditionally enforce nft A = B xor C",
             |lc| lc + b_mul_nft.get_variable() + b_mul_nft.get_variable(),
             |lc| lc + c_mul_nft.get_variable(),
-            |lc| lc + b_mul_nft.get_variable() + c_mul_nft.get_variable() - a_mul_nft.get_variable(),
+            |lc| {
+                lc + b_mul_nft.get_variable() + c_mul_nft.get_variable() - a_mul_nft.get_variable()
+            },
         );
 
         // pack (value_c | symbol | contract | vcm_gt | vcm_eq) as public inputs
@@ -566,14 +799,10 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
         let mut symbol_contract_bits = vec![];
         symbol_contract_bits.extend(symbol_bits);
         symbol_contract_bits.extend(contract_bits);
-        let symbol_bits_zero = boolean::u64_into_boolean_vec_le(
-            cs.namespace(|| "symbol zero"),
-            Some(0)
-        )?;
-        let contract_bits_zero = boolean::u64_into_boolean_vec_le(
-            cs.namespace(|| "contract zero"),
-            Some(0)
-        )?;
+        let symbol_bits_zero =
+            boolean::u64_into_boolean_vec_le(cs.namespace(|| "symbol zero"), Some(0))?;
+        let contract_bits_zero =
+            boolean::u64_into_boolean_vec_le(cs.namespace(|| "contract zero"), Some(0))?;
         let mut symbol_contract_bits_zero = vec![];
         symbol_contract_bits_zero.extend(symbol_bits_zero);
         symbol_contract_bits_zero.extend(contract_bits_zero);
@@ -593,52 +822,57 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
         // unshielded outputs hash to boolean bit vector
         let mut unshielded_outputs_hash_bits = u256_into_boolean_vec_le(
             cs.namespace(|| "unshielded_outputs_hash"),
-            self.unshielded_outputs_hash
+            self.unshielded_outputs_hash,
         )?;
         // erase MSB (truncate to 254)
         unshielded_outputs_hash_bits.truncate(254);
-        multipack::pack_into_inputs(cs.namespace(|| "pack inputs8 contents"), &unshielded_outputs_hash_bits)?;
+        multipack::pack_into_inputs(
+            cs.namespace(|| "pack inputs8 contents"),
+            &unshielded_outputs_hash_bits,
+        )?;
 
         Ok(())
     }
 }
 
 #[cfg(test)]
-mod tests
-{
-    use crate::engine::Scalar;
-    use group::Curve;
-    use rand::rngs::OsRng;
-    use bellman::gadgets::test::TestConstraintSystem;
-    use bellman::gadgets::multipack;
-    use bellman::Circuit;
-    use bellman::groth16::generate_random_parameters;
-    use crate::engine::{Bls12, scalar_to_canonical_bytes, fq_to_engine_scalar};
+#[path = "spend_output_soundness_tests.rs"]
+mod spend_output_soundness_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::SpendOutput;
+    use crate::blake2s7r::Params as Blake2s7rParams;
+    use crate::constants::MERKLE_TREE_DEPTH;
     use crate::contract::AffineVerifyingKeyBytesLE;
+    use crate::engine::Scalar;
+    use crate::engine::{fq_to_engine_scalar, scalar_to_canonical_bytes, Bls12};
     use crate::eosio::ExtendedAsset;
     use crate::eosio::Name;
+    use crate::keys::{FullViewingKey, SpendingKey};
+    use crate::note::nullifier::ExtractedNullifier;
     use crate::note::Note;
     use crate::note::Rseed;
-    use crate::note::nullifier::ExtractedNullifier;
-    use crate::constants::MERKLE_TREE_DEPTH;
-    use super::SpendOutput;
+    use crate::pedersen_hash::Personalization;
+    use crate::spec::extract_p;
+    use crate::spec::windowed_pedersen_commit;
     use crate::value::{ValueCommitTrapdoor, ValueCommitment};
+    use bellman::gadgets::multipack;
+    use bellman::gadgets::test::TestConstraintSystem;
+    use bellman::groth16::generate_random_parameters;
+    use bellman::groth16::Parameters;
+    use bellman::Circuit;
+    use bitvec::{array::BitArray, order::Lsb0};
+    use core::iter;
+    use ff::PrimeField;
+    use group::Curve;
+    use rand::rngs::OsRng;
     use std::fs;
     use std::fs::File;
     use std::ops::Add;
-    use crate::keys::{SpendingKey, FullViewingKey};
-    use crate::spec::windowed_pedersen_commit;
-    use crate::pedersen_hash::Personalization;
-    use crate::spec::extract_p;
-    use crate::blake2s7r::Params as Blake2s7rParams;
-    use bellman::groth16::Parameters;
-    use ff::PrimeField;
-    use core::iter;
-    use bitvec::{array::BitArray, order::Lsb0};
 
     #[test]
-    fn test_spendoutput_circuit()
-    {
+    fn test_spendoutput_circuit() {
         let mut rng = OsRng.clone();
         let mut cs = TestConstraintSystem::new();
 
@@ -653,13 +887,31 @@ mod tests
             Name(0),
             ExtendedAsset::from_string(&"10.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
-            [0; 512]
+            [0; 512],
         );
 
         let auth_path = vec![
-            Some((hex::decode("0100000000000000000000000000000000000000000000000000000000000000").unwrap().try_into().unwrap(), false)),
-            Some((hex::decode("322eb027eb8aee02f2c996a31912d1ae05e251c597ae9bbd5c819b71f080bce9").unwrap().try_into().unwrap(), false)),
-            Some((hex::decode("d492e18b60152bd5001335141d8ff86912c9ccd988a8409fec5316ba36df98cc").unwrap().try_into().unwrap(), false))
+            Some((
+                hex::decode("0100000000000000000000000000000000000000000000000000000000000000")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                false,
+            )),
+            Some((
+                hex::decode("322eb027eb8aee02f2c996a31912d1ae05e251c597ae9bbd5c819b71f080bce9")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                false,
+            )),
+            Some((
+                hex::decode("d492e18b60152bd5001335141d8ff86912c9ccd988a8409fec5316ba36df98cc")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                false,
+            )),
         ];
         let mut position = 0u64;
         let mut cur = note_a.commitment().to_bytes();
@@ -673,7 +925,7 @@ mod tests
             if b {
                 ::std::mem::swap(&mut lhs, &mut rhs);
             }
-            
+
             cur = Blake2s7rParams::new()
                 .hash_length(32)
                 .personal(crate::constants::MERKLE_TREE_PERSONALIZATION)
@@ -700,31 +952,47 @@ mod tests
 
         let value_c = 50000u64;
         let unshielded_outputs_hash = [0; 4];
-        
+
         let note_b = Note::from_parts(
             0,
             sender,
             Name(0),
             ExtendedAsset::from_string(&"11.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
-            [0; 512]
+            [0; 512],
         );
 
         let rscm = Rseed([21; 32]);
         let scm = windowed_pedersen_commit(
             Personalization::SymbolCommitment,
             iter::empty()
-                .chain(BitArray::<_, Lsb0>::new(note_a.symbol().raw().to_le_bytes()).iter().by_vals())
-                .chain(BitArray::<_, Lsb0>::new(note_a.contract().raw().to_le_bytes()).iter().by_vals()),
-                rscm.rcm().0
+                .chain(
+                    BitArray::<_, Lsb0>::new(note_a.symbol().raw().to_le_bytes())
+                        .iter()
+                        .by_vals(),
+                )
+                .chain(
+                    BitArray::<_, Lsb0>::new(note_a.contract().raw().to_le_bytes())
+                        .iter()
+                        .by_vals(),
+                ),
+            rscm.rcm().0,
         );
         let scm = extract_p(&scm);
 
         let rcv = ValueCommitTrapdoor::random(&mut rng);
         let value_spend = note_b.amount() + value_c;
-        let net_value = if note_a.amount() > value_spend { note_a.amount() - value_spend } else { value_spend - note_a.amount() };
+        let net_value = if note_a.amount() > value_spend {
+            note_a.amount() - value_spend
+        } else {
+            value_spend - note_a.amount()
+        };
         // add one zero value commitment in order to test multiplying rcv by 5 inside the circuit (i.e. setting rcv_mul to 5)
-        let cv_net = ValueCommitment::derive(net_value, rcv.clone()).add(&ValueCommitment::derive(0, rcv.clone())).add(&ValueCommitment::derive(0, rcv.clone())).add(&ValueCommitment::derive(0, rcv.clone())).add(&ValueCommitment::derive(0, rcv.clone()));
+        let cv_net = ValueCommitment::derive(net_value, rcv.clone())
+            .add(&ValueCommitment::derive(0, rcv.clone()))
+            .add(&ValueCommitment::derive(0, rcv.clone()))
+            .add(&ValueCommitment::derive(0, rcv.clone()))
+            .add(&ValueCommitment::derive(0, rcv.clone()));
         let cv_gt = note_a.amount() > value_spend;
         let cv_eq = note_a.amount() == value_spend;
 
@@ -737,12 +1005,11 @@ mod tests
             rscm: Some(rscm.rcm().0),
             note_b: Some(note_b.clone()),
             value_c: Some(value_c),
-            unshielded_outputs_hash: Some(unshielded_outputs_hash)
+            unshielded_outputs_hash: Some(unshielded_outputs_hash),
         };
 
         let mut symbol_contract = [0; 16];
-        if value_c > 0
-        {
+        if value_c > 0 {
             symbol_contract[0..8].copy_from_slice(&note_a.symbol().raw().to_le_bytes());
             symbol_contract[8..16].copy_from_slice(&note_a.contract().raw().to_le_bytes());
         }
@@ -750,7 +1017,7 @@ mod tests
         let mut inputs7 = [0; 25];
         inputs7[0..8].copy_from_slice(&value_c.to_le_bytes());
         inputs7[8..24].copy_from_slice(&symbol_contract);
-        inputs7[24] = if cv_gt {1} else {0} | (if cv_eq {1} else {0} << 1);
+        inputs7[24] = if cv_gt { 1 } else { 0 } | (if cv_eq { 1 } else { 0 } << 1);
         println!("{}", hex::encode(inputs7));
         let inputs7 = multipack::bytes_to_bits_le(&inputs7);
         let inputs7_: Vec<Scalar> = multipack::compute_multipacking(&inputs7);
@@ -774,7 +1041,11 @@ mod tests
         println!("num constraints: {}", cs.num_constraints());
 
         assert!(cs.is_satisfied());
-        assert_eq!(cs.get("randomization of note commitment a/u3/num").to_repr(), note_a.commitment().to_bytes());
+        assert_eq!(
+            cs.get("randomization of note commitment a/u3/num")
+                .to_repr(),
+            note_a.commitment().to_bytes()
+        );
         assert_eq!(
             scalar_to_canonical_bytes(&cs.get("randomization of note commitment a/u3/num")),
             note_a.commitment().to_bytes()
@@ -782,7 +1053,10 @@ mod tests
 
         assert_eq!(cs.get_input(0, "ONE"), crate::engine::scalar_one());
         assert_eq!(cs.get_input(1, "anchor/input 0"), anchor[0]);
-        assert_eq!(cs.get_input(2, "nullifier/input variable").to_repr(), nf.to_bytes());
+        assert_eq!(
+            cs.get_input(2, "nullifier/input variable").to_repr(),
+            nf.to_bytes()
+        );
         assert_eq!(
             scalar_to_canonical_bytes(&cs.get_input(2, "nullifier/input variable")),
             scalar_to_canonical_bytes(&nf.0)
@@ -791,7 +1065,10 @@ mod tests
             scalar_to_canonical_bytes(&cs.get_input(3, "symbol commitment/input variable")),
             scalar_to_canonical_bytes(&scm)
         );
-        assert_eq!(cs.get_input(4, "commitment b/input variable").to_repr(), note_b.commitment().to_bytes());
+        assert_eq!(
+            cs.get_input(4, "commitment b/input variable").to_repr(),
+            note_b.commitment().to_bytes()
+        );
         assert_eq!(
             scalar_to_canonical_bytes(&cs.get_input(4, "commitment b/input variable")),
             note_b.commitment().to_bytes()
@@ -809,8 +1086,7 @@ mod tests
     }
 
     #[test]
-    fn read_params()
-    {
+    fn read_params() {
         let f = File::open("params_spendoutput.bin").unwrap();
         let params = Parameters::<Bls12>::read(f, false).unwrap();
         let vk_affine_bytes = AffineVerifyingKeyBytesLE::from(params.vk);
@@ -824,8 +1100,7 @@ mod tests
     }
 
     #[test]
-    fn generate_and_write_params()
-    {
+    fn generate_and_write_params() {
         let instance = SpendOutput {
             note_a: None,
             proof_generation_key: None,
@@ -835,7 +1110,7 @@ mod tests
             rscm: None,
             note_b: None,
             value_c: None,
-            unshielded_outputs_hash: None
+            unshielded_outputs_hash: None,
         };
         let params = generate_random_parameters::<Bls12, _, _>(instance, &mut OsRng).unwrap();
         let f = File::create("params_spendoutput.bin").unwrap();
@@ -848,10 +1123,9 @@ mod tests
     }
 
     #[test]
-    fn prove_and_verify()
-    {
+    fn prove_and_verify() {
         use bellman::groth16::{
-            create_random_proof, prepare_verifying_key, verify_proof, VerifyingKey, Parameters
+            create_random_proof, prepare_verifying_key, verify_proof, Parameters, VerifyingKey,
         };
         use std::time::Instant;
 
@@ -874,13 +1148,31 @@ mod tests
             Name(0),
             ExtendedAsset::from_string(&"10.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
-            [0; 512]
+            [0; 512],
         );
 
         let auth_path = vec![
-            Some((hex::decode("0100000000000000000000000000000000000000000000000000000000000000").unwrap().try_into().unwrap(), false)),
-            Some((hex::decode("322eb027eb8aee02f2c996a31912d1ae05e251c597ae9bbd5c819b71f080bce9").unwrap().try_into().unwrap(), false)),
-            Some((hex::decode("d492e18b60152bd5001335141d8ff86912c9ccd988a8409fec5316ba36df98cc").unwrap().try_into().unwrap(), false))
+            Some((
+                hex::decode("0100000000000000000000000000000000000000000000000000000000000000")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                false,
+            )),
+            Some((
+                hex::decode("322eb027eb8aee02f2c996a31912d1ae05e251c597ae9bbd5c819b71f080bce9")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                false,
+            )),
+            Some((
+                hex::decode("d492e18b60152bd5001335141d8ff86912c9ccd988a8409fec5316ba36df98cc")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                false,
+            )),
         ];
 
         let mut position = 0u64;
@@ -930,7 +1222,7 @@ mod tests
             Name(0),
             ExtendedAsset::from_string(&"11.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
-            [0; 512]
+            [0; 512],
         );
 
         // symbol commitment (scm)
@@ -938,9 +1230,17 @@ mod tests
         let scm = windowed_pedersen_commit(
             Personalization::SymbolCommitment,
             iter::empty()
-                .chain(BitArray::<_, Lsb0>::new(note_a.symbol().raw().to_le_bytes()).iter().by_vals())
-                .chain(BitArray::<_, Lsb0>::new(note_a.contract().raw().to_le_bytes()).iter().by_vals()),
-            rscm.rcm().0
+                .chain(
+                    BitArray::<_, Lsb0>::new(note_a.symbol().raw().to_le_bytes())
+                        .iter()
+                        .by_vals(),
+                )
+                .chain(
+                    BitArray::<_, Lsb0>::new(note_a.contract().raw().to_le_bytes())
+                        .iter()
+                        .by_vals(),
+                ),
+            rscm.rcm().0,
         );
         let scm = extract_p(&scm); // jubjub::Fq
 
@@ -1019,18 +1319,22 @@ mod tests
 
         // Groth16 public inputs (NO leading ONE)
         let mut inputs: Vec<Scalar> = vec![];
-        inputs.push(anchor[0]);                          // input 1: anchor
-        inputs.push(nf.0);                               // input 2: nullifier
-        inputs.push(scm);                  // input 3: symbol commitment
-        inputs.push(note_b.commitment().0);              // input 4: cm_b
+        inputs.push(anchor[0]); // input 1: anchor
+        inputs.push(nf.0); // input 2: nullifier
+        inputs.push(scm); // input 3: symbol commitment
+        inputs.push(note_b.commitment().0); // input 4: cm_b
         inputs.push(fq_to_engine_scalar(cv_net.as_inner().to_affine().get_u())); // input 5: cv_net.u
         inputs.push(fq_to_engine_scalar(cv_net.as_inner().to_affine().get_v())); // input 6: cv_net.v
-        inputs.push(inputs7_packed[0]);                  // input 7: packed inputs7
-        inputs.push(inputs8_packed[0]);                  // input 8: packed inputs8
+        inputs.push(inputs7_packed[0]); // input 7: packed inputs7
+        inputs.push(inputs8_packed[0]); // input 8: packed inputs8
 
         // print public inputs (handy when debugging mismatches)
         for (i, x) in inputs.iter().enumerate() {
-            println!("input[{}] = {}", i, hex::encode(scalar_to_canonical_bytes(x)));
+            println!(
+                "input[{}] = {}",
+                i,
+                hex::encode(scalar_to_canonical_bytes(x))
+            );
         }
 
         // --- verify proof ---
@@ -1042,8 +1346,7 @@ mod tests
     }
 
     #[test]
-    fn bench_proofgen_spend_output()
-    {
+    fn bench_proofgen_spend_output() {
         use bellman::groth16::{create_random_proof, Parameters};
         use std::time::Instant;
 
@@ -1069,13 +1372,31 @@ mod tests
             Name(0),
             ExtendedAsset::from_string(&"10.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
-            [0; 512]
+            [0; 512],
         );
 
         let auth_path = vec![
-            Some((hex::decode("0100000000000000000000000000000000000000000000000000000000000000").unwrap().try_into().unwrap(), false)),
-            Some((hex::decode("322eb027eb8aee02f2c996a31912d1ae05e251c597ae9bbd5c819b71f080bce9").unwrap().try_into().unwrap(), false)),
-            Some((hex::decode("d492e18b60152bd5001335141d8ff86912c9ccd988a8409fec5316ba36df98cc").unwrap().try_into().unwrap(), false))
+            Some((
+                hex::decode("0100000000000000000000000000000000000000000000000000000000000000")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                false,
+            )),
+            Some((
+                hex::decode("322eb027eb8aee02f2c996a31912d1ae05e251c597ae9bbd5c819b71f080bce9")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                false,
+            )),
+            Some((
+                hex::decode("d492e18b60152bd5001335141d8ff86912c9ccd988a8409fec5316ba36df98cc")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                false,
+            )),
         ];
 
         // compute anchor + position (needed for nullifier)
@@ -1085,7 +1406,9 @@ mod tests
             let (uncle, b) = val.unwrap();
             let mut lhs = cur;
             let mut rhs = uncle;
-            if b { ::std::mem::swap(&mut lhs, &mut rhs); }
+            if b {
+                ::std::mem::swap(&mut lhs, &mut rhs);
+            }
             cur = Blake2s7rParams::new()
                 .hash_length(32)
                 .personal(crate::constants::MERKLE_TREE_PERSONALIZATION)
@@ -1096,7 +1419,9 @@ mod tests
                 .as_bytes()
                 .try_into()
                 .expect("output length is correct");
-            if b { position |= 1 << i; }
+            if b {
+                position |= 1 << i;
+            }
         }
 
         let _anchor_bits = {
@@ -1120,7 +1445,7 @@ mod tests
             Name(0),
             ExtendedAsset::from_string(&"11.0000 EOS@eosio.token".to_string()).unwrap(),
             Rseed([42; 32]),
-            [0; 512]
+            [0; 512],
         );
 
         // net value commitment randomness
@@ -1165,10 +1490,16 @@ mod tests
         let min = *ms.iter().min().unwrap_or(&0);
         let max = *ms.iter().max().unwrap_or(&0);
         let sum: u128 = ms.iter().sum();
-        let avg = if N_PROOFS > 0 { sum / (N_PROOFS as u128) } else { 0 };
+        let avg = if N_PROOFS > 0 {
+            sum / (N_PROOFS as u128)
+        } else {
+            0
+        };
 
         println!("SpendOutput proofgen total: {} ms", total_ms);
-        println!("SpendOutput proofgen stats: min={} ms, avg={} ms, max={} ms", min, avg, max);
+        println!(
+            "SpendOutput proofgen stats: min={} ms, avg={} ms, max={} ms",
+            min, avg, max
+        );
     }
 }
-
