@@ -271,7 +271,7 @@ impl Circuit<crate::engine::Scalar> for Mint {
         let auth_hash_bits =
             u256_into_boolean_vec_le(cs.namespace(|| "auth_hash"), self.auth_hash)?;
         // account (plus zero) bits to boolean vector
-        let zero_bits = boolean::u64_into_boolean_vec_le(cs.namespace(|| "zero bits"), Some(0))?;
+        let zero_bits = vec![Boolean::constant(false); 64];
         let mut account_zero_bits = vec![];
         account_zero_bits.extend(account_bits);
         account_zero_bits.extend(zero_bits.clone());

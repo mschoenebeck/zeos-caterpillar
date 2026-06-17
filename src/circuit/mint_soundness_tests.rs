@@ -1,5 +1,5 @@
 use super::{with_mint_witness_overrides, Mint, MintWitnessOverrides};
-use bellman::gadgets::test::TestConstraintSystem;
+use bellman::gadgets::{multipack, test::TestConstraintSystem};
 use bellman::Circuit;
 use rand::rngs::OsRng;
 
@@ -197,6 +197,31 @@ fn honest_normal_mint_still_passes() {
 #[test]
 fn honest_auth_mint_still_passes() {
     assert_mint_satisfied(honest_auth_mint_instance(), None, true);
+}
+
+#[test]
+fn non_auth_inputs3_uses_canonical_zero_padding() {
+    let instance = normal_mint_instance();
+    let account = instance.account.expect("normal mint has account");
+    let mut cs = synthesize_with_overrides(instance, None);
+
+    assert!(
+        cs.is_satisfied(),
+        "honest normal mint should be satisfied; failing constraint: {:?}",
+        cs.which_is_unsatisfied(),
+    );
+
+    let mut expected_inputs3_bytes = [0u8; 8];
+    expected_inputs3_bytes.copy_from_slice(&account.to_le_bytes());
+    let expected_inputs3_bits = multipack::bytes_to_bits_le(&expected_inputs3_bytes);
+    let expected_inputs3 = multipack::compute_multipacking(&expected_inputs3_bits);
+    assert_eq!(expected_inputs3.len(), 1);
+
+    assert_eq!(
+        cs.get_input(3, "pack inputs3 contents/input 0"),
+        expected_inputs3[0],
+        "non-auth inputs3 must be exactly account with canonical zero padding",
+    );
 }
 
 #[test]
