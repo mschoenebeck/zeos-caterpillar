@@ -477,11 +477,11 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
         // - is the note A being spent greater than the output of the circuit (note B, amount C)?
         // - does note A equal the output of the circuit (note B, amount C)?
         // the net value of the circuit is then exposed as a pedersen commitment: net_value = note_a - (note_b + value_c)
-        let mut is_nft;
-        let mut is_equal;
-        let mut is_greater;
-        let mut net_value;
-        let mut expose_symbol_contract;
+        let is_nft;
+        let is_equal;
+        let is_greater;
+        let net_value;
+        let expose_symbol_contract;
         match self.note_a.as_ref() {
             Some(note_a) => {
                 match self.note_b.as_ref() {
@@ -531,25 +531,41 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
         };
 
         #[cfg(test)]
-        SPEND_OUTPUT_WITNESS_OVERRIDES.with(|slot| {
-            if let Some(overrides) = *slot.borrow() {
-                if let Some(v) = overrides.net_value {
-                    net_value = Some(v);
+        let (is_nft, is_equal, is_greater, net_value, expose_symbol_contract) = {
+            let mut is_nft = is_nft;
+            let mut is_equal = is_equal;
+            let mut is_greater = is_greater;
+            let mut net_value = net_value;
+            let mut expose_symbol_contract = expose_symbol_contract;
+
+            SPEND_OUTPUT_WITNESS_OVERRIDES.with(|slot| {
+                if let Some(overrides) = *slot.borrow() {
+                    if let Some(v) = overrides.net_value {
+                        net_value = Some(v);
+                    }
+                    if let Some(v) = overrides.is_equal {
+                        is_equal = Some(v);
+                    }
+                    if let Some(v) = overrides.is_greater {
+                        is_greater = Some(v);
+                    }
+                    if let Some(v) = overrides.expose_symbol_contract {
+                        expose_symbol_contract = Some(v);
+                    }
+                    if let Some(v) = overrides.symbol_is_zero {
+                        is_nft = Some(v);
+                    }
                 }
-                if let Some(v) = overrides.is_equal {
-                    is_equal = Some(v);
-                }
-                if let Some(v) = overrides.is_greater {
-                    is_greater = Some(v);
-                }
-                if let Some(v) = overrides.expose_symbol_contract {
-                    expose_symbol_contract = Some(v);
-                }
-                if let Some(v) = overrides.symbol_is_zero {
-                    is_nft = Some(v);
-                }
-            }
-        });
+            });
+
+            (
+                is_nft,
+                is_equal,
+                is_greater,
+                net_value,
+                expose_symbol_contract,
+            )
+        };
 
         // calculate the pedersen commitment of the net value of this SpendOutput transfer
         // Booleanize the net value into little-endian bit order
