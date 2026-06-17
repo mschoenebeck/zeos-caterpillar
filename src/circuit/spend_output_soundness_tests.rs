@@ -1,5 +1,5 @@
 use super::{with_spend_output_witness_overrides, SpendOutput, SpendOutputWitnessOverrides};
-use bellman::gadgets::test::TestConstraintSystem;
+use bellman::gadgets::{multipack, test::TestConstraintSystem};
 use bellman::Circuit;
 use rand::rngs::OsRng;
 
@@ -240,6 +240,38 @@ fn honest_greater_than_change_case_passes() {
 #[test]
 fn honest_less_than_aggregate_output_side_case_passes() {
     assert_spend_output_satisfied(5, 10, 0, AssetKind::Fungible, None, true);
+}
+
+#[test]
+fn hidden_symbol_contract_branch_packs_zeroes() {
+    let value_c = 0u64;
+    let instance = spend_output_instance(10, 6, value_c, AssetKind::Fungible);
+    let mut cs = synthesize_with_overrides(
+        instance,
+        Some(SpendOutputWitnessOverrides {
+            expose_symbol_contract: Some(false),
+            ..Default::default()
+        }),
+    );
+
+    assert!(
+        cs.is_satisfied(),
+        "honest hidden symbol_contract branch should be satisfied; failing constraint: {:?}",
+        cs.which_is_unsatisfied(),
+    );
+
+    let mut inputs7_bytes = [0u8; 25];
+    inputs7_bytes[0..8].copy_from_slice(&value_c.to_le_bytes());
+    inputs7_bytes[24] = 1; // is_greater = true, is_equal = false
+    let inputs7_bits = multipack::bytes_to_bits_le(&inputs7_bytes);
+    let inputs7_packed: Vec<Scalar> = multipack::compute_multipacking(&inputs7_bits);
+    assert_eq!(inputs7_packed.len(), 1);
+
+    assert_eq!(
+        cs.get_input(7, "pack inputs7 contents/input 0"),
+        inputs7_packed[0],
+        "hidden symbol_contract branch must pack canonical zeroes",
+    );
 }
 
 #[test]

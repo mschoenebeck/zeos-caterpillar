@@ -815,10 +815,8 @@ impl Circuit<crate::engine::Scalar> for SpendOutput {
         let mut symbol_contract_bits = vec![];
         symbol_contract_bits.extend(symbol_bits);
         symbol_contract_bits.extend(contract_bits);
-        let symbol_bits_zero =
-            boolean::u64_into_boolean_vec_le(cs.namespace(|| "symbol zero"), Some(0))?;
-        let contract_bits_zero =
-            boolean::u64_into_boolean_vec_le(cs.namespace(|| "contract zero"), Some(0))?;
+        let symbol_bits_zero = vec![Boolean::constant(false); 64];
+        let contract_bits_zero = vec![Boolean::constant(false); 64];
         let mut symbol_contract_bits_zero = vec![];
         symbol_contract_bits_zero.extend(symbol_bits_zero);
         symbol_contract_bits_zero.extend(contract_bits_zero);
