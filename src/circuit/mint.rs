@@ -33,6 +33,38 @@ pub struct Mint {
     pub proof_generation_key: Option<ProofGenerationKey>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct MintWitnessOverrides {
+    pub auth_bit: Option<bool>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static MINT_WITNESS_OVERRIDES: std::cell::RefCell<Option<MintWitnessOverrides>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(super) fn with_mint_witness_overrides<R>(
+    overrides: MintWitnessOverrides,
+    f: impl FnOnce() -> R,
+) -> R {
+    struct ResetGuard(Option<MintWitnessOverrides>);
+
+    impl Drop for ResetGuard {
+        fn drop(&mut self) {
+            MINT_WITNESS_OVERRIDES.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+
+    let previous = MINT_WITNESS_OVERRIDES.with(|slot| slot.replace(Some(overrides)));
+    let _guard = ResetGuard(previous);
+    f()
+}
+
 impl Circuit<crate::engine::Scalar> for Mint {
     fn synthesize<CS: ConstraintSystem<crate::engine::Scalar>>(
         self,
@@ -40,6 +72,9 @@ impl Circuit<crate::engine::Scalar> for Mint {
     ) -> Result<(), SynthesisError> {
         let mut note_preimage = vec![];
         let mut inputs2_bits = vec![];
+
+        #[cfg(test)]
+        let witness_overrides = MINT_WITNESS_OVERRIDES.with(|slot| *slot.borrow());
 
         // note account to boolean bit vector
         let account_bits =
@@ -151,9 +186,17 @@ impl Circuit<crate::engine::Scalar> for Mint {
         // Compute pk_d_ = g_d^ivk
         let pk_d_ = g_d.mul(cs.namespace(|| "compute pk_d_"), &ivk)?;
 
-        // enforce: AUTH * (pk_d - pk_d_) = 0
+        // enforce: AUTH * (pk_d.u - pk_d_.u) = 0
         cs.enforce(
-            || "conditionally enforce 0 = AUTH * (pk_d - pk_d_)",
+            || "conditionally enforce pk_d u equality under auth",
+            |lc| lc + pk_d.get_u().get_variable() - pk_d_.get_u().get_variable(),
+            |lc| lc + &auth.lc(CS::one(), crate::engine::scalar_one()),
+            |lc| lc,
+        );
+
+        // enforce: AUTH * (pk_d.v - pk_d_.v) = 0
+        cs.enforce(
+            || "conditionally enforce pk_d v equality under auth",
             |lc| lc + pk_d.get_v().get_variable() - pk_d_.get_v().get_variable(),
             |lc| lc + &auth.lc(CS::one(), crate::engine::scalar_one()),
             |lc| lc,
@@ -235,7 +278,22 @@ impl Circuit<crate::engine::Scalar> for Mint {
         account_zero_bits.extend(zero_bits.clone());
         account_zero_bits.extend(zero_bits);
         // inputs3 is either (account) or (auth_hash)
-        let auth_bit = AllocatedBit::alloc(cs.namespace(|| "auth bit"), auth.get_value())?;
+        #[cfg(test)]
+        let auth_bit_value = witness_overrides
+            .and_then(|overrides| overrides.auth_bit)
+            .or_else(|| auth.get_value());
+
+        #[cfg(not(test))]
+        let auth_bit_value = auth.get_value();
+
+        let auth_bit = AllocatedBit::alloc(cs.namespace(|| "auth bit"), auth_bit_value)?;
+        cs.enforce(
+            || "enforce auth bit equals derived auth",
+            |lc| lc + auth_bit.get_variable(),
+            |lc| lc + CS::one(),
+            |lc| lc + &auth.lc(CS::one(), crate::engine::scalar_one()),
+        );
+
         let (mut inputs3_bits, _) = conditionally_swap_u256(
             cs.namespace(|| "conditional swap of auth_hash_bits"),
             &account_zero_bits,
@@ -250,6 +308,10 @@ impl Circuit<crate::engine::Scalar> for Mint {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "mint_soundness_tests.rs"]
+mod mint_soundness_tests;
 
 #[cfg(test)]
 mod tests {
