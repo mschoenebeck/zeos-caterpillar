@@ -36,9 +36,7 @@ app.get('/multi-threaded/zeos_caterpillar.js', (req, res) => {
 app.get('/multi-threaded/zeos_caterpillar_bg.wasm', (req, res) => {
     res.sendFile(path.join(__dirname, '../wasm_pkg_mt/zeos_caterpillar_bg.wasm'));
 });
-app.get('/multi-threaded/snippets/wasm-bindgen-rayon-38edf6e439f6d70d/src/workerHelpers.no-bundler.js', (req, res) => {
-    res.sendFile(path.join(__dirname, '../wasm_pkg_mt/snippets/wasm-bindgen-rayon-38edf6e439f6d70d/src/workerHelpers.no-bundler.js'));
-});
+app.use('/multi-threaded/snippets', express.static(path.join(__dirname, '../wasm_pkg_mt/snippets')));
 app.get('/multi-threaded/mint.params.b64', (req, res) => {
     res.sendFile(path.join(__dirname, '../mint.params.b64'));
 });
