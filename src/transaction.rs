@@ -407,6 +407,7 @@ pub fn resolve_ztransaction(
         vault_contract: ztx.vault_contract,
         alias_authority: alias_auth,
         rzactions: vec![],
+        tx_fee: None,
     };
 
     // buffer auth tokens for use within this transaction
@@ -797,6 +798,7 @@ pub fn resolve_ztransaction(
     }
 
     // add transaction fees
+    let mut resolved_fee_amount = 0u64;
     if ztx.add_fee {
         // walk throug rztx and look for a SpendSequence with fee token symbol
         let mut found = false;
@@ -838,6 +840,7 @@ pub fn resolve_ztransaction(
                             Err(TransactionError::InsufficientFunds)?
                         }
                         let (notes_to_spend, change, fee) = notes_to_spend.unwrap();
+                        resolved_fee_amount += fee;
 
                         // add new unshielded output for tx fee to first spend_output in sequence
                         data.spend_output[0].unshielded_outputs.push((
@@ -885,6 +888,7 @@ pub fn resolve_ztransaction(
                             Err(TransactionError::InsufficientFunds)?
                         }
                         let (notes_to_spend, change, fee) = notes_to_spend.unwrap();
+                        resolved_fee_amount += fee;
 
                         // add new unshielded output for tx fee to first spend_output in sequence
                         data.spend_output[0].unshielded_outputs.push((
@@ -952,6 +956,7 @@ pub fn resolve_ztransaction(
                         Err(TransactionError::InsufficientFunds)?
                     }
                     let (mut notes_to_spend, change, fee) = notes_to_spend.unwrap();
+                    resolved_fee_amount += fee;
 
                     // add one 'spend_output'
                     let spend_output = vec![ResolvedSpendOutputDesc {
@@ -1018,6 +1023,21 @@ pub fn resolve_ztransaction(
         }
     }
 
+    if ztx.add_fee {
+        rztx.tx_fee = Some(ExtendedAsset::new(
+            Asset::new(
+                resolved_fee_amount as i64,
+                fees.values()
+                    .next()
+                    .ok_or(TransactionError::FeeSymbol)?
+                    .symbol()
+                    .clone(),
+            )
+            .ok_or(TransactionError::FeeSymbol)?,
+            fee_token_contract.clone(),
+        ));
+    }
+
     Ok(rztx)
 }
 
@@ -1028,6 +1048,8 @@ pub struct ResolvedZTransaction {
     pub vault_contract: Name,
     pub alias_authority: Authorization,
     pub rzactions: Vec<ResolvedZAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_fee: Option<ExtendedAsset>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1107,6 +1129,8 @@ pub struct AuthTokensMeta {
 pub struct TxMeta {
     pub unpublished_notes: HashMap<String, Vec<String>>,
     pub auth_tokens: AuthTokensMeta,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_fee: Option<ExtendedAsset>,
 }
 
 pub fn zsign_transaction(
@@ -1153,6 +1177,7 @@ pub fn zsign_transaction(
     let mut meta = TxMeta {
         unpublished_notes: HashMap::new(),
         auth_tokens: AuthTokensMeta::default(),
+        tx_fee: rztx.tx_fee.clone(),
     };
     // collect auth tokens minted/spent in this transaction
     let mut minted_auth: BTreeSet<String> = BTreeSet::new();
@@ -2537,6 +2562,7 @@ mod tests {
             Err(e) => panic!("Error: {:?}", e),
             Ok(x) => x,
         };
+        assert_eq!(rztx.tx_fee, None);
         println!("{}", serde_json::to_string_pretty(&rztx).unwrap());
     }
 
@@ -2779,6 +2805,10 @@ mod tests {
             Err(e) => panic!("Error: {:?}", e),
             Ok(x) => x,
         };
+        assert_eq!(
+            rztx.tx_fee.as_ref().map(ExtendedAsset::to_string),
+            Some("9.0000 ZEOS@thezeostoken".to_string())
+        );
         //println!("{}", serde_json::to_string_pretty(&rztx).unwrap());
 
         println!("read params...");
@@ -2810,6 +2840,7 @@ mod tests {
             Err(e) => panic!("Error: {:?}", e),
             Ok(x) => x,
         };
+        assert_eq!(tx.1.tx_fee.as_ref(), rztx.tx_fee.as_ref());
         println!("{}", serde_json::to_string_pretty(&tx).unwrap());
 
         println!("zverify...");
