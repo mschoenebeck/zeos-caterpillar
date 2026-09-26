@@ -73,11 +73,61 @@ pub struct Wallet {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum CredentialEventKind {
+    Created,
+    Burned,
+    Sent,
+    Received,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum HistorySourceEntry {
+    Token {
+        asset: String,
+        contract: String,
+        amount: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        shielded_recipient: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        received_at: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        memo: Option<String>,
+    },
+    NFT {
+        asset: String,
+        contract: String,
+        nft_id: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        shielded_recipient: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        received_at: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        memo: Option<String>,
+    },
+    Credential {
+        commitment: String,
+        contract: String,
+        credential_event_kind: CredentialEventKind,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistoryTransaction {
     pub tx_type: String,
     pub date_time: String,
     pub tx_fee: String,
     pub account_asset_memo: Vec<(String, String, String)>, // asset, receiver, memo
+    #[serde(default)]
+    pub source_block_ts_ms: u64,
+    #[serde(default)]
+    pub time_known: bool,
+    #[serde(default)]
+    pub source_entries: Vec<HistorySourceEntry>,
 }
 
 impl Wallet {
@@ -658,7 +708,141 @@ impl Wallet {
         (ats_received << 16) | (nfts_received << 8) | fts_received
     }
 
+    fn is_proven_synthetic_credential_burn(&self, note: &NoteEx) -> bool {
+        if !note.note().is_auth_token() || note.block_ts() == 0 {
+            return false;
+        }
+
+        let commitment = note.note().commitment();
+        self.spent_notes
+            .iter()
+            .any(|spent| spent.note().is_auth_token() && spent.note().commitment() == commitment)
+    }
+
+    fn credential_creator_provenance_index(&self) -> HashMap<[u8; 32], u64> {
+        let mut provenance = HashMap::new();
+        if self.is_ivk() {
+            return provenance;
+        }
+
+        let spending_key = match self.spending_key() {
+            Some(spending_key) => spending_key,
+            None => return provenance,
+        };
+        let fvk = FullViewingKey::from_spending_key(&spending_key);
+
+        for (batch_ts, recipient_map) in self.unpublished_notes.iter() {
+            for ciphertexts in recipient_map.values() {
+                for ciphertext in ciphertexts.iter() {
+                    let encrypted_note = match TransmittedNoteCiphertext::from_base64(ciphertext) {
+                        Some(encrypted_note) => encrypted_note,
+                        None => continue,
+                    };
+                    let recovered = match try_output_recovery_with_ovk(&fvk.ovk, &encrypted_note) {
+                        Some(recovered) => recovered,
+                        None => continue,
+                    };
+                    if !recovered.is_auth_token() {
+                        continue;
+                    }
+
+                    let commitment = recovered.commitment().to_bytes();
+                    provenance
+                        .entry(commitment)
+                        .and_modify(|earliest| {
+                            if *batch_ts < *earliest {
+                                *earliest = *batch_ts;
+                            }
+                        })
+                        .or_insert(*batch_ts);
+                }
+            }
+        }
+
+        provenance
+    }
+
+    fn history_source_entry(
+        &self,
+        note: &NoteEx,
+        tx_type: &str,
+        creator_provenance: &HashMap<[u8; 32], u64>,
+    ) -> HistorySourceEntry {
+        if note.note().is_auth_token() {
+            let credential_event_kind = if tx_type == "Sent" {
+                if self.is_proven_synthetic_credential_burn(note) {
+                    CredentialEventKind::Burned
+                } else {
+                    CredentialEventKind::Sent
+                }
+            } else if note.block_ts() == 0
+                && creator_provenance
+                    .get(&note.note().commitment().to_bytes())
+                    .map(|batch_ts| *batch_ts <= note.wallet_ts())
+                    .unwrap_or(false)
+            {
+                CredentialEventKind::Created
+            } else {
+                CredentialEventKind::Received
+            };
+
+            return HistorySourceEntry::Credential {
+                commitment: hex::encode(note.note().commitment().to_bytes()),
+                contract: note.note().contract().to_string(),
+                credential_event_kind,
+            };
+        }
+
+        let account = if note.note().account().raw() == 0 {
+            None
+        } else {
+            Some(note.note().account().to_string())
+        };
+        let address = note.note().address().to_bech32m().unwrap();
+        let shielded_recipient = if tx_type == "Sent" && account.is_none() {
+            Some(address.clone())
+        } else {
+            None
+        };
+        let received_at = if tx_type == "Received" {
+            Some(address)
+        } else {
+            None
+        };
+        let memo = {
+            let memo = note.note().memo_string();
+            if memo.is_empty() {
+                None
+            } else {
+                Some(memo)
+            }
+        };
+
+        if note.note().is_nft() {
+            HistorySourceEntry::NFT {
+                asset: note.note().asset().to_string(),
+                contract: note.note().contract().to_string(),
+                nft_id: note.note().amount(),
+                account,
+                shielded_recipient,
+                received_at,
+                memo,
+            }
+        } else {
+            HistorySourceEntry::Token {
+                asset: note.note().asset().to_string(),
+                contract: note.note().contract().to_string(),
+                amount: note.note().quantity().to_string(),
+                account,
+                shielded_recipient,
+                received_at,
+                memo,
+            }
+        }
+    }
+
     pub fn transaction_history(&self) -> Vec<HistoryTransaction> {
+        let creator_provenance = self.credential_creator_provenance_index();
         let mut history = vec![];
         let mut received = self.unspent_notes.clone();
         received.append(&mut self.spent_notes.clone());
@@ -671,6 +855,9 @@ impl Wallet {
                 date_time: "".to_string(),
                 tx_fee: "".to_string(),
                 account_asset_memo: vec![],
+                source_block_ts_ms: 0,
+                time_known: false,
+                source_entries: vec![],
             };
             let mut tx = vec![];
 
@@ -719,6 +906,9 @@ impl Wallet {
                         .format("%Y-%m-%d %H:%M:%S")
                         .to_string();
             }
+
+            htx.source_block_ts_ms = tx[0].block_ts();
+            htx.time_known = htx.source_block_ts_ms > 0;
 
             for n in tx.iter() {
                 // Special-case (AT UX): if an auth token is minted and burned within the same block timestamp,
@@ -797,6 +987,11 @@ impl Wallet {
                             )
                             .unwrap(),
                         ));
+                        htx.source_entries.push(self.history_source_entry(
+                            n,
+                            &htx.tx_type,
+                            &creator_provenance,
+                        ));
                     } else {
                         htx.account_asset_memo.push((
                             if htx.tx_type.eq("Sent") {
@@ -824,6 +1019,11 @@ impl Wallet {
                                     .to_vec(),
                             )
                             .unwrap(),
+                        ));
+                        htx.source_entries.push(self.history_source_entry(
+                            n,
+                            &htx.tx_type,
+                            &creator_provenance,
                         ));
                     }
                 }
@@ -1121,13 +1321,14 @@ impl Wallet {
 mod tests {
     use crate::{
         contract::{AffineProofBytesLE, PlsMint, ScalarBytes},
-        eosio::{Action, Authorization, ExtendedAsset, Name, Transaction},
+        eosio::{Action, Asset, Authorization, ExtendedAsset, Name, Symbol, Transaction},
         keys::{FullViewingKey, SpendingKey},
-        note::{Note, Rseed},
+        note::{memo_to_bytes, Note, NoteEx, Rseed},
         note_encryption::{
             derive_esk, ka_derive_public, NoteEncryption, TransmittedNoteCiphertext,
         },
-        wallet::Wallet,
+        transaction::create_auth_token,
+        wallet::{CredentialEventKind, HistorySourceEntry, Wallet},
     };
     use rand::rngs::OsRng;
 
@@ -1369,5 +1570,606 @@ mod tests {
             "{:?}",
             serde_json::to_string(&w.get_sister_path_and_root(&w.unspent_notes[0])).unwrap()
         );
+    }
+
+    fn history_test_wallet_with_seed(seed: &[u8]) -> Wallet {
+        Wallet::create(
+            seed,
+            false,
+            [0; 32],
+            Name::from_string("zeos4privacy").unwrap(),
+            Name::from_string("thezeosvault").unwrap(),
+            Authorization::from_string("thezeosalias@public").unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn history_test_wallet() -> Wallet {
+        history_test_wallet_with_seed(
+            b"history source authority test seed is deliberately longer than 32 bytes",
+        )
+    }
+
+    fn history_note(
+        wallet: &Wallet,
+        asset: &str,
+        account: Name,
+        memo: &str,
+        rseed_tag: &[u8],
+    ) -> Note {
+        Note::from_parts(
+            0,
+            wallet.default_address().unwrap(),
+            account,
+            ExtendedAsset::from_string(asset).unwrap(),
+            Rseed::from_seed(rseed_tag),
+            memo_to_bytes(memo),
+        )
+    }
+
+    fn history_credential_note(
+        wallet: &Wallet,
+        contract: Name,
+        memo: &str,
+        rseed_tag: &[u8],
+    ) -> Note {
+        Note::from_parts(
+            0,
+            wallet.default_address().unwrap(),
+            contract,
+            ExtendedAsset::new(Asset::new(0, Symbol(0)).unwrap(), contract),
+            Rseed::from_seed(rseed_tag),
+            memo_to_bytes(memo),
+        )
+    }
+
+    #[test]
+    fn history_source_known_sent_token() {
+        let mut wallet = history_test_wallet();
+        let note = history_note(
+            &wallet,
+            "1.2500 EOS@eosio.token",
+            Name(0),
+            "sent memo",
+            b"sent-token",
+        );
+        let expected_recipient = note.address().to_bech32m().unwrap();
+        wallet
+            .outgoing_notes
+            .push(NoteEx::from_parts(7, 1_700_000_000_123, 0, 0, note));
+
+        let history = wallet.transaction_history();
+        assert_eq!(history.len(), 1);
+        let tx = &history[0];
+        assert_eq!(tx.tx_type, "Sent");
+        assert_eq!(tx.source_block_ts_ms, 1_700_000_000_123);
+        assert!(tx.time_known);
+        assert_eq!(tx.source_entries.len(), 1);
+        match &tx.source_entries[0] {
+            HistorySourceEntry::Token {
+                asset,
+                contract,
+                amount,
+                account,
+                shielded_recipient,
+                received_at,
+                memo,
+            } => {
+                assert_eq!(asset, "1.2500 EOS@eosio.token");
+                assert_eq!(contract, "eosio.token");
+                assert_eq!(amount, "1.2500 EOS");
+                assert!(account.is_none());
+                assert_eq!(
+                    shielded_recipient.as_deref(),
+                    Some(expected_recipient.as_str())
+                );
+                assert!(received_at.is_none());
+                assert_eq!(memo.as_deref(), Some("sent memo"));
+            }
+            other => panic!("unexpected source entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_source_known_received_token_keeps_received_at_separate() {
+        let mut wallet = history_test_wallet();
+        let note = history_note(
+            &wallet,
+            "2.0000 EOS@eosio.token",
+            Name(0),
+            "received memo",
+            b"received-token",
+        );
+        let expected_received_at = note.address().to_bech32m().unwrap();
+        wallet
+            .unspent_notes
+            .push(NoteEx::from_parts(8, 1_700_000_000_456, 0, 0, note));
+
+        let history = wallet.transaction_history();
+        assert_eq!(history.len(), 1);
+        let tx = &history[0];
+        assert_eq!(tx.tx_type, "Received");
+        assert_eq!(tx.source_block_ts_ms, 1_700_000_000_456);
+        assert!(tx.time_known);
+        match &tx.source_entries[0] {
+            HistorySourceEntry::Token {
+                asset,
+                account,
+                shielded_recipient,
+                received_at,
+                ..
+            } => {
+                assert_eq!(asset, "2.0000 EOS@eosio.token");
+                assert!(!asset.contains("(@"));
+                assert!(account.is_none());
+                assert!(shielded_recipient.is_none());
+                assert_eq!(received_at.as_deref(), Some(expected_received_at.as_str()));
+            }
+            other => panic!("unexpected source entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_source_known_received_token_preserves_nonzero_account_context() {
+        let mut wallet = history_test_wallet();
+        let account = Name::from_string("alice").unwrap();
+        let note = history_note(
+            &wallet,
+            "2.5000 EOS@eosio.token",
+            account,
+            "account received",
+            b"received-account-token",
+        );
+        let expected_received_at = note.address().to_bech32m().unwrap();
+        wallet
+            .unspent_notes
+            .push(NoteEx::from_parts(8, 1_700_000_000_654, 0, 0, note));
+
+        let history = wallet.transaction_history();
+        assert_eq!(history.len(), 1);
+        match &history[0].source_entries[0] {
+            HistorySourceEntry::Token {
+                asset,
+                account,
+                shielded_recipient,
+                received_at,
+                ..
+            } => {
+                assert_eq!(asset, "2.5000 EOS@eosio.token");
+                assert!(!asset.contains("(@"));
+                assert_eq!(account.as_deref(), Some("alice"));
+                assert!(shielded_recipient.is_none());
+                assert_eq!(received_at.as_deref(), Some(expected_received_at.as_str()));
+            }
+            other => panic!("unexpected source entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_source_nft_is_typed_with_exact_id_and_contract() {
+        let mut wallet = history_test_wallet();
+        let note = history_note(
+            &wallet,
+            "123456789@atomicassets",
+            Name(0),
+            "",
+            b"received-nft",
+        );
+        wallet
+            .unspent_notes
+            .push(NoteEx::from_parts(9, 1_700_000_000_789, 0, 0, note));
+
+        let history = wallet.transaction_history();
+        assert_eq!(history.len(), 1);
+        match &history[0].source_entries[0] {
+            HistorySourceEntry::NFT {
+                asset,
+                contract,
+                nft_id,
+                ..
+            } => {
+                assert_eq!(asset, "123456789@atomicassets");
+                assert_eq!(contract, "atomicassets");
+                assert_eq!(*nft_id, 123456789);
+            }
+            other => panic!("unexpected source entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_source_self_created_credential_is_unknown_time_and_secret_free() {
+        let mut wallet = history_test_wallet();
+        let contract = Name::from_string("authcontract").unwrap();
+        let secret = "D4B1-RECOGNIZABLE-CREDENTIAL-SECRET";
+        let unpublished = create_auth_token(
+            &wallet,
+            secret.to_string(),
+            contract,
+            wallet.default_address().unwrap(),
+        )
+        .unwrap();
+        wallet.add_unpublished_notes(&unpublished);
+        assert_eq!(wallet.unspent_notes.len(), 1);
+        let expected_commitment =
+            hex::encode(wallet.unspent_notes[0].note().commitment().to_bytes());
+
+        let history = wallet.transaction_history();
+        assert_eq!(history.len(), 1);
+        let tx = &history[0];
+        assert_eq!(tx.source_block_ts_ms, 0);
+        assert!(!tx.time_known);
+        match &tx.source_entries[0] {
+            HistorySourceEntry::Credential {
+                commitment,
+                contract,
+                credential_event_kind,
+            } => {
+                assert_eq!(commitment, &expected_commitment);
+                assert_eq!(contract, "authcontract");
+                assert_eq!(credential_event_kind, &CredentialEventKind::Created);
+            }
+            other => panic!("unexpected source entry: {other:?}"),
+        }
+
+        let typed_json = serde_json::to_string(&tx.source_entries[0]).unwrap();
+        assert!(!typed_json.contains(secret));
+        assert!(!typed_json.contains("\"memo\""));
+        assert_eq!(tx.account_asset_memo[0].2, secret);
+    }
+
+    #[test]
+    fn history_source_arbitrary_incoming_unknown_time_credential_is_not_created() {
+        let issuer = history_test_wallet_with_seed(
+            b"history credential issuer seed is deliberately longer than thirty two bytes",
+        );
+        let mut recipient = history_test_wallet_with_seed(
+            b"history credential recipient seed is deliberately longer than thirty two bytes",
+        );
+        let contract = Name::from_string("authcontract").unwrap();
+        let secret = "D4B1-ARBITRARY-INCOMING-CREDENTIAL-SECRET";
+        let unpublished = create_auth_token(
+            &issuer,
+            secret.to_string(),
+            contract,
+            recipient.default_address().unwrap(),
+        )
+        .unwrap();
+
+        assert!(unpublished.contains_key("self"));
+        recipient.add_unpublished_notes(&unpublished);
+        assert_eq!(recipient.unspent_notes.len(), 1);
+        let expected_commitment =
+            hex::encode(recipient.unspent_notes[0].note().commitment().to_bytes());
+
+        let history = recipient.transaction_history();
+        assert_eq!(history.len(), 1);
+        let tx = &history[0];
+        assert_eq!(tx.source_block_ts_ms, 0);
+        assert!(!tx.time_known);
+        match &tx.source_entries[0] {
+            HistorySourceEntry::Credential {
+                commitment,
+                contract,
+                credential_event_kind,
+            } => {
+                assert_eq!(commitment, &expected_commitment);
+                assert_eq!(contract, "authcontract");
+                assert_eq!(credential_event_kind, &CredentialEventKind::Received);
+                assert_ne!(credential_event_kind, &CredentialEventKind::Created);
+                assert_ne!(credential_event_kind, &CredentialEventKind::Burned);
+            }
+            other => panic!("unexpected source entry: {other:?}"),
+        }
+        let typed_json = serde_json::to_string(&tx.source_entries[0]).unwrap();
+        assert!(!typed_json.contains(secret));
+        assert!(!typed_json.contains("\"memo\""));
+    }
+
+    #[test]
+    fn history_source_later_local_recreation_does_not_relabel_older_received() {
+        let issuer = history_test_wallet_with_seed(
+            b"history later-recreation issuer seed is deliberately longer than thirty two bytes",
+        );
+        let mut recipient = history_test_wallet_with_seed(
+            b"history later-recreation recipient seed is deliberately longer than thirty two bytes",
+        );
+        let contract = Name::from_string("authcontract").unwrap();
+        let secret = "D4B1-EVENT-BOUND-CREDENTIAL-SECRET";
+
+        let from_issuer = create_auth_token(
+            &issuer,
+            secret.to_string(),
+            contract,
+            recipient.default_address().unwrap(),
+        )
+        .unwrap();
+        recipient.add_unpublished_notes(&from_issuer);
+        assert_eq!(recipient.unspent_notes.len(), 1);
+        let original_wallet_ts = recipient.unspent_notes[0].wallet_ts();
+        let original_commitment =
+            hex::encode(recipient.unspent_notes[0].note().commitment().to_bytes());
+
+        let before = recipient.transaction_history();
+        assert_eq!(before.len(), 1);
+        match &before[0].source_entries[0] {
+            HistorySourceEntry::Credential {
+                commitment,
+                credential_event_kind,
+                ..
+            } => {
+                assert_eq!(commitment, &original_commitment);
+                assert_eq!(credential_event_kind, &CredentialEventKind::Received);
+            }
+            other => panic!("unexpected source entry: {other:?}"),
+        }
+
+        while std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            <= original_wallet_ts
+        {
+            std::thread::yield_now();
+        }
+
+        let recreated = create_auth_token(
+            &recipient,
+            secret.to_string(),
+            contract,
+            recipient.default_address().unwrap(),
+        )
+        .unwrap();
+        recipient.add_unpublished_notes(&recreated);
+
+        let later_batch_ts = *recipient.unpublished_notes.keys().max().unwrap();
+        assert!(later_batch_ts > original_wallet_ts);
+        assert_eq!(recipient.unspent_notes.len(), 1);
+
+        let after = recipient.transaction_history();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].source_block_ts_ms, 0);
+        assert!(!after[0].time_known);
+        match &after[0].source_entries[0] {
+            HistorySourceEntry::Credential {
+                commitment,
+                credential_event_kind,
+                ..
+            } => {
+                assert_eq!(commitment, &original_commitment);
+                assert_eq!(credential_event_kind, &CredentialEventKind::Received);
+                assert_ne!(credential_event_kind, &CredentialEventKind::Created);
+                assert_ne!(credential_event_kind, &CredentialEventKind::Burned);
+            }
+            other => panic!("unexpected source entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_source_created_provenance_survives_wallet_write_read() {
+        let mut wallet = history_test_wallet();
+        let contract = Name::from_string("authcontract").unwrap();
+        let unpublished = create_auth_token(
+            &wallet,
+            "persisted credential secret".to_string(),
+            contract,
+            wallet.default_address().unwrap(),
+        )
+        .unwrap();
+        wallet.add_unpublished_notes(&unpublished);
+
+        let mut bytes = vec![];
+        wallet.write(&mut bytes).unwrap();
+        let restored = Wallet::read(&bytes[..]).unwrap();
+        let history = restored.transaction_history();
+        assert_eq!(history.len(), 1);
+        match &history[0].source_entries[0] {
+            HistorySourceEntry::Credential {
+                credential_event_kind,
+                ..
+            } => assert_eq!(credential_event_kind, &CredentialEventKind::Created),
+            other => panic!("unexpected source entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_source_malformed_unpublished_ciphertext_is_not_created_proof() {
+        let mut wallet = history_test_wallet();
+        let contract = Name::from_string("authcontract").unwrap();
+        let note = history_credential_note(
+            &wallet,
+            contract,
+            "incoming credential",
+            b"malformed-provenance-credential",
+        );
+        wallet
+            .unspent_notes
+            .push(NoteEx::from_parts(0, 0, 0, 0, note));
+        wallet.unpublished_notes.insert(
+            1,
+            [("self".to_string(), vec!["not-valid-base64".to_string()])]
+                .into_iter()
+                .collect(),
+        );
+
+        let history = wallet.transaction_history();
+        assert_eq!(history.len(), 1);
+        match &history[0].source_entries[0] {
+            HistorySourceEntry::Credential {
+                credential_event_kind,
+                ..
+            } => assert_eq!(credential_event_kind, &CredentialEventKind::Received),
+            other => panic!("unexpected source entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_source_proven_synthetic_credential_burn_is_burned() {
+        let mut wallet = history_test_wallet();
+        let contract = Name::from_string("authcontract").unwrap();
+        let note =
+            history_credential_note(&wallet, contract, "credential seed", b"burned-credential");
+        wallet.spent_notes.push(NoteEx::from_parts(
+            10,
+            1_700_000_000_100,
+            0,
+            0,
+            note.clone(),
+        ));
+        wallet
+            .outgoing_notes
+            .push(NoteEx::from_parts(11, 1_700_000_000_200, 0, 0, note));
+
+        let history = wallet.transaction_history();
+        let burn = history.iter().find(|tx| tx.tx_type == "Sent").unwrap();
+        assert_eq!(burn.source_block_ts_ms, 1_700_000_000_200);
+        assert!(burn.time_known);
+        match &burn.source_entries[0] {
+            HistorySourceEntry::Credential {
+                credential_event_kind,
+                ..
+            } => assert_eq!(credential_event_kind, &CredentialEventKind::Burned),
+            other => panic!("unexpected source entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_source_generic_outgoing_credential_is_not_burned() {
+        let mut wallet = history_test_wallet();
+        let contract = Name::from_string("authcontract").unwrap();
+        let note =
+            history_credential_note(&wallet, contract, "credential seed", b"sent-credential");
+        wallet
+            .outgoing_notes
+            .push(NoteEx::from_parts(12, 1_700_000_000_300, 0, 0, note));
+
+        let history = wallet.transaction_history();
+        assert_eq!(history.len(), 1);
+        match &history[0].source_entries[0] {
+            HistorySourceEntry::Credential {
+                credential_event_kind,
+                ..
+            } => assert_eq!(credential_event_kind, &CredentialEventKind::Sent),
+            other => panic!("unexpected source entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_source_same_timestamp_credential_create_burn_stays_suppressed() {
+        let mut wallet = history_test_wallet();
+        let contract = Name::from_string("authcontract").unwrap();
+        let note = history_credential_note(
+            &wallet,
+            contract,
+            "credential seed",
+            b"suppressed-credential",
+        );
+        wallet.spent_notes.push(NoteEx::from_parts(
+            13,
+            1_700_000_000_400,
+            0,
+            0,
+            note.clone(),
+        ));
+        wallet
+            .outgoing_notes
+            .push(NoteEx::from_parts(13, 1_700_000_000_400, 0, 0, note));
+
+        assert!(wallet.transaction_history().is_empty());
+    }
+
+    #[test]
+    fn history_source_equal_time_opposite_directions_remain_separate() {
+        let mut wallet = history_test_wallet();
+        let received = history_note(
+            &wallet,
+            "3.0000 EOS@eosio.token",
+            Name(0),
+            "received",
+            b"equal-received",
+        );
+        let sent = history_note(
+            &wallet,
+            "4.0000 EOS@eosio.token",
+            Name(0),
+            "sent",
+            b"equal-sent",
+        );
+        let ts = 1_700_000_000_500;
+        wallet
+            .unspent_notes
+            .push(NoteEx::from_parts(14, ts, 0, 0, received));
+        wallet
+            .outgoing_notes
+            .push(NoteEx::from_parts(14, ts, 0, 0, sent));
+
+        let history = wallet.transaction_history();
+        assert_eq!(history.len(), 2);
+        assert!(history.iter().all(|tx| tx.source_block_ts_ms == ts));
+        assert!(history.iter().any(|tx| tx.tx_type == "Sent"));
+        assert!(history.iter().any(|tx| tx.tx_type == "Received"));
+    }
+
+    #[test]
+    fn history_source_multi_entry_record_stays_one_record() {
+        let mut wallet = history_test_wallet();
+        let ts = 1_700_000_000_600;
+        let first = history_note(
+            &wallet,
+            "5.0000 EOS@eosio.token",
+            Name(0),
+            "first",
+            b"multi-first",
+        );
+        let second = history_note(
+            &wallet,
+            "6.0000 EOS@eosio.token",
+            Name(0),
+            "second",
+            b"multi-second",
+        );
+        wallet
+            .unspent_notes
+            .push(NoteEx::from_parts(15, ts, 0, 0, first));
+        wallet
+            .unspent_notes
+            .push(NoteEx::from_parts(15, ts, 0, 0, second));
+
+        let history = wallet.transaction_history();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].source_entries.len(), 2);
+        assert_eq!(history[0].account_asset_memo.len(), 2);
+    }
+
+    #[test]
+    fn history_source_valid_empty_serializes_as_empty_array() {
+        let wallet = history_test_wallet();
+        let history = wallet.transaction_history();
+        assert!(history.is_empty());
+        assert_eq!(serde_json::to_string(&history).unwrap(), "[]");
+    }
+
+    #[test]
+    fn history_source_legacy_fields_remain_serialized() {
+        let mut wallet = history_test_wallet();
+        let note = history_note(
+            &wallet,
+            "7.0000 EOS@eosio.token",
+            Name(0),
+            "legacy",
+            b"legacy-fields",
+        );
+        wallet
+            .unspent_notes
+            .push(NoteEx::from_parts(16, 1_700_000_000_700, 0, 0, note));
+
+        let history = wallet.transaction_history();
+        let value = serde_json::to_value(&history[0]).unwrap();
+        assert_eq!(value["tx_type"], "Received");
+        assert!(value["date_time"].is_string());
+        assert!(value["tx_fee"].is_string());
+        assert!(value["account_asset_memo"].is_array());
+        assert_eq!(value["source_block_ts_ms"], 1_700_000_000_700u64);
+        assert_eq!(value["time_known"], true);
+        assert!(value["source_entries"].is_array());
     }
 }
