@@ -2129,8 +2129,16 @@ pub extern "C" fn wallet_digest_block(
         }
     };
 
-    *out_digest = wallet.digest_block(block_str);
-    true
+    match wallet.try_digest_block(block_str) {
+        Ok(digest) => {
+            *out_digest = digest;
+            true
+        }
+        Err(e) => {
+            set_last_error(&format!("wallet_digest_block: {e}"));
+            false
+        }
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]

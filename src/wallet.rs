@@ -1035,6 +1035,80 @@ impl Wallet {
         history
     }
 
+    /// Fail on malformed block actions before digest_block can mutate any note pool.
+    /// The existing digest algorithm remains the sole authority for valid blocks.
+    pub fn try_digest_block(&mut self, block: &str) -> Result<u64, String> {
+        self.validate_digest_block(block)?;
+        Ok(self.digest_block(block))
+    }
+
+    fn validate_digest_block(&self, block: &str) -> Result<(), String> {
+        let j: Value = serde_json::from_str(block)
+            .map_err(|e| format!("invalid block JSON: {e}"))?;
+        let raw_block_num = j.get("block_num").and_then(Value::as_u64)
+            .ok_or("block_num must be an unsigned integer")?;
+        let block_num = u32::try_from(raw_block_num)
+            .map_err(|_| format!("block {raw_block_num}: block_num exceeds u32 range"))?;
+        let timestamp = j.get("timestamp").and_then(Value::as_str)
+            .ok_or_else(|| format!("block {block_num}: missing timestamp"))?;
+        DateTime::parse_from_str(&(timestamp.to_owned() + " +0000"), "%Y-%m-%dT%H:%M:%S%.3f %z")
+            .map_err(|e| format!("block {block_num}: invalid timestamp: {e}"))?;
+
+        // Preserve idempotence: the old digest exits before reading transactions.
+        if block_num <= self.block_num {
+            return Ok(());
+        }
+
+        let transactions = j.get("transactions").and_then(Value::as_array)
+            .ok_or_else(|| format!("block {block_num}: transactions must be an array"))?;
+        let alias = self.alias_authority.actor.to_string();
+        for (tx_index, tx) in transactions.iter().enumerate() {
+            let actions = tx.pointer("/trx/transaction/actions").and_then(Value::as_array)
+                .ok_or_else(|| format!("block {block_num} tx {tx_index}: missing actions array"))?;
+            for (action_index, action) in actions.iter().enumerate() {
+                let context = format!("block {block_num} tx {tx_index} action {action_index}");
+                let account = action.get("account").and_then(Value::as_str)
+                    .ok_or_else(|| format!("{context}: account must be a string"))?;
+                let name = action.get("name").and_then(Value::as_str)
+                    .ok_or_else(|| format!("{context}: name must be a string"))?;
+                if account != alias {
+                    continue;
+                }
+
+                if matches!(name, "mint" | "spend" | "publishnotes") {
+                    let ciphertexts = action.pointer("/data/note_ct").and_then(Value::as_array)
+                        .ok_or_else(|| format!("{context} {name}.note_ct must be an array"))?;
+                    if ciphertexts.iter().any(|ct| !ct.is_string()) {
+                        return Err(format!("{context} {name}.note_ct must contain strings"));
+                    }
+                }
+                if name == "spend" {
+                    let sequences = action.pointer("/data/actions").and_then(Value::as_array)
+                        .ok_or_else(|| format!("{context} spend.actions must be an array"))?;
+                    for (seq_index, sequence) in sequences.iter().enumerate() {
+                        let seq: PlsSpendSequence = serde_json::from_value(sequence.clone())
+                            .map_err(|e| format!("{context} spend sequence {seq_index}: {e}"))?;
+                        for (index, so) in seq.spend_output.iter().enumerate() {
+                            crate::engine::Scalar::try_from(so.nf.clone())
+                                .map_err(|e| format!("{context} spend sequence {seq_index} spend_output[{index}].nf: {e}"))?;
+                        }
+                        for (index, s) in seq.spend.iter().enumerate() {
+                            crate::engine::Scalar::try_from(s.nf.clone())
+                                .map_err(|e| format!("{context} spend sequence {seq_index} spend[{index}].nf: {e}"))?;
+                        }
+                    }
+                }
+                if name == "authenticate" {
+                    let auth: PlsAuthenticate = serde_json::from_value(action["data"]["action"].clone())
+                        .map_err(|e| format!("{context} authenticate.action: {e}"))?;
+                    crate::engine::Scalar::try_from(auth.cm)
+                        .map_err(|e| format!("{context} authenticate.cm: {e}"))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     // Merkle Tree must be up-to-date before calling this function!
     pub fn digest_block(&mut self, block: &str) -> u64 {
         let sk = SpendingKey::from_seed(&self.seed);
@@ -1314,6 +1388,155 @@ impl Wallet {
             }
         }
         */
+    }
+}
+
+#[cfg(test)]
+mod digest_block_validation_tests {
+    use super::Wallet;
+    use crate::contract::{
+        AffineProofBytesLE, PlsAuthenticate, PlsSpend, PlsSpendOutput, PlsSpendSequence,
+        ScalarBytes,
+    };
+    use crate::eosio::{Authorization, Name, Symbol};
+    use crate::keys::{FullViewingKey, SpendingKey};
+    use crate::note::{Note, NoteEx, Rseed};
+    use crate::eosio::ExtendedAsset;
+    use rand::rngs::OsRng;
+    use serde_json::{json, Value};
+
+    fn test_wallet() -> Wallet {
+        Wallet::create(
+            b"isolated digest regression wallet seed greater than thirty two bytes",
+            false, [0; 32], Name::from_string("zeos4privacy").unwrap(),
+            Name::from_string("thezeosvault").unwrap(),
+            Authorization::from_string("thezeosalias@public").unwrap(),
+        ).unwrap()
+    }
+
+    fn sequence(field: &str, scalar: ScalarBytes) -> PlsSpendSequence {
+        let zero = ScalarBytes([0; 32]);
+        let mut seq = PlsSpendSequence {
+            scm: zero.clone(), spend_output: vec![], spend: vec![], output: vec![],
+        };
+        if field == "spend_output.nf" {
+            seq.spend_output.push(PlsSpendOutput {
+                root: zero.clone(), nf: scalar, cm_b: zero.clone(),
+                cv_net_u: zero.clone(), cv_net_v: zero.clone(), value_c: 0,
+                symbol: Symbol(0), contract: Name(0), cv_eq_gt: 0,
+                proof: AffineProofBytesLE([0; 384]), unshielded_outputs: vec![],
+            });
+        } else {
+            seq.spend.push(PlsSpend {
+                root: zero.clone(), nf: scalar, cv_u: zero.clone(), cv_v: zero,
+                proof: AffineProofBytesLE([0; 384]),
+            });
+        }
+        seq
+    }
+
+    fn spend_action(field: &str, scalar: ScalarBytes) -> Value {
+        json!({"account":"thezeosalias", "name":"spend",
+            "data":{"note_ct":[], "actions":[sequence(field, scalar)]}})
+    }
+
+    fn auth_action(cm: ScalarBytes) -> Value {
+        json!({"account":"thezeosalias", "name":"authenticate",
+            "data":{"action":PlsAuthenticate {
+                cm, contract: Name(0), actions: vec![], burn: 1,
+                proof: AffineProofBytesLE([0; 384]),
+            }}})
+    }
+
+    fn block(actions: Vec<Value>) -> String {
+        json!({"block_num":1, "timestamp":"2024-01-25T00:29:25.000",
+            "transactions":[{"trx":{"transaction":{"actions":actions}}}]}).to_string()
+    }
+
+    #[test]
+    fn all_three_noncanonical_fields_fail_before_mutation() {
+        for (field, action) in [
+            ("spend_output[0].nf", spend_action("spend_output.nf", ScalarBytes([0xff; 32]))),
+            ("spend[0].nf", spend_action("spend.nf", ScalarBytes([0xff; 32]))),
+            ("authenticate.cm", auth_action(ScalarBytes([0xff; 32]))),
+        ] {
+            let mut wallet = test_wallet();
+            let before = wallet.clone();
+            let error = wallet.try_digest_block(&block(vec![action])).unwrap_err();
+            assert!(error.contains(field), "{field}: {error}");
+            assert!(error.contains("block 1 tx 0 action 0"), "{error}");
+            assert_eq!(wallet, before);
+        }
+    }
+
+    #[test]
+    fn valid_canonical_and_replayed_blocks_match_original_digest() {
+        let mut guarded = test_wallet();
+        let mut original = guarded.clone();
+        let valid = block(vec![
+            spend_action("spend_output.nf", ScalarBytes([0; 32])),
+            spend_action("spend.nf", ScalarBytes([0; 32])),
+            auth_action(ScalarBytes([0; 32])),
+        ]);
+        assert_eq!(guarded.try_digest_block(&valid).unwrap(), original.digest_block(&valid));
+        assert_eq!(guarded, original);
+        let saved = guarded.clone();
+        assert_eq!(guarded.try_digest_block(&valid).unwrap(), 0);
+        assert_eq!(guarded, saved);
+    }
+
+    #[test]
+    fn later_bad_field_cannot_partially_apply_earlier_spend() {
+        let mut wallet = test_wallet();
+        let seed = wallet.seed.clone();
+        let fvk = FullViewingKey::from_spending_key(&SpendingKey::from_seed(&seed));
+        let mut rng = OsRng;
+        let note = Note::from_parts(
+            0, wallet.default_address().unwrap(), Name(0),
+            ExtendedAsset::from_string("7.0000 ZEOS@thezeostoken").unwrap(),
+            Rseed::new(&mut rng), [0; 512],
+        );
+        let leaf_idx_arr = (1u64 << crate::constants::MERKLE_TREE_DEPTH) - 1;
+        let note_ex = NoteEx::from_parts(1, 1, 1, leaf_idx_arr, note.clone());
+        let nf = ScalarBytes(note.nullifier(&fvk.nk, note_ex.position()).extract().to_bytes());
+        wallet.unspent_notes.push(note_ex);
+        let before = wallet.clone();
+        let good_spend = spend_action("spend_output.nf", nf);
+        let bad_auth = auth_action(ScalarBytes([0xff; 32]));
+        let bad_block = block(vec![good_spend.clone(), bad_auth]);
+
+        // Positive control: the earlier action really would spend the note.
+        let mut positive = wallet.clone();
+        positive.digest_block(&block(vec![good_spend]));
+        assert!(positive.unspent_notes.is_empty());
+        assert_eq!(positive.spent_notes.len(), 1);
+
+        for _ in 0..2 {
+            assert!(wallet.try_digest_block(&bad_block).unwrap_err().contains("authenticate.cm"));
+            assert_eq!(wallet, before, "failed block must be completely atomic");
+        }
+        assert_eq!(wallet.block_num, before.block_num);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn ffi_rejects_invalid_scalar_without_abort() {
+        use std::ffi::{CStr, CString};
+        let mut wallet = test_wallet();
+        let before = wallet.clone();
+        let bad = CString::new(block(vec![auth_action(ScalarBytes([0xff; 32]))])).unwrap();
+        let mut digest = 123u64;
+        assert!(!crate::wallet_digest_block(&mut wallet, bad.as_ptr(), &mut digest));
+        assert_eq!(digest, 0);
+        assert_eq!(wallet, before);
+        let error_ptr = crate::wallet_last_error();
+        assert!(!error_ptr.is_null());
+        let error = unsafe { CStr::from_ptr(error_ptr) }.to_str().unwrap().to_owned();
+        unsafe { crate::free_string(error_ptr) };
+        assert!(error.contains("wallet_digest_block") && error.contains("authenticate.cm"), "{error}");
+        // Process is still alive, and a valid block remains digestible.
+        assert_eq!(wallet.try_digest_block(&block(vec![])).unwrap(), 0);
+        assert_eq!(wallet.block_num, 1);
     }
 }
 
